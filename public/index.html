@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>plife — Local AI Agent</title>
+
+  <!-- Tailwind (Play CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Markdown + syntax highlighting -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js"></script>
+
+  <link rel="stylesheet" href="/css/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
+</head>
+<body class="h-screen overflow-hidden bg-gray-50 text-gray-900 dark:bg-[#131314] dark:text-gray-100 font-sans">
+  <div id="app" class="flex h-full">
+
+    <!-- ======================= SIDEBAR ======================= -->
+    <aside id="sidebar"
+      class="w-64 shrink-0 h-full flex flex-col bg-white dark:bg-[#1e1f20] border-r border-gray-200 dark:border-white/10 transition-all duration-300">
+
+      <!-- Brand -->
+      <div class="p-3 border-b border-gray-200 dark:border-white/10">
+        <div class="flex items-center gap-2 px-1">
+          <span class="text-lg leading-none">🤖</span>
+          <div class="leading-tight">
+            <div class="text-sm font-semibold tracking-tight">plife</div>
+            <div class="text-[10px] text-gray-400 dark:text-gray-500">Local AI Agent</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Scrollable accordion regions: flex column so the SESSIONS section can
+           flex-and-scroll internally (via .sidebar-section.grow in styles.css)
+           while TOOLS stays anchored at the bottom. -->
+      <div class="flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden px-2 py-2 space-y-1.5">
+
+        <!-- ============ SESSIONS (collapsible, open by default) ============ -->
+        <div class="sidebar-section grow">
+          <button class="section-header open" data-section="sessions" title="Toggle sessions">
+            <svg class="chev" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+            <span>Sessions</span>
+          </button>
+          <div class="section-body open">
+            <div class="section-body-inner">
+              <div class="p-1 pt-0.5">
+                <button id="newChatBtn"
+                  class="w-full flex items-center gap-2.5 rounded-xl px-4 py-2.5 text-sm font-medium
+                         bg-blue-600 hover:bg-blue-700 text-white shadow-sm transition-colors">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+                  </svg>
+                  New chat
+                </button>
+              </div>
+              <nav id="sessionList" class="px-1 pb-1.5 space-y-1"></nav>
+            </div>
+          </div>
+        </div>
+
+        <!-- ============ TOOLS (collapsible) ============ -->
+        <div class="sidebar-section">
+          <button class="section-header" data-section="tools" title="Toggle workspace tools">
+            <svg class="chev" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+            <span>Tools</span>
+          </button>
+          <div class="section-body">
+            <div class="section-body-inner">
+              <button id="fileExplorerBtn" class="sidebar-tool-item" title="Browse the project directory">
+                <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+                </svg>
+                <span>File Explorer</span>
+              </button>
+              <button id="modelsBtn" class="sidebar-tool-item" title="Manage LLM models">
+                <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <rect x="5" y="8" width="14" height="8" rx="1.5" />
+                  <path stroke-linecap="round" d="M9 8V6.5a3 3 0 0 1 6 0V8M9 12h.01M15 12h.01M9 16v1M15 16v1" />
+                </svg>
+                <span>Models</span>
+              </button>
+              <button id="skillsBtn" class="sidebar-tool-item" title="Manage workspace skills">
+                <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M13 2 3 14h7l-1 8 10-12h-7l1-8z" />
+                </svg>
+                <span>Skills</span>
+              </button>
+              <button id="automationsBtn" class="sidebar-tool-item" title="Schedule automated tasks">
+                <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="9" />
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M12 7v5l3 2" />
+                </svg>
+                <span>Automations</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="p-3 border-t border-gray-200 dark:border-white/10">
+        <button id="themeToggle"
+          class="w-full flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-gray-600 dark:text-gray-300
+                 hover:bg-gray-100 dark:hover:bg-white/5 transition-colors">
+          <span id="themeIcon" class="text-base leading-none">🌙</span>
+          <span>Toggle theme</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Sidebar backdrop for mobile -->
+    <div id="sidebarBackdrop" class="fixed inset-0 bg-black/40 z-20 hidden lg:hidden"></div>
+
+    <!-- ======================= MAIN ======================= -->
+    <div class="flex-1 flex flex-col min-w-0">
+
+      <!-- Header -->
+      <header class="h-14 shrink-0 flex items-center justify-between px-4 sm:px-6
+                    bg-white/80 dark:bg-[#131314]/80 backdrop-blur border-b border-gray-200 dark:border-white/10">
+        <div class="flex items-center gap-3">
+          <button id="menuBtn" class="lg:hidden p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-white/5">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+          <h1 class="text-lg font-semibold tracking-tight">plife</h1>
+          <span id="headerSub" class="hidden sm:inline text-sm text-gray-400 dark:text-gray-500">Local AI Agent</span>
+        </div>
+
+        <div class="flex items-center gap-2 sm:gap-3">
+          <!-- model status -->
+          <button id="statusPill" title="llama.cpp connection status"
+            class="flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium border
+                   border-gray-200 dark:border-white/10 bg-gray-50 dark:bg-white/5">
+            <span id="statusDot" class="w-2 h-2 rounded-full bg-gray-400"></span>
+            <span id="statusText" class="text-gray-600 dark:text-gray-300">checking…</span>
+          </button>
+          <button id="settingsBtn" title="Settings"
+            class="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-white/5">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 0 0-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 0 0-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 0 0-1.066-2.573c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 0 0-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 0 0 1.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </button>
+          <button id="profileBtn" title="Profile"
+            class="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 text-white text-xs font-bold
+                   flex items-center justify-center">AI</button>
+        </div>
+      </header>
+
+      <!-- ===== Chat view (message list + prompt) ===== -->
+      <div id="chatView" class="view-panel flex-1 flex flex-col min-h-0 overflow-hidden">
+        <main id="chatContainer" class="flex-1 overflow-y-auto">
+          <!-- empty state -->
+          <div id="emptyState" class="h-full flex flex-col items-center justify-center px-6 text-center">
+            <div class="text-5xl mb-4">🤖</div>
+            <h2 class="text-2xl font-semibold mb-2">How can I help you today?</h2>
+            <p class="text-gray-500 dark:text-gray-400 max-w-md">
+              This is <span class="font-medium">plife</span>, your local AI agent powered by llama.cpp.
+              Everything runs on your machine.
+            </p>
+          </div>
+          <div id="messages" class="max-w-3xl mx-auto px-4 sm:px-6 py-6 space-y-6"></div>
+        </main>
+
+        <!-- Prompt input -->
+        <div class="shrink-0 px-4 sm:px-6 pb-4 pt-2">
+          <div class="max-w-3xl mx-auto">
+            <div class="relative">
+
+              <!-- toolbar: context budget + generation settings (gap + truncation keep
+                   the pill and the settings icon from colliding on narrow rows) -->
+              <div class="flex items-center justify-between gap-x-2 px-0.5 pb-2">
+                <button id="contextBtn" title="Context budget"
+                  class="min-w-0 flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium border
+                         border-gray-200 dark:border-white/10 bg-white dark:bg-white/5
+                         text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-white/10 transition-colors">
+                  <svg class="w-6 h-6 -rotate-90 shrink-0" viewBox="0 0 36 36">
+                    <circle cx="18" cy="18" r="15.5" fill="none" stroke-width="3.5"
+                      class="text-gray-200 dark:text-white/10" />
+                    <circle id="contextRing" cx="18" cy="18" r="15.5" fill="none" stroke-width="3.5"
+                      stroke-linecap="round" stroke-dasharray="97.39" stroke-dashoffset="97.39"
+                      class="text-emerald-500" />
+                  </svg>
+                  <span id="contextSummary" class="tabular-nums truncate">—</span>
+                </button>
+
+                <button id="genSettingsBtn" title="Generation settings"
+                  class="shrink-0 p-2 rounded-full text-gray-400 hover:text-gray-600 dark:hover:text-gray-200
+                         hover:bg-gray-100 dark:hover:bg-white/5">
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                      d="M3 6h18M6 12h12M10 18h4" />
+                    <circle cx="9" cy="6" r="2" fill="#fff" stroke="#fff" />
+                    <path d="M9 6h12M9 18h12M9 6V4" stroke="#fff" opacity="0" />
+                  </svg>
+                </button>
+              </div>
+
+              <!-- context budget popover -->
+              <div id="contextPopover" class="popover hidden absolute bottom-full left-0 mb-2 z-40 w-80 max-w-[calc(100vw-1.5rem)] p-4">
+                <div class="text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1">
+                  Prompt Budget <span class="normal-case font-normal lowercase">· Active Session</span>
+                </div>
+                <div class="flex items-baseline justify-between">
+                  <span class="text-lg font-semibold tabular-nums" id="ctxTokens">0 / 8.0k</span>
+                  <span class="text-xs tabular-nums text-gray-400 dark:text-gray-500" id="ctxPct">0%</span>
+                </div>
+                <div class="mt-2 h-2 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
+                  <div id="ctxBar" class="h-full rounded-full bg-emerald-500" style="width:0%"></div>
+                </div>
+                <div class="mt-3 grid grid-cols-2 gap-2 text-center">
+                  <div class="rounded-lg bg-gray-50 dark:bg-white/5 p-2.5">
+                    <div class="text-sm font-semibold tabular-nums" id="ctxInput">0</div>
+                    <div class="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5">Input tokens</div>
+                  </div>
+                  <div class="rounded-lg bg-gray-50 dark:bg-white/5 p-2.5">
+                    <div class="text-sm font-semibold tabular-nums" id="ctxOutput">0</div>
+                    <div class="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5">Output tokens</div>
+                  </div>
+                </div>
+                <p id="ctxSource" class="text-[11px] text-gray-400 dark:text-gray-600 mt-2">—</p>
+              </div>
+
+              <!-- generation settings popover -->
+              <div id="settingsPopover" class="popover hidden absolute bottom-full right-0 mb-2 z-40 w-80 max-w-[calc(100vw-1.5rem)] p-4">
+                <div class="flex items-center justify-between mb-3">
+                  <span class="text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Generation</span>
+                  <button id="resetSettings" class="text-xs text-blue-600 dark:text-blue-400 hover:underline">Reset</button>
+                </div>
+                <div class="space-y-3">
+                  <div>
+                    <div class="flex justify-between text-sm">
+                      <span class="text-gray-600 dark:text-gray-300">Temperature</span>
+                      <span id="tempVal" class="tabular-nums">0.7</span>
+                    </div>
+                    <input id="tempRange" type="range" min="0" max="2" step="0.05" value="0.7"
+                      class="w-full mt-1 accent-blue-600" />
+                  </div>
+                  <div>
+                    <div class="flex justify-between text-sm">
+                      <span class="text-gray-600 dark:text-gray-300">Top P</span>
+                      <span id="toppVal" class="tabular-nums">0.95</span>
+                    </div>
+                    <input id="toppRange" type="range" min="0" max="1" step="0.01" value="0.95"
+                      class="w-full mt-1 accent-blue-600" />
+                  </div>
+                  <div>
+                    <div class="flex justify-between text-sm">
+                      <span class="text-gray-600 dark:text-gray-300">Max tokens</span>
+                    </div>
+                    <input id="maxTokensInput" type="number" min="1" max="8192" value="2048"
+                      class="w-full mt-1 rounded-lg border border-gray-300 dark:border-white/15 bg-white dark:bg-[#131314]
+                             px-3 py-1.5 text-sm outline-none focus:border-blue-500" />
+                  </div>
+                </div>
+                <p class="text-[11px] text-gray-400 dark:text-gray-600 mt-3">Applied on your next message.</p>
+              </div>
+
+              <!-- input bar -->
+              <div id="inputBar"
+                class="flex items-end gap-2 rounded-2xl border border-gray-300 dark:border-white/15
+                       bg-white dark:bg-[#1e1f20] p-2 shadow-sm focus-within:border-blue-500 dark:focus-within:border-blue-500 transition-colors">
+                <button id="attachBtn" title="Attach / tools"
+                  class="p-2 rounded-xl text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/5 shrink-0">
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                      d="M15.172 7l-6.586 6.586a2 2 0 1 0 2.828 2.828l6.414-6.586a4 4 0 0 0-5.656-5.656l-6.415 6.585a6 6 0 1 0 8.486 8.486L20.5 13" />
+                  </svg>
+                </button>
+                <textarea id="promptInput" rows="1" placeholder="Message plife…"
+                  class="flex-1 resize-none bg-transparent outline-none text-[15px] leading-relaxed
+                         max-h-48 py-1.5 px-1 placeholder-gray-400 dark:placeholder-gray-500"></textarea>
+                <button id="sendBtn" title="Send (Enter)"
+                  class="p-2 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed
+                         text-white transition-colors shrink-0">
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 12h14M13 5l7 7-7 7" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            <p class="text-center text-[11px] text-gray-400 dark:text-gray-600 mt-2">
+              Enter to send · Shift+Enter for new line · plife may make mistakes.
+            </p>
+          </div>
+        </div>
+      </div><!-- /chatView -->
+
+      <!-- ===== File Explorer view ===== -->
+      <main id="fileExplorerView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
+        <!-- top bar: back to chat + breadcrumb -->
+        <div class="fe-topbar shrink-0">
+          <button id="fsBackChat" class="fe-btn-back" title="Back to chat">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            <span>Chat</span>
+          </button>
+          <div id="fsBreadcrumb" class="fe-breadcrumb"></div>
+        </div>
+        <!-- body: directory listing / file view -->
+        <div id="fsList" class="flex-1 min-h-0 overflow-y-auto"></div>
+      </main><!-- /fileExplorerView -->
+
+      <!-- ===== Skills Management view ===== -->
+      <main id="skillsView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
+        <!-- top bar: back to chat + title + refresh -->
+        <div class="fe-topbar shrink-0">
+          <button id="skillsBackChat" class="fe-btn-back" title="Back to chat">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            <span>Chat</span>
+          </button>
+          <div class="fe-view-title">Skills</div>
+          <button id="skillsRefresh" class="fe-btn-back" title="Refresh skills">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M4 4v6h6M20 20v-6h-6M20 9a8 8 0 0 0-14.5-3M4 15a8 8 0 0 0 14.5 3" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+        <div class="px-4 sm:px-6 py-2.5 max-w-3xl mx-auto shrink-0 w-full">
+          <p class="text-[13px] text-gray-500 dark:text-gray-400">
+            Workspace skills live in <code class="sc-code">skills/</code> and can be enabled or
+            disabled. The agent can discover, run, and author new skills here when asked.
+          </p>
+        </div>
+        <!-- body: skill cards -->
+        <div id="skillsList" class="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
+        </div>
+      </main><!-- /skillsView -->
+
+      <!-- ===== Models Management view ===== -->
+      <main id="modelsView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
+        <!-- top bar: back to chat + title + add/refresh -->
+        <div class="fe-topbar shrink-0">
+          <button id="modelsBackChat" class="fe-btn-back" title="Back to chat">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            <span>Chat</span>
+          </button>
+          <div class="fe-view-title">Models</div>
+          <button id="modelsAddBtn" class="fe-action-btn" title="Add a new model">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+            </svg>
+            <span>Add model</span>
+          </button>
+          <button id="modelsRefresh" class="fe-btn-back" title="Refresh models">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M4 4v6h6M20 20v-6h-6M20 9a8 8 0 0 0-14.5-3M4 15a8 8 0 0 0 14.5 3" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+        <div class="px-4 sm:px-6 py-2.5 max-w-3xl mx-auto shrink-0 w-full">
+          <p class="text-[13px] text-gray-500 dark:text-gray-400">
+            Configure one or more LLM endpoints. The <strong>active</strong> model is used for the
+            next chat message. Add a local llama.cpp server (endpoint <code class="sc-code">http://127.0.0.1:PORT</code>)
+            or a remote OpenAI-compatible endpoint with an API key.
+          </p>
+        </div>
+        <!-- body: model cards -->
+        <div id="modelsList" class="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
+        </div>
+      </main><!-- /modelsView -->
+
+      <!-- ===== Model editor modal ===== -->
+      <div id="modelModal" class="modal-backdrop hidden">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modelModalTitle">
+          <div class="modal-head">
+            <h3 id="modelModalTitle" class="modal-title">Add model</h3>
+            <button id="modelModalClose" class="modal-close" title="Close">&times;</button>
+          </div>
+          <form id="modelForm" class="modal-body">
+            <input type="hidden" id="modelId" />
+            <div class="modal-field">
+              <label for="modelName">Name</label>
+              <input id="modelName" required placeholder="e.g. Gemma 2 2B" autocomplete="off" />
+            </div>
+            <div class="modal-field">
+              <label for="modelSlug">ID (unique slug, used to select the model)</label>
+              <input id="modelSlug" required placeholder="e.g. gemma" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off" />
+            </div>
+            <div class="modal-field">
+              <label for="modelEndpoint">Endpoint URL</label>
+              <input id="modelEndpoint" required type="url" placeholder="http://127.0.0.1:8080" autocomplete="off" />
+            </div>
+            <div class="modal-field">
+              <label for="modelModelId">Model identifier</label>
+              <input id="modelModelId" required placeholder="e.g. gemma-2-2b-it-Q4_K_M.gguf" autocomplete="off" />
+            </div>
+            <div class="modal-field">
+              <label for="modelCtx">Context length (tokens)</label>
+              <input id="modelCtx" type="number" min="256" step="256" value="8192" autocomplete="off" />
+            </div>
+            <div class="modal-field">
+              <label for="modelApiKey">API key <span class="field-hint">(optional, for remote endpoints)</span></label>
+              <input id="modelApiKey" type="password" placeholder="sk-… (leave blank to keep existing)" autocomplete="off" />
+            </div>
+            <p id="modelFormError" class="modal-error hidden"></p>
+            <div class="modal-actions">
+              <button type="button" id="modelFormCancel" class="skill-cancel">Cancel</button>
+              <button type="submit" id="modelFormSubmit" class="skill-danger save">Save model</button>
+            </div>
+          </form>
+        </div>
+      </div><!-- /modelModal -->
+
+    <!-- ===== Automations Management view ===== -->
+      <main id="automationsView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
+        <!-- top bar: back to chat + title + add/refresh -->
+        <div class="fe-topbar shrink-0">
+          <button id="automationsBackChat" class="fe-btn-back" title="Back to chat">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            <span>Chat</span>
+          </button>
+          <div class="fe-view-title">Automations</div>
+          <button id="automationsAddBtn" class="fe-action-btn" title="Create a new automated task">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+            </svg>
+            <span>New automation</span>
+          </button>
+          <button id="automationsRefresh" class="fe-btn-back" title="Refresh automations">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M4 4v6h6M20 20v-6h-6M20 9a8 8 0 0 0-14.5-3M4 15a8 8 0 0 0 14.5 3" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+        <div class="px-4 sm:px-6 py-2.5 max-w-3xl mx-auto shrink-0 w-full">
+          <p class="text-[13px] text-gray-500 dark:text-gray-400">
+            Run workspace scripts, skills, or LLM prompt tasks on a schedule. Cron uses
+            5 fields — <code class="sc-code">minute hour day-of-month month day-of-week</code>
+            (e.g. <code class="sc-code">0 9 * * 1-5</code> = weekdays at 09:00). Any rule can
+            also be triggered manually with <strong>Run now</strong>.
+          </p>
+        </div>
+        <!-- body: automation cards -->
+        <div id="automationsList" class="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
+        </div>
+      </main><!-- /automationsView -->
+
+      <!-- ===== Automation editor modal ===== -->
+      <div id="automationModal" class="modal-backdrop hidden">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="automationModalTitle">
+          <div class="modal-head">
+            <h3 id="automationModalTitle" class="modal-title">New automation</h3>
+            <button id="automationModalClose" class="modal-close" title="Close">&times;</button>
+          </div>
+          <form id="automationForm" class="modal-body">
+            <input type="hidden" id="automationId" />
+            <div class="modal-field">
+              <label for="autoName">Name</label>
+              <input id="autoName" required placeholder="e.g. Nightly summary report" autocomplete="off" />
+            </div>
+            <div class="modal-field">
+              <label for="autoDesc">Description <span class="field-hint">(optional)</span></label>
+              <input id="autoDesc" placeholder="What this task does" autocomplete="off" />
+            </div>
+            <div class="modal-field">
+              <label for="autoScheduleType">Schedule</label>
+              <select id="autoScheduleType" class="modal-select">
+                <option value="interval">Every N minutes</option>
+                <option value="cron">Custom cron expression</option>
+              </select>
+            </div>
+            <div class="modal-field" data-sched="interval">
+              <label for="autoIntervalMin">Interval (minutes)</label>
+              <input id="autoIntervalMin" type="number" min="1" step="1" value="30" autocomplete="off" />
+            </div>
+            <div class="modal-field hidden" data-sched="cron">
+              <label for="autoCron">Cron expression</label>
+              <input id="autoCron" placeholder="0 9 * * 1-5" autocomplete="off" />
+              <p class="auto-hint">5 fields: minute hour day-of-month month day-of-week.
+                Examples: <code class="sc-code">*/15 * * * *</code>,
+                <code class="sc-code">0 3 * * *</code>, <code class="sc-code">@daily</code>.</p>
+            </div>
+            <div class="modal-field">
+              <label for="autoActionType">Action</label>
+              <select id="autoActionType" class="modal-select">
+                <option value="script">Run a script (node)</option>
+                <option value="skill">Run a skill</option>
+                <option value="prompt">LLM prompt task</option>
+              </select>
+            </div>
+            <div class="modal-field hidden" data-act="script">
+              <label for="autoScript">Script path <span class="field-hint">(workspace-relative)</span></label>
+              <input id="autoScript" placeholder="scripts/backup.js" autocomplete="off" />
+            </div>
+            <div class="modal-field hidden" data-act="skill">
+              <label for="autoSkill">Skill</label>
+              <select id="autoSkill" class="modal-select"></select>
+            </div>
+            <div class="modal-field hidden" data-act="prompt">
+              <label for="autoPrompt">Prompt task</label>
+              <textarea id="autoPrompt" rows="3" placeholder="Summarize today's log file in a paragraph…"></textarea>
+            </div>
+            <div class="modal-field hidden" data-args="1">
+              <label for="autoArgs">Arguments <span class="field-hint">(optional, space-separated)</span></label>
+              <input id="autoArgs" placeholder="--verbose path/to/file" autocomplete="off" />
+            </div>
+            <div class="modal-field hidden" data-act="prompt">
+              <label for="autoMaxTokens">Max tokens <span class="field-hint">(optional)</span></label>
+              <input id="autoMaxTokens" type="number" min="16" max="8192" step="16" value="512" autocomplete="off" />
+            </div>
+            <p id="automationFormError" class="modal-error hidden"></p>
+            <div class="modal-actions">
+              <button type="button" id="automationFormCancel" class="skill-cancel">Cancel</button>
+              <button type="submit" id="automationFormSubmit" class="skill-danger save">Save automation</button>
+            </div>
+          </form>
+        </div>
+      </div><!-- /automationModal -->
+
+    </div><!-- /main column -->
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

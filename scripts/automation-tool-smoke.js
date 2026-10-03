@@ -1,0 +1,1 @@
+console.log('automation tool smoke ok');

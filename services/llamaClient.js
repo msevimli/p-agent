@@ -1,0 +1,540 @@
+/**
+ * llama.cpp client — owns all communication with the local model server.
+ *
+ * Responsibilities:
+ *  - Health / context-window probing (/health, /props)
+ *  - Building the OpenAI-compatible /v1/chat/completions payload (system
+ *    injection, role filtering, sampler overrides, usage stats)
+ *  - Opening the upstream streaming request
+ *  - Parsing llama.cpp's SSE stream and forwarding it to the browser
+ */
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const config = require('../config');
+const modelManager = require('./modelManager');
+const requestQueue = require('./requestQueue');
+
+// ===== TEMPORARY DIAGNOSTIC — debugging gemma tool-calls rendered as raw text.
+// Dumps (1) the EXACT payload (system prompt + tool definitions) written to the
+// model endpoint, and (2) every raw upstream chunk as received, BEFORE any SSE
+// parsing / tool-call extraction. Append-only log: /tmp/plife-dump.log.
+// REMOVE THIS BLOCK AND ITS CALL SITES AFTER DEBUGGING.
+const DBG_LOG = '/tmp/plife-dump.log';
+let dbgSeq = 0;
+function dbgDump(label, text) {
+  dbgSeq += 1;
+  const block =
+    `\n[${new Date().toISOString()}] ==== DBG#${dbgSeq} ${label} ====\n` +
+    `${text}\n==== END DBG#${dbgSeq} ${label} ====\n`;
+  try { fs.appendFileSync(DBG_LOG, block); } catch { /* ignore */ }
+  console.log(`[DBG] ${label} (#${dbgSeq}, ${String(text).length} chars) -> ${DBG_LOG}`);
+}
+// ===== END TEMPORARY DIAGNOSTIC =====
+
+/** Pick the request module (http|https) for a URL string. */
+function clientFor(url) {
+  return /^https:/i.test(url) ? https : http;
+}
+
+/** Strip trailing slashes from a base URL. */
+function stripSlash(url) {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+/**
+ * OpenAI chat-completions URL for a base endpoint. Tolerates a trailing slash
+ * and bases that already carry `/v1` or the full `/v1/chat/completions` suffix,
+ * so stored endpoints never produce doubled paths (e.g. /v1/v1/chat/completions).
+ */
+function chatCompletionsUrl(base) {
+  const b = stripSlash(base).replace(/\/chat\/completions$/i, '');
+  return /\/v1$/i.test(b) ? `${b}/chat/completions` : `${b}/v1/chat/completions`;
+}
+
+/** Resolve base URL + model id of the currently active model (fallback: legacy config). */
+function activeTarget() {
+  const m = modelManager.getActiveModel();
+  return {
+    baseUrl: stripSlash((m && m.endpoint) ? String(m.endpoint) : config.llamaBaseUrl),
+    model: (m && m.model) ? m.model : config.llamaModel,
+    apiKey: m && m.apiKey ? m.apiKey : (config.llamaApiKey || ''),
+  };
+}
+
+function llamaUrl(p) {
+  return `${activeTarget().baseUrl}${p}`;
+}
+
+/** GET /health — is the llama.cpp server up? */
+function checkLlamaHealth() {
+  return new Promise((resolve) => {
+    const req = clientFor(llamaUrl('/health')).get(llamaUrl('/health'), { timeout: 3000 }, (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(body);
+          resolve({ up: true, status: parsed.status || 'ok', body: parsed });
+        } catch {
+          resolve({ up: true, status: 'ok', body });
+        }
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ up: false, status: 'timeout' });
+    });
+    req.on('error', () => resolve({ up: false, status: 'unreachable' }));
+  });
+}
+
+/** GET /props — read the server's configured context window (n_ctx). */
+function getContextWindow() {
+  return new Promise((resolve) => {
+    const req = clientFor(llamaUrl('/props')).get(llamaUrl('/props'), { timeout: 3000 }, (res) => {
+      let b = '';
+      res.on('data', (c) => (b += c));
+      res.on('end', () => {
+        try {
+          const p = JSON.parse(b);
+          const n =
+            p?.default_generation_settings?.params?.n_ctx ??
+            p?.default_generation_settings?.n_ctx ??
+            p?.params?.n_ctx;
+          resolve(Number.isFinite(n) ? n : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.on('error', () => resolve(null));
+  });
+}
+
+/**
+ * Normalize the raw messages array into the OpenAI-compatible shape:
+ * a system prompt always leads, then alternating user/assistant history.
+ * No manual prompt concatenation.
+ */
+function buildChatMessages(rawMessages, systemPrompt) {
+  const out = [];
+  const list = Array.isArray(rawMessages) ? rawMessages : [];
+  if (!list.some((m) => m && m.role === 'system')) {
+    out.push({ role: 'system', content: systemPrompt || config.llamaSystemPrompt });
+  }
+  for (const m of list) {
+    if (m && typeof m.content === 'string') {
+      const role = m.role === 'assistant' ? 'assistant' : m.role === 'system' ? 'system' : 'user';
+      out.push({ role, content: m.content });
+    }
+  }
+  return out;
+}
+
+/**
+ * Build the full /v1/chat/completions payload. `generation` holds optional
+ * per-request overrides from the frontend settings control; unset fields fall
+ * back to configured defaults. `opts.system` overrides the injected system
+ * prompt; `opts.tools` appends an OpenAI `tools` array for native tool calls.
+ */
+function buildChatPayload(rawMessages, generation, opts) {
+  const gen = generation && typeof generation === 'object' ? generation : {};
+  const o = opts && typeof opts === 'object' ? opts : {};
+  const num = (v, fb) => (typeof v === 'number' && Number.isFinite(v) ? v : fb);
+  const payload = {
+    model: activeTarget().model,
+    messages: buildChatMessages(rawMessages, o.system),
+    temperature: num(gen.temperature, config.llamaTemperature),
+    top_p: num(gen.top_p, config.llamaTopP),
+    repeat_penalty: num(gen.repeat_penalty, config.llamaRepeatPenalty), // native loop-breaker
+    repeat_last_n: num(gen.repeat_last_n, config.llamaRepeatLastN),
+    max_tokens: num(gen.max_tokens, config.llamaMaxTokens), // bound so SSE ends at [DONE]
+    // Ask llama.cpp to report real prompt/output token counts on the last chunk.
+    stream_options: { include_usage: true },
+    stream: true,
+  };
+  if (Array.isArray(o.tools) && o.tools.length) payload.tools = o.tools;
+  return payload;
+}
+
+/**
+ * Open the upstream POST to /v1/chat/completions. The caller supplies the
+ * upstream-response handler (typically parseSseToClient).
+ */
+function streamCompletions(payload, onResponse) {
+  const target = activeTarget();
+  const headers = { 'Content-Type': 'application/json' };
+  if (target.apiKey) headers.Authorization = `Bearer ${target.apiKey}`;
+  return clientFor(target.baseUrl).request(
+    chatCompletionsUrl(target.baseUrl),
+    { method: 'POST', headers },
+    onResponse
+  );
+}
+
+/**
+ * Perform ONE completion through the FIFO request queue: strict serialization
+ * so a single-slot llama.cpp never receives concurrent streaming requests
+ * (which cause empty streams / socket errors). Transient failures are retried
+ * by the queue itself (see requestQueue). The returned promise carries a
+ * non-enumerable `position` (FIFO rank at enqueue; 1 = next/executing) so the
+ * caller can tell the user they're queued.
+ */
+function complete(opts) {
+  const q = requestQueue.enqueue(() => completeInSlot(opts), { label: 'llm' });
+  try {
+    Object.defineProperty(q.promise, 'position', { value: q.position, enumerable: true });
+  } catch { /* non-configurable promise — position stays internal */ }
+  return q.promise;
+}
+
+/** Raw completion attempt with one intra-slot retry (used by the queue). */
+function completeInSlot(opts) {
+  const attempts = Number.isInteger(opts && opts.attempts) ? opts.attempts : 2;
+  return new Promise((resolve, reject) => {
+    const tryOnce = (left) => {
+      doComplete(opts).then(resolve).catch((err) => {
+        const msg = String((err && err.message) || err || '');
+        const transient = /hang up|ECONNRESET|EPIPE|ETIMEDOUT|unreachable|empty stream/i.test(msg);
+        if (transient && left > 0) {
+          setTimeout(() => tryOnce(left - 1), 350);
+        } else {
+          reject(err);
+        }
+      });
+    };
+    tryOnce(attempts);
+  });
+}
+
+/**
+ * GET /slots — is this llama-server actively working?
+ * Returns { status: 'busy' } when any slot is processing OR has a task
+ * assigned (id_task/task_id > 0 — covers jobs ingested but still waiting for
+ * compute), { status: 'idle' } when all slots are free, and
+ * { status: 'unknown' } when the endpoint is missing/unreachable/unparseable
+ * (older builds), so callers can fall back to a fixed grace.
+ */
+function pollSlotStatus() {
+  return new Promise((resolve) => {
+    let url;
+    try {
+      url = `${activeTarget().baseUrl}/slots`;
+    } catch { return resolve({ status: 'unknown' }); }
+    const req = clientFor(url).get(url, { timeout: 4000 }, (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => {
+        try {
+          const slots = JSON.parse(body);
+          if (!Array.isArray(slots)) return resolve({ status: 'unknown' });
+          const busy = slots.some(
+            (s) => s && (s.is_processing === true || Number(s.id_task) > 0 || Number(s.task_id) > 0)
+          );
+          resolve({ status: busy ? 'busy' : 'idle' });
+        } catch { resolve({ status: 'unknown' }); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve({ status: 'unknown' }); });
+    req.on('error', () => resolve({ status: 'unknown' }));
+  });
+}
+
+/**
+ * Slot-aware liveness supervisor for a silent upstream stream — replaces a
+ * fixed silent-timeout with dynamic waiting based on llama-server's own
+ * progress (GET /slots):
+ *  - Before the first byte: the server may not have ingested the request yet
+ *    and /slots is ambiguous, so a fixed grace applies — but it self-extends
+ *    while any slot reports busy (slow time-to-first-token on big prompts),
+ *    so a working server is never cut off by the clock.
+ *  - After the first byte: silence is tolerated indefinitely while any slot
+ *    is busy (the generation is progressing server-side even if the socket
+ *    stays quiet). Aborts only when every slot reads idle on two consecutive
+ *    polls (the double-check avoids killing a stream during the final-flush
+ *    race), or when /slots is unavailable and silence exceeds the grace.
+ *
+ * Returns { noteActivity, stop }. Call noteActivity() on every upstream byte;
+ * stop() on resolve/reject paths. onAbort(reason) fires at most once.
+ */
+function createSlotSupervisor(onAbort) {
+  const graceMs = Number(config.llamaStallTimeoutMs) || 120000;
+  const pollMs = Number(config.llamaSlotPollMs) || 4000;
+  const checkAfterMs = Number(config.llamaSlotCheckSilenceMs) || 15000;
+  let firstByte = false;
+  let lastDataAt = Date.now();
+  let idleStreak = 0;
+  let stopped = false;
+  let timer = null;
+  let interval = null;
+
+  const stop = () => { stopped = true; clearTimeout(timer); clearInterval(interval); timer = interval = null; };
+  const abort = (msg) => { if (stopped) return; stop(); onAbort(msg); };
+
+  // Phase A: fixed grace until the first byte; re-arms (instead of aborting)
+  // while a slot is busy, so slow prompt ingestion still waits dynamically.
+  const armPhaseA = () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      if (stopped || firstByte) return;
+      const st = await pollSlotStatus();
+      if (stopped || firstByte) return;
+      if (st.status === 'busy') return armPhaseA(); // server working — keep waiting
+      abort(`llama.cpp went silent: no data for ${Math.round(graceMs / 1000)}s while waiting for the first chunk`);
+    }, graceMs);
+  };
+  armPhaseA();
+
+  interval = setInterval(async () => {
+    if (stopped) return;
+    const silentMs = Date.now() - lastDataAt;
+    if (!firstByte || silentMs < checkAfterMs) return;
+    const st = await pollSlotStatus();
+    if (stopped) return;
+    if (st.status === 'busy') { idleStreak = 0; return; } // working — wait dynamically
+    if (st.status === 'idle') {
+      idleStreak += 1;
+      if (idleStreak >= 2) {
+        abort('llama.cpp slot went idle without a result while the stream was silent');
+      }
+      return;
+    }
+    // /slots unavailable (older builds): fixed backstop from the last byte.
+    if (silentMs >= graceMs) {
+      abort(`llama.cpp went silent: no data for ${Math.round(graceMs / 1000)}s while generating`);
+    }
+  }, pollMs);
+
+  return {
+    noteActivity: () => { lastDataAt = Date.now(); idleStreak = 0; if (!firstByte) firstByte = true; },
+    stop,
+  };
+}
+
+/**
+ * Perform ONE completion: consume the full SSE stream server-side and resolve
+ * with { content, toolCalls, usage }.
+ *  - content:      accumulated text deltas
+ *  - toolCalls:    native tool_calls accumulated across chunks, as
+ *                  [{ index, id, name, arguments }] (arguments possibly partial)
+ *  - usage:        the usage object from the final chunk (may be null)
+ * Optional onDelta/onUsage callbacks stream tokens/usage as they arrive.
+ * Rejects with an Error on non-200 upstream responses or network failure.
+ */
+function doComplete(opts) {
+  return new Promise((resolve, reject) => {
+    const { payload, onDelta, onUsage } = opts || {};
+    const acc = { content: '', toolCalls: new Map(), usage: null, finishReason: null };
+
+    // Slot-aware liveness supervisor: replaces a fixed silent-timeout with
+    // dynamic waiting driven by llama-server's own /slots state (see
+    // createSlotSupervisor). On abort the upstream is destroyed; the error
+    // wording deliberately avoids the queue's transient keywords (hang up /
+    // timeout / stream): a dead-slot stream is NOT recoverable and must not
+    // be auto-retried (a retry would regenerate the whole output).
+    const supervisor = createSlotSupervisor((msg) => {
+      upstream.destroy();
+      reject(new Error(msg));
+    });
+
+    const upstream = streamCompletions(payload, (upRes) => {
+      if (upRes.statusCode !== 200) {
+        let body = '';
+        upRes.on('data', (c) => (body += c));
+        upRes.on('end', () =>
+          reject(new Error(`llama.cpp ${upRes.statusCode}: ${body.slice(0, 300)}`))
+        );
+        return;
+      }
+      let buffer = '';
+      upRes.on('data', (chunk) => {
+        supervisor.noteActivity(); // any byte is life — reset the liveness window
+        // TEMP DIAGNOSTIC: raw upstream bytes verbatim, before SSE split / JSON
+        // parse / tool-call extraction. Concatenating all RAW_CHUNKs in order
+        // yields the exact response string the model sent.
+        dbgDump('RAW_CHUNK', chunk.toString());
+        buffer += chunk.toString();
+        let sep;
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+          const event = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          for (const line of event.split('\n')) {
+            const t = line.trim();
+            if (!t.startsWith('data:')) continue;
+            const d = t.slice(5).trim();
+            if (d === '[DONE]') continue; // resolve on upstream 'end'
+            try {
+              const j = JSON.parse(d);
+              const delta = j.choices && j.choices[0] ? j.choices[0].delta || {} : {};
+              if (typeof delta.content === 'string' && delta.content) {
+                acc.content += delta.content;
+                if (onDelta) onDelta(delta.content);
+              }
+              if (Array.isArray(delta.tool_calls)) {
+                for (const tc of delta.tool_calls) {
+                  const idx = tc.index || 0;
+                  const e = acc.toolCalls.get(idx) || { id: '', name: '', arguments: '' };
+                  if (tc.id) e.id += tc.id;
+                  if (tc.function) {
+                    if (tc.function.name) e.name += tc.function.name;
+                    if (typeof tc.function.arguments === 'string') e.arguments += tc.function.arguments;
+                  }
+                  acc.toolCalls.set(idx, e);
+                }
+              }
+              if (j.usage) {
+                acc.usage = j.usage;
+                if (onUsage) onUsage(j.usage);
+              }
+              // finish_reason arrives on the choice (not the delta), usually
+              // on the last chunk — "length" means max_tokens cut the output
+              // and the caller may want to continue generation.
+              if (j.choices && j.choices[0] && j.choices[0].finish_reason) {
+                acc.finishReason = j.choices[0].finish_reason;
+              }
+            } catch { /* partial chunk — ignore */ }
+          }
+        }
+      });
+      upRes.on('end', () => {
+        supervisor.stop();
+        if (acc.content.trim() === '' && acc.toolCalls.size === 0) {
+          // 200 OK but zero usable chunks (immediate [DONE], empty/whitespace
+          // body, or a usage-only final chunk). Reject so complete() retries
+          // and the chat route surfaces a real error instead of a silent
+          // empty answer.
+          reject(new Error('llama.cpp returned an empty stream (no content or tool calls)'));
+          return;
+        }
+        resolve({
+          content: acc.content,
+          usage: acc.usage,
+          finishReason: acc.finishReason,
+          toolCalls: [...acc.toolCalls.entries()]
+            .sort((a, b) => a[0] - b[0])
+            .map(([index, e]) => ({ index, id: e.id, name: e.name, arguments: e.arguments })),
+        });
+      });
+      upRes.on('error', (e) => {
+        supervisor.stop();
+        reject(new Error(`llama.cpp stream error: ${e.message}`));
+      });
+    });
+    upstream.on('error', (e) => {
+      supervisor.stop();
+      reject(new Error(`llama.cpp unreachable: ${e.message}`));
+    });
+    // TEMP DIAGNOSTIC: exact payload as sent (messages[0].content = full system
+    // prompt incl. embedded tool schema; payload.tools = OpenAI tool defs).
+    dbgDump(
+      `PAYLOAD  url=${chatCompletionsUrl(activeTarget().baseUrl)} model=${activeTarget().model}`,
+      JSON.stringify(payload, null, 2)
+    );
+    upstream.write(JSON.stringify(payload));
+    upstream.end();
+  });
+}
+
+/**
+ * Returns an upstream-response handler that parses llama.cpp's SSE stream and
+ * forwards each complete `data:` event (standard OpenAI chunk format) to the
+ * browser, terminating at `data: [DONE]`. Respects client disconnect (aborts
+ * the upstream read).
+ */
+function parseSseToClient(res, stream) {
+  return (upRes) => {
+    if (upRes.statusCode !== 200) {
+      let body = '';
+      upRes.on('data', (c) => (body += c));
+      upRes.on('end', () => {
+        try {
+          res.status(upRes.statusCode).json(JSON.parse(body));
+        } catch {
+          res.status(upRes.statusCode).send(body || `llama.cpp error ${upRes.statusCode}`);
+        }
+      });
+      return;
+    }
+
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    let buffer = '';
+    let finished = false;
+    let errored = false;
+
+    // Slot-aware liveness supervisor (mirrors doComplete): while the upstream
+    // is silent, llama-server's /slots state decides liveness; a dead stream
+    // ends the SSE gracefully (status event + [DONE]) instead of leaving the
+    // browser hanging forever.
+    const supervisor = createSlotSupervisor((msg) => {
+      if (finished || errored) return;
+      finished = true;
+      upRes.destroy();
+      try {
+        res.write(`data: ${JSON.stringify({ type: 'status', message: `⚠ ${msg} — ending stream.` })}\n\n`);
+        res.write('data: [DONE]\n\n');
+      } catch { /* ignore */ }
+      res.end();
+    });
+
+    upRes.on('data', (chunk) => {
+      if (!stream || finished) return;
+      supervisor.noteActivity(); // any byte is life
+      buffer += chunk.toString();
+      let sep;
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const event = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        if (!event.trim()) continue;
+        const dataLines = event
+          .split('\n')
+          .filter((l) => l.startsWith('data:'))
+          .map((l) => l.slice(5).trim());
+        for (const data of dataLines) {
+          if (data === '[DONE]') {
+            finished = true;
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          }
+          if (data) res.write(`data: ${data}\n\n`);
+        }
+      }
+    });
+
+    const close = () => {
+      if (!finished && !errored) {
+        finished = true;
+        res.end();
+      }
+    };
+    upRes.on('end', () => { supervisor.stop(); close(); });
+    upRes.on('error', () => {
+      supervisor.stop();
+      errored = true;
+      close();
+    });
+    res.on('close', () => upRes.destroy());
+  };
+}
+
+module.exports = {
+  llamaUrl,
+  checkLlamaHealth,
+  getContextWindow,
+  buildChatMessages,
+  buildChatPayload,
+  chatCompletionsUrl,
+  streamCompletions,
+  complete,
+  parseSseToClient,
+};
