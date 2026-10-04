@@ -1722,58 +1722,51 @@
       return;
     }
     for (const f of files) {
-      const card = document.createElement('div');
-      card.className = 'model-card lib-card';
-      card.setAttribute('data-lib', f.id);
-      card.innerHTML = `
-        <div class="lib-row">
-          <span class="lib-icon">${fileIcon(f)}</span>
-          <div class="model-main">
-            <div class="model-name lib-name">${escapeHtml(f.name)}</div>
-            ${f.description ? `<div class="model-desc">${escapeHtml(f.description)}</div>` : ''}
-            <div class="model-grid">
-              <div class="model-cell">
-                <span class="model-cell-label">size</span>
-                <span class="model-cell-value">${formatBytes(f.size)}</span>
-              </div>
-              <div class="model-cell">
-                <span class="model-cell-label">type</span>
-                <span class="model-cell-value" title="${escapeHtml(f.mime)}">${escapeHtml(f.mime || 'unknown')}</span>
-              </div>
-              <div class="model-cell">
-                <span class="model-cell-label">added</span>
-                <span class="model-cell-value">${fmtWhen(f.updatedAt)} ago</span>
-              </div>
-            </div>
-          </div>
-          <div class="lib-actions">
-            <button class="lib-view" data-view="${escapeHtml(f.id)}" title="Preview ${escapeHtml(f.name)}">View</button>
-            <button class="lib-attach" data-attach="${escapeHtml(f.id)}" title="Attach to next chat message">Attach</button>
-            <a class="lib-dl" href="/api/library/${encodeURIComponent(f.id)}/content" download="${escapeHtml(f.name)}" title="Download ${escapeHtml(f.name)}">Download</a>
-            <span class="auto-del-wrap">
-              <button class="auto-del lib-del" data-del="${escapeHtml(f.id)}" title="Delete ${escapeHtml(f.name)}">${TRASH_ICON}</button>
-              <span class="auto-confirm hidden" data-confirm>
-                <button class="skill-danger" data-confirm-del="${escapeHtml(f.id)}">Delete</button>
-                <button class="skill-cancel" data-cancel-del>Cancel</button>
-              </span>
+      const tile = document.createElement('div');
+      tile.className = 'lib-tile';
+      tile.setAttribute('data-lib', f.id);
+      tile.innerHTML = `
+        <div class="lib-tile-top">
+          <span class="lib-tile-icon" title="${escapeHtml(f.mime)}">${fileIcon(f)}</span>
+        </div>
+        <div class="lib-tile-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</div>
+        ${f.description ? `<div class="lib-tile-desc" title="${escapeHtml(f.description)}">${escapeHtml(f.description)}</div>` : ''}
+        <div class="lib-tile-meta">
+          <span class="lib-tile-type">${escapeHtml((f.mime || 'file').split('/').pop() || 'file')}</span>
+          <span class="lib-tile-size">${formatBytes(f.size)}</span>
+        </div>
+        <div class="lib-tile-actions">
+          <button class="lib-view" data-view="${escapeHtml(f.id)}" title="Preview ${escapeHtml(f.name)}">View</button>
+          <button class="lib-attach" data-attach="${escapeHtml(f.id)}" title="Attach to next chat message">Attach</button>
+          <a class="lib-dl" href="/api/library/${encodeURIComponent(f.id)}/content" download="${escapeHtml(f.name)}" title="Download ${escapeHtml(f.name)}" aria-label="Download ${escapeHtml(f.name)}">⬇</a>
+          <span class="auto-del-wrap">
+            <button class="auto-del lib-del" data-del="${escapeHtml(f.id)}" title="Delete ${escapeHtml(f.name)}">${TRASH_ICON}</button>
+            <span class="auto-confirm hidden" data-confirm>
+              <button class="skill-danger" data-confirm-del="${escapeHtml(f.id)}">Delete</button>
+              <button class="skill-cancel" data-cancel-del>Cancel</button>
             </span>
-          </div>
+          </span>
         </div>`;
-      card.querySelector('[data-view]').addEventListener('click', () => openLibView(f));
-      card.querySelector('[data-attach]').addEventListener('click', () => attachFile(f));
-      const delBtn = card.querySelector('[data-del]');
-      const confirmEl = card.querySelector('[data-confirm]');
-      delBtn.addEventListener('click', () => {
+      tile.querySelector('[data-view]').addEventListener('click', () => openLibView(f));
+      tile.querySelector('[data-attach]').addEventListener('click', () => attachFile(f));
+      const delBtn = tile.querySelector('[data-del]');
+      const confirmEl = tile.querySelector('[data-confirm]');
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
         const show = confirmEl.classList.contains('hidden');
         confirmEl.classList.toggle('hidden', !show);
         delBtn.classList.toggle('danger', show);
       });
-      card.querySelector('[data-cancel-del]').addEventListener('click', () => {
+      tile.querySelector('[data-cancel-del]').addEventListener('click', (e) => {
+        e.stopPropagation();
         confirmEl.classList.add('hidden');
         delBtn.classList.remove('danger');
       });
-      card.querySelector('[data-confirm-del]').addEventListener('click', () => deleteLibraryFile(f.id, card));
-      libraryListEl.appendChild(card);
+      tile.querySelector('[data-confirm-del]').addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteLibraryFile(f.id, tile);
+      });
+      libraryListEl.appendChild(tile);
     }
   }
 
