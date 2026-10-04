@@ -47,11 +47,12 @@ const CONTINUE_STATUS = 'Output hit the token cap — continuing generation.';
 // Fed back when the model answers an automation-creation request with
 // explanations instead of a create_automation call — forces the tool call.
 const FORCE_TOOL_MSG =
-  'You were asked to CREATE an automation, but you answered with instructions instead ' +
-  'of calling the tool. Reply with EXACTLY one JSON object now — no other text: ' +
+  'You must finish the automation creation by calling the create_automation tool now. ' +
+  'A previous create_automation call may already have succeeded; if so, call list_automations ' +
+  'to show the result and stop. Otherwise reply with EXACTLY one JSON object, no other text: ' +
   '{"tool": "create_automation", "args": {"name": "...", "schedule_type": "interval" or "cron", ' +
   '"interval_minutes": N or "cron": "5-field expression", "action_type": "script"|"skill"|"prompt", ' +
-  '"script" / "skill" / "prompt": "..."}}. Use the schedule and action the user asked for.';
+  '"script" / "skill" / "prompt": "..."}} — use the schedule and action the user asked for.';
 
 function openSse(res, queuePosition) {
   res.status(200);
@@ -107,6 +108,9 @@ function emitTextChunks(res, text, lost) {
 }
 
 router.post('/', async (req, res) => {
+  // Fresh per-request tool-call ledger (deduplication scope).
+  toolLoop.resetSeenCalls();
+
   const { messages, stream = true } = req.body || {};
   const gen = req.body && typeof req.body.generation === 'object' ? req.body.generation : {};
   if (!Array.isArray(messages) || messages.length === 0) {
@@ -265,7 +269,9 @@ router.post('/', async (req, res) => {
               (automationRetries > 0 ? toolLoop.inferAutomationFromUser(firstUserText) : null);
             if (payload && createAutomationTool) {
               automationSettled = true;
-              const result = await createAutomationTool.execute(payload);
+              // Route through toolLoop.executeTool so the strict schema
+              // validation + dedup ledger apply to intercepted calls too.
+              const result = await toolLoop.executeTool('create_automation', payload);
               agentMessages.push({ role: 'assistant', content: acc.content });
               agentMessages.push({
                 role: 'user',
@@ -295,7 +301,49 @@ router.post('/', async (req, res) => {
               );
               continue;
             }
-            safeWrite(res, statusChunk('⚠ The model did not produce a create_automation call — automation NOT created.'), lost);
+            // Forced rounds exhausted and the model still cannot emit the
+            // call: the server takes over and creates the automation from the
+            // user's own wording (grounded inference — nothing invented).
+            // The follow-up round (result fed back below) lets the model
+            // confirm, so the user sees the created automation verified.
+            let autoResult = null;
+            try {
+              autoResult = toolLoop.inferAutomationFromUser(firstUserText);
+            } catch { autoResult = null; }
+            if (autoResult && createAutomationTool) {
+              automationSettled = true; // done — the follow-up confirms
+              try {
+                const result = await toolLoop.executeTool('create_automation', autoResult);
+                const created = result && result.ok;
+                safeWrite(
+                  res,
+                  statusChunk(created
+                    ? '⚠ Model output intercepted after retries — automation created directly from your wording.'
+                    : `⚠ Intercepted output; direct creation failed: ${(result && result.error) || 'unknown error'}`),
+                  lost
+                );
+                agentMessages.push({ role: 'assistant', content: JSON.stringify({ tool: 'create_automation', args: autoResult }) });
+                agentMessages.push({
+                  role: 'user',
+                  content:
+                    '[Tool result] create_automation: ' + JSON.stringify(result) +
+                    (created
+                      ? '\nThe automation was created by the server. Reply with a one-line confirmation naming it.'
+                      : '\nThe creation failed — reply with a short error summary.'),
+                });
+                continue;
+              } catch (e) {
+                safeWrite(res, statusChunk('⚠ Direct automation creation crashed: ' + String((e && e.message) || e)), lost);
+              }
+            } else {
+              safeWrite(res, statusChunk('⚠ The model did not produce a create_automation call and the schedule/action could not be inferred — automation NOT created.'), lost);
+            }
+            // Last resort: free the queue slot and end the loop with a
+            // truthful summary instead of burning the remaining iterations.
+            safeWrite(res, statusChunk(`Automation request aborted after ${automationRetries} forced round(s).`), lost);
+            finalText += 'I could not complete the automation creation this time. Please try again or check the request wording.';
+            answered = true;
+            break;
           }
 
           // No tool call → genuine final answer; stop the loop.
@@ -316,7 +364,35 @@ router.post('/', async (req, res) => {
         const results = [];
         for (const c of calls) {
           safeWrite(res, statusChunk('\u2699 ' + toolLabel(c.name, c.args)), lost);
-          results.push({ name: c.name, result: await toolLoop.executeTool(c.name, c.args) });
+          // The model legitimately performed the creation through the normal
+          // tool path — mark the automation request settled so the final
+          // explanation is NOT mistaken for an evasion and force-fed a
+          // corrective round (the pre-fix behavior burned the iteration
+          // budget and reported "max tool steps" for a task that had
+          // actually succeeded).
+          if (c.name === 'create_automation') automationSettled = true;
+          let result;
+          try {
+            result = await toolLoop.executeTool(c.name, c.args);
+          } catch (e) {
+            // A throwing tool must never kill the ReAct loop or strand the
+            // SSE stream mid-generation: convert to a result object so the
+            // error is fed back to the model like any other outcome.
+            result = { ok: false, error: `tool execution crashed: ${String((e && e.message) || e)}` };
+          }
+          // Strict pre-execution validation (toolLoop.validateArgs) rejects
+          // calls with missing/placeholder arguments BEFORE any side effect —
+          // surface the corrective message live so the UI shows why the call
+          // did not run; the result itself is fed back to the model, which
+          // retries with complete arguments.
+          if (result && result.invalidArgs) {
+            safeWrite(
+              res,
+              statusChunk('⚠ Tool call rejected: ' + ((result.error || 'invalid arguments').slice(0, 220))),
+              lost
+            );
+          }
+          results.push({ name: c.name, result });
         }
 
         agentMessages.push({

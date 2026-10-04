@@ -15,14 +15,14 @@ const config = require('../config');
 const modelManager = require('./modelManager');
 const requestQueue = require('./requestQueue');
 
-// ===== TEMPORARY DIAGNOSTIC — debugging gemma tool-calls rendered as raw text.
-// Dumps (1) the EXACT payload (system prompt + tool definitions) written to the
-// model endpoint, and (2) every raw upstream chunk as received, BEFORE any SSE
-// parsing / tool-call extraction. Append-only log: /tmp/plife-dump.log.
-// REMOVE THIS BLOCK AND ITS CALL SITES AFTER DEBUGGING.
+// ===== DIAGNOSTIC (opt-in: PLIFE_DEBUG_DUMP=1) — dumps (1) the EXACT payload
+// (system prompt + tool definitions) written to the model endpoint, and (2)
+// every raw upstream chunk as received, BEFORE any SSE parsing / tool-call
+// extraction. Append-only log: /tmp/plife-dump.log.
 const DBG_LOG = '/tmp/plife-dump.log';
 let dbgSeq = 0;
 function dbgDump(label, text) {
+  if (!config.debugDump) return;
   dbgSeq += 1;
   const block =
     `\n[${new Date().toISOString()}] ==== DBG#${dbgSeq} ${label} ====\n` +
@@ -30,7 +30,7 @@ function dbgDump(label, text) {
   try { fs.appendFileSync(DBG_LOG, block); } catch { /* ignore */ }
   console.log(`[DBG] ${label} (#${dbgSeq}, ${String(text).length} chars) -> ${DBG_LOG}`);
 }
-// ===== END TEMPORARY DIAGNOSTIC =====
+// ===== END DIAGNOSTIC =====
 
 /** Pick the request module (http|https) for a URL string. */
 function clientFor(url) {
@@ -317,11 +317,42 @@ function createSlotSupervisor(onAbort) {
 }
 
 /**
+ * Join two tool-call argument fragments, splitting on JSON token boundaries
+ * instead of raw concatenation. llama.cpp's streaming tokenizer (and some
+ * OpenAI-compatible remotes) splits identifiers mid-token, e.g. stream
+ * `"scripts/c`, `urrent`, `-time.js"` — naive concatenation would miss the
+ * leading `\"`, corrupt the JSON, and make `safeParseArgs` silently produce
+ * `{}` (which then runs tools with empty args, e.g. a write_file with no
+ * content). Re-joining the fragments and re-balancing the quote re-creates
+ * the exact JSON the model emitted.
+ */
+function joinToolCallArgs(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const joined = a + b;
+  const even = (s) => ((s.match(/"/g) || []).length % 2 === 0);
+  if (even(joined)) return joined; // balanced — plain concatenation is fine
+  // Unbalanced quotes: the join point sits inside a JSON string boundary and
+  // one quote char was doubled ('"x"' + '",' -> ...x"",...) or swallowed.
+  // Try the plausible re-joins and take the first that re-balances:
+  //  - drop both boundary quotes, or
+  //  - drop both and re-insert exactly one (keeps the quoted value intact).
+  // Whichever candidate balances the JSON is the one the model intended.
+  const head = a.replace(/\\?"$/, '');
+  const tail = b.replace(/^\\?"/, '');
+  for (const cand of [joined, head + tail, head + '"' + tail]) {
+    if (even(cand)) return cand;
+  }
+  return joined; // nothing better — leave as-is, extractor validation catches it
+}
+
+/**
  * Perform ONE completion: consume the full SSE stream server-side and resolve
  * with { content, toolCalls, usage }.
  *  - content:      accumulated text deltas
  *  - toolCalls:    native tool_calls accumulated across chunks, as
  *                  [{ index, id, name, arguments }] (arguments possibly partial)
+ *                  — quoted fragments are de-tokenized via joinToolCallArgs
  *  - usage:        the usage object from the final chunk (may be null)
  * Optional onDelta/onUsage callbacks stream tokens/usage as they arrive.
  * Rejects with an Error on non-200 upstream responses or network failure.
@@ -381,8 +412,15 @@ function doComplete(opts) {
                   const e = acc.toolCalls.get(idx) || { id: '', name: '', arguments: '' };
                   if (tc.id) e.id += tc.id;
                   if (tc.function) {
+                    // Names are single tokens even when split across chunks
+                    // ("write_fi" + "le"), so plain concatenation is safe.
                     if (tc.function.name) e.name += tc.function.name;
-                    if (typeof tc.function.arguments === 'string') e.arguments += tc.function.arguments;
+                    // Arguments stream as JSON fragments that may split
+                    // mid-token — re-join on JSON token boundaries so the
+                    // final string parses (see joinToolCallArgs).
+                    if (typeof tc.function.arguments === 'string') {
+                      e.arguments = joinToolCallArgs(e.arguments, tc.function.arguments);
+                    }
                   }
                   acc.toolCalls.set(idx, e);
                 }
@@ -536,5 +574,6 @@ module.exports = {
   chatCompletionsUrl,
   streamCompletions,
   complete,
+  joinToolCallArgs,
   parseSseToClient,
 };

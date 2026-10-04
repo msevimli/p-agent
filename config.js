@@ -55,6 +55,10 @@ module.exports = {
   // runaway model can't loop forever.
   toolCallingEnabled: process.env.TOOL_CALLING !== 'false',
   toolMaxIterations: Number(process.env.TOOL_MAX_ITERATIONS || 10),
+  // Diagnostic: when true, llamaClient appends the exact upstream payload and
+  // raw SSE chunks to /tmp/plife-dump.log (was unconditional while debugging
+  // tool-call formatting; off by default — it writes a lot).
+  debugDump: process.env.PLIFE_DEBUG_DUMP === '1',
 
   // --- automations ------------------------------------------------------------
   // Per-run timeout (ms) for scheduled/on-demand automation actions

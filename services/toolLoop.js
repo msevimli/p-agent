@@ -23,12 +23,235 @@ function getTool(name) {
   return registry.find((t) => t.name === name) || null;
 }
 
-/** Execute one tool by name. Always resolves (never rejects) to a result. */
+// ---------------------------------------------------------------------------
+// Tool-call deduplication
+// ---------------------------------------------------------------------------
+//
+// Small models (and chunked-continuation loops) frequently re-issue the same
+// call — e.g. write_file to the same path with identical content — after the
+// result was already fed back, because the tool result is compressed to a
+// short summary in history. Re-running such calls is wasteful at best and
+// harmful at worst (duplicate automations, append-amplified log files,
+// clobbered state). We therefore track every executed call per session and
+// refuse exact repeats: the FIRST execution wins, a duplicate is reported as
+// a no-op result the model can understand and move on from.
+//
+// Non-idempotent tools are exempt so legitimate repeated triggers still work:
+// run_automation, run_skill and run_shell may be intentionally repeated
+// (running a script twice on purpose must not be blocked). Every other tool
+// (file reads/writes/edits, listings, automations CRUD, skills writes) is
+// deduplicated by (name, canonical JSON args).
+
+const DEDUP_EXEMPT = new Set(['run_automation', 'run_skill', 'run_shell']);
+// Per-chat-request execution ledger: { name, argsKey } of every executed call.
+const seenCalls = [];
+
+/** Stable key for an args object: sorted keys, stable-JSON, trimmed. */
+function canonicalArgsKey(args) {
+  if (args === null || args === undefined) return '';
+  if (typeof args !== 'object') return String(args);
+  const walk = (v) => {
+    if (Array.isArray(v)) return `[${v.map(walk).join(',')}]`;
+    if (v && typeof v === 'object') {
+      return `{${Object.keys(v)
+        .sort()
+        .map((k) => `${JSON.stringify(k)}:${walk(v[k])}`)
+        .join(',')}}`;
+    }
+    if (typeof v === 'string') return JSON.stringify(v.trim());
+    return JSON.stringify(v);
+  };
+  return walk(args);
+}
+
+/** True if this exact (name, args) pair was already executed this session. */
+function wasCallExecuted(name, args) {
+  const key = canonicalArgsKey(args);
+  return seenCalls.some((c) => c.name === name && c.argsKey === key);
+}
+
+/** Forget all recorded calls (start of a new chat request). */
+function resetSeenCalls() {
+  seenCalls.length = 0;
+}
+
+/** Remember an executed (name, args) pair. */
+function recordCall(name, args) {
+  seenCalls.push({ name, argsKey: canonicalArgsKey(args) });
+}
+
+// ---------------------------------------------------------------------------
+// Strict pre-execution argument validation
+// ---------------------------------------------------------------------------
+//
+// Small models frequently emit tool calls whose arguments are missing,
+// corrupted, or stuffed with placeholders ('?', '...', '<path>', 'N/A',
+// 'your_file_name') instead of real values. Executing such calls is harmful:
+// write_file would create a junk file named '?' or overwrite a real file with
+// an empty string; create_automation would fail validation mid-loop. So every
+// call is schema-checked BEFORE execution: required parameters must be
+// present, type-coerced, non-empty and free of placeholder tokens; rejected
+// calls return a corrective error the model can act on (and never poison the
+// dedup ledger, so the corrected retry runs normally).
+
+// Placeholder tokens small models substitute for real values they cannot
+// decide: '?', '...', '<path>', 'N/A', 'TODO', 'your_file_name', 'null' as a
+// string, etc.
+const PLACEHOLDER_RE =
+  /^\s*(?:<[^>]*>|\?+|\.{3,}|…|n\/?a|tbd|todo|xxx+|null|undefined|placeholder|none|your\s*\w*[\s_]*\w*n?a?m?e?)\s*$/i;
+
+/**
+ * Coerce a raw argument value to its schema type. Returns
+ * { ok, v } with the normalized value, or { ok:false, why }.
+ * Numeric strings ('5') become numbers; booleans accept 'true'/'false';
+ * arrays (write_file content) are joined into the string the tool would
+ * produce, so emptiness checks see the real content.
+ */
+function coerceArg(value, types) {
+  const ts = Array.isArray(types) ? types : [types];
+  if (ts.includes('number')) {
+    if (typeof value === 'number' && Number.isFinite(value)) return { ok: true, v: value };
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
+      return { ok: true, v: Number(value) };
+    }
+    return { ok: false, why: `expected a number, got ${JSON.stringify(value)}` };
+  }
+  if (ts.includes('boolean')) {
+    if (typeof value === 'boolean') return { ok: true, v: value };
+    if (value === 'true') return { ok: true, v: true };
+    if (value === 'false') return { ok: true, v: false };
+    return { ok: false, why: `expected a boolean, got ${JSON.stringify(value)}` };
+  }
+  if (ts.includes('array') && !ts.includes('string')) {
+    if (Array.isArray(value)) return { ok: true, v: value };
+    return { ok: false, why: `expected an array, got ${JSON.stringify(value).slice(0, 40)}` };
+  }
+  if (ts.includes('object')) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) return { ok: true, v: value };
+    return { ok: false, why: `expected an object, got ${JSON.stringify(value).slice(0, 40)}` };
+  }
+  // string, or composite ['string','array'] (write_file content): any scalar
+  // or array normalizes to the string the tool would write.
+  if (Array.isArray(value)) {
+    return { ok: true, v: value.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('\n') };
+  }
+  if (typeof value === 'string') return { ok: true, v: value };
+  return { ok: true, v: JSON.stringify(value) };
+}
+
+/**
+ * Validate + normalize args against the tool's declared schema. Never throws.
+ * Returns { ok:true, args } (normalized: coerced types, joined arrays) or
+ * { ok:false, error } with a corrective message naming the offending argument.
+ */
+function validateArgs(name, args) {
+  const tool = getTool(name);
+  if (!tool) return { ok: false, error: `unknown tool: ${name}` };
+  const schema = tool.parameters && typeof tool.parameters === 'object' ? tool.parameters : null;
+  const props = schema && schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
+  const required = schema && Array.isArray(schema.required) ? schema.required : [];
+  const raw = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  const out = {};
+  const errors = [];
+
+  for (const key of required) {
+    const has = Object.prototype.hasOwnProperty.call(raw, key);
+    if (!has) {
+      errors.push(`missing required argument '${key}'`);
+      continue;
+    }
+    const value = raw[key];
+    if (value === null || value === undefined) {
+      errors.push(`invalid value null for required argument '${key}': provide a real value`);
+      continue;
+    }
+    if (typeof value === 'string' && PLACEHOLDER_RE.test(value)) {
+      errors.push(`invalid value '${value.slice(0, 30)}' for required argument '${key}': placeholder values are not allowed`);
+      continue;
+    }
+    const types = (props[key] && props[key].type) || 'string';
+    const coerced = coerceArg(value, types);
+    if (!coerced.ok) {
+      errors.push(`invalid argument '${key}': ${coerced.why}`);
+      continue;
+    }
+    // Post-coercion emptiness — a required string must actually carry content.
+    if (typeof coerced.v === 'string' && coerced.v.trim() === '') {
+      errors.push(`invalid argument '${key}': must be a non-empty value`);
+      continue;
+    }
+    if (Array.isArray(coerced.v) && coerced.v.length === 0) {
+      errors.push(`invalid argument '${key}': must not be an empty array`);
+      continue;
+    }
+    out[key] = coerced.v;
+  }
+
+  // Optional and unknown params: pass through (coerced when the value parses
+  // cleanly, raw otherwise — the tool itself still guards its behavior).
+  // Placeholder TOKENS are rejected everywhere, not just in required fields:
+  // a cron of '???' or a script of '<script>' must never reach the engine.
+  for (const [key, value] of Object.entries(raw)) {
+    if (Object.prototype.hasOwnProperty.call(out, key)) continue;
+    if (typeof value === 'string' && PLACEHOLDER_RE.test(value)) {
+      errors.push(`invalid placeholder value '${value.slice(0, 30)}' for argument '${key}': not allowed`);
+      continue;
+    }
+    if (props[key] && props[key].type && value !== null && value !== undefined) {
+      const coerced = coerceArg(value, props[key].type);
+      out[key] = coerced.ok ? coerced.v : value;
+    } else {
+      out[key] = value;
+    }
+  }
+
+  if (errors.length) {
+    return {
+      ok: false,
+      error:
+        errors.join('; ') +
+        ' — provide valid JSON arguments with complete, non-placeholder values and retry the call',
+    };
+  }
+  return { ok: true, args: out };
+}
+
+/**
+ * Execute one tool by name. Always resolves (never rejects) to a result.
+ *
+ * 1. Schema validation first: required params must be present, non-empty and
+ *    free of placeholder tokens; invalid calls are rejected with a corrective
+ *    message (invalidArgs:true) and NEVER run — so write_file can't create a
+ *    junk file named '?' or write an empty file. Rejected calls are also not
+ *    recorded, so the corrected retry executes normally.
+ * 2. Deduplication guard: an exact repeat of a previously executed call (same
+ *    tool, same canonical args) is short-circuited and reported as an already-
+ *    done no-op instead of executing again — unless the tool is in
+ *    DEDUP_EXEMPT (intentionally repeatable: run_automation, run_skill,
+ *    run_shell). The guard applies per chat request (resetSeenCalls).
+ */
 async function executeTool(name, args) {
   const tool = getTool(name);
   if (!tool) return { ok: false, error: `unknown tool: ${name}` };
+  const v = validateArgs(name, args);
+  if (!v.ok) {
+    return { ok: false, invalidArgs: true, error: `invalid arguments for ${name}: ${v.error}` };
+  }
+  const nargs = v.args;
+  if (!DEDUP_EXEMPT.has(name)) {
+    if (wasCallExecuted(name, nargs)) {
+      return {
+        ok: false,
+        error:
+          `duplicate tool call skipped: ${name} was already executed with these exact arguments in this request — ` +
+          'do NOT call it again; interpret the original result and continue towards the final answer',
+        skippedDuplicate: true,
+      };
+    }
+    recordCall(name, nargs);
+  }
   try {
-    return await Promise.resolve(tool.execute(args || {}));
+    return await Promise.resolve(tool.execute(nargs));
   } catch (e) {
     return { ok: false, error: e && e.message ? e.message : String(e) };
   }
@@ -140,7 +363,8 @@ const AUTOMATIONS_GUIDANCE =
   'user wants — you execute the creation; do not just explain how. Include ALL ' +
   'required fields: name, schedule_type, interval_minutes or cron, action_type, ' +
   'and the matching script/skill/prompt value. After creating, ' +
-  'call list_automations to confirm. Fallback: if the dedicated tools are missing, ' +
+  'call list_automations to confirm. If the automation already exists, do NOT ' +
+  'create it again — confirm the existing one instead. Fallback: if the dedicated tools are missing, ' +
   'use run_shell with curl POST http://127.0.0.1:8888/api/automations (same JSON ' +
   'body as create_automation). NEVER suggest system-level Unix cron jobs or ' +
   'external OS crontabs — use the built-in Automations engine.\n';
@@ -166,9 +390,19 @@ function buildSystemPrompt(base) {
     'When you decide a tool is needed, respond with EXACTLY one JSON object on its ' +
     'own (no code fences, no other text), in this shape:\n' +
     '{"tool": "<tool_name>", "args": { ...arg names and values for that tool }}\n' +
+    'The JSON object must be the FIRST thing you output — no introductory sentences ' +
+    'before it, no explanations around it. If you output any text before the JSON ' +
+    'object, the call is not executed. You may explain only AFTER the tool results ' +
+    'come back.\n' +
+    'Every required argument MUST be a complete, real value — a full string literal ' +
+    'or a real number. Never leave arguments empty, and never use placeholders like ' +
+    '?, ..., <path>, N/A, TODO or your_file_name. Calls with missing or placeholder ' +
+    'arguments are rejected without executing; if a call is rejected, re-issue it ' +
+    'with the complete values.\n' +
     'After the tool result comes back, continue working until the task is done, ' +
     'then reply with a normal final answer (plain text). If a tool call fails, try ' +
-    'to recover and finish anyway.\n' +
+    'to recover and finish anyway. Do not repeat a tool call that already succeeded ' +
+    'with the same arguments — the result is already in your history; move on.\n' +
     'Tool-first policy: when a tool fits the request, you MUST call it — never ' +
     'answer with instructions, steps, links, or raw JSON examples for the user to ' +
     'run manually. Explanatory text is allowed only AFTER the tools have done the ' +
@@ -335,6 +569,9 @@ module.exports = {
   getTool,
   executeTool,
   registry,
+  resetSeenCalls,
+  canonicalArgsKey,
+  validateArgs,
   toOpenAITools,
   hasTool,
   safeParseArgs,

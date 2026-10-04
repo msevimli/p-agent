@@ -123,6 +123,22 @@ plife/
   or whole-output pure JSON — each candidate must parse as valid JSON and name
   a registered tool (validation never throws; results come back as
   `{ok, …}` objects, so the loop always has something to feed back).
+  Streaming robustness: native `tool_calls.arguments` fragments can split
+  mid-token (`"scripts/c` + `urrent"`); `joinToolCallArgs` re-joins them on
+  JSON token boundaries (quote re-balancing) so parsed args are not silently
+  emptied. Per-execution safety rails live in `toolLoop.executeTool` + the
+  chat loop: exact-duplicate calls (same name + canonical args, one chat
+  request) are refused with a "duplicate tool call skipped" result —
+  writable/side-effectful tools (file writes, automations CRUD) execute once —
+  while `run_shell`/`run_skill`/`run_automation` stay exempt (repeatable on
+  purpose); a tool that throws is converted to an `{ok:false}` result (never
+  crashes the loop); and every call is schema-validated BEFORE execution
+  (`validateArgs`): required parameters must be present, type-coerced
+  (numeric strings like `"5"` become numbers), non-empty and free of
+  placeholder tokens (`?`, `...`, `<path>`, `N/A`, `your_file_name`) — an
+  invalid call is rejected with a corrective `invalidArgs` error that is fed
+  back to the model for retry (never executed, never recorded in the dedup
+  ledger), surfacing live as a "Tool call rejected" status event.
 
 - **Memory & Storage** (`data/`, `services/sessionStore.js`,
   `services/skillManager.js`): flat JSON persistence — sessions (messages with
@@ -153,6 +169,14 @@ plife/
   `skill` (via skillManager), `prompt` (LLM completion with a directive task
   system prompt — the bare default makes small models emit whitespace).
   Logs bounded at 20 entries; runs are serialized through the request queue.
+  Automation-creation enforcement: when the current user turn commands a
+  creation, the loop intercepts explanations instead of `create_automation`
+  calls (forced corrective rounds, then server-side creation inferred from the
+  user's wording). A successful `create_automation` through the NORMAL tool
+  path marks the request settled, so the model's legitimate final answer is
+  never misread as an evasion (this false-positive previously burned the
+  iteration budget and reported "max tool steps" for a task that had already
+  succeeded).
 
 - **Frontend** (`public/`): single-page vanilla JS app with a sidebar
   (SESSIONS accordion + TOOLS: File Explorer, Skills, Models, Automations),
@@ -188,7 +212,9 @@ plife/
    `sessionStore`; the frontend renders the transcript with Markdown/syntax
    highlighting and updates the context/token budget display.
 
-(Note: while debugging tool-call formatting, a temporary diagnostic dump in
-`services/llamaClient.js` appends the exact upstream payload and raw response
-chunks to `/tmp/plife-dump.log`; remove the `dbgDump` helper and its two call
-sites once the investigation is concluded.)
+(Note: while debugging tool-call formatting, a diagnostic dump in
+`services/llamaClient.js` appended the exact upstream payload and raw response
+chunks to `/tmp/plife-dump.log`. The investigation concluded — root causes:
+fragmented native tool-call arguments silently parsing to `{}`, no duplicate-
+call guard, and the automation-enforcement false-positive — and the dump is
+now opt-in via `PLIFE_DEBUG_DUMP=1` (`config.debugDump`).)

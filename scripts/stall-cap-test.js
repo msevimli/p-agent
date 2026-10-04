@@ -16,10 +16,12 @@
  */
 const http = require('http');
 const fs = require('fs');
-const config = require('/home/openclaw/plife/config');
-const { complete, buildChatPayload } = require('/home/openclaw/plife/services/llamaClient');
+const path = require('path');
+const ROOT = path.join(__dirname, '..');
+const config = require(path.join(ROOT, 'config'));
+const { complete, buildChatPayload } = require(path.join(ROOT, 'services', 'llamaClient'));
 
-const STATE = '/home/openclaw/plife/data/models-state.json';
+const STATE = path.join(ROOT, 'data', 'models-state.json');
 const PORT = 9877;
 const orig = fs.readFileSync(STATE, 'utf8');
 

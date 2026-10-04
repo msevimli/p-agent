@@ -1,5 +1,6 @@
 /** Unit tests for the automation-tool enforcement helpers. */
-const tl = require('/home/openclaw/plife/services/toolLoop');
+const path = require('path');
+const tl = require(path.join(__dirname, '..', 'services', 'toolLoop'));
 const results = [];
 const t = (name, cond, detail) => results.push(`${cond ? 'PASS' : 'FAIL'} ${name}${detail ? ' | ' + detail : ''}`);
 
