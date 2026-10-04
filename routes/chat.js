@@ -177,6 +177,52 @@ function emitTextChunks(res, text, lost) {
   flush();
 }
 
+/**
+ * Plain (tool-less) generation with chunked continuation: completes the
+ * conversation without the tools array / tool system prompt and streams every
+ * delta live. Used by the passthrough mode (TOOL_CALLING=false) AND as the
+ * resilience fallback when a tool-enabled completion returns an empty stream
+ * (some providers/models cannot carry the tools array) — the request is
+ * re-run without tools so the turn always completes with an answer instead of
+ * stalling. Resolves with the accumulated text.
+ *
+ * `firstAttempt` optionally reuses the route's pre-queued first completion
+ * (which already carries an onDelta streamer); pass null to enqueue a fresh
+ * one (the fallback case — the pre-queued promise already rejected as empty).
+ * `plainSystem` overrides the system prompt for degraded re-runs (the base
+ * prompt without tool-call instructions — so a model that cannot carry the
+ * tools array answers conversationally instead of echoing call JSON).
+ * Callers must NOT re-emit the returned text: it was streamed live.
+ */
+async function streamPlainAnswer(res, agentMessages, gen, onUsage, lost, firstAttempt, plainSystem) {
+  let out = '';
+  let prevLen = -1;
+  for (let r = 0; r <= config.continuationMaxRounds; r++) {
+    const acc = await (r === 0 && firstAttempt
+      ? firstAttempt
+      : complete({
+          payload: buildChatPayload(agentMessages, gen, plainSystem ? { system: plainSystem } : {}),
+          onDelta: (d) => safeWrite(res, contentChunk(d), lost),
+          onUsage,
+        }));
+    out += acc.content;
+    const capped = acc.finishReason === 'length';
+    const progress = acc.content.length > prevLen;
+    if (!capped || !progress) break; // finished, or the model made no headway
+    prevLen = acc.content.length;
+    agentMessages.push({ role: 'assistant', content: acc.content });
+    agentMessages.push({ role: 'user', content: CONTINUE_MSG });
+    safeWrite(res, statusChunk(`✂ ${CONTINUE_STATUS} (round ${r + 1}/${config.continuationMaxRounds})`), lost);
+    if (lost) break; // nobody is listening — free the queue slot
+  }
+  return out;
+}
+
+// Error message used when a 200-OK upstream produced no usable output at all
+// (see llamaClient doComplete). Detected here so a tools-enabled request can
+// degrade to plain generation instead of failing the whole turn.
+const EMPTY_STREAM_RE = /empty stream/i;
+
 router.post('/', async (req, res) => {
   // Fresh per-request tool-call ledger (deduplication scope).
   toolLoop.resetSeenCalls();
@@ -194,6 +240,10 @@ router.post('/', async (req, res) => {
   const systemPrompt = toolsEnabled
     ? toolLoop.buildSystemPrompt(config.llamaSystemPrompt)
     : `${config.llamaSystemPrompt}\n\n${toolLoop.AUTOMATIONS_GUIDANCE}`;
+  // Degraded/tool-less re-runs must NOT instruct JSON tool-call output (a
+  // model that cannot carry the tools array would echo the call as plain
+  // text); they get the base prompt only.
+  const plainSystemPrompt = `${config.llamaSystemPrompt}\n\n${toolLoop.AUTOMATIONS_GUIDANCE}`;
   const tools = toolsEnabled ? toolLoop.toOpenAITools() : undefined;
 
   // Working conversation history (system-first) mutated by the loop. Library
@@ -259,30 +309,17 @@ router.post('/', async (req, res) => {
 
   try {
     let finalText = '';
+    // Live-streamed paths (passthrough / empty-stream fallback) already
+    // pushed their text to the client token-by-token — the final flush below
+    // must not re-emit it (which would duplicate the answer).
+    let liveStreamed = false;
 
     if (!toolsEnabled) {
       // --- single-completion passthrough (tool calling off), with chunked
       // --- continuation: length-capped outputs are completed instead of
-      // --- silently truncated mid-code.
-      let prevLen = -1;
-      for (let r = 0; r <= config.continuationMaxRounds; r++) {
-        const acc = await (r === 0
-          ? firstPromise
-          : complete({
-              payload: buildChatPayload(agentMessages, gen, {}),
-              onDelta: (d) => safeWrite(res, contentChunk(d), lost),
-              onUsage: (u) => { usage = u; },
-            }));
-        finalText += acc.content;
-        const capped = acc.finishReason === 'length';
-        const progress = acc.content.length > prevLen;
-        if (!capped || !progress) break; // finished, or the model made no headway
-        prevLen = acc.content.length;
-        agentMessages.push({ role: 'assistant', content: acc.content });
-        agentMessages.push({ role: 'user', content: CONTINUE_MSG });
-        safeWrite(res, statusChunk(`✂ ${CONTINUE_STATUS} (round ${r + 1}/${config.continuationMaxRounds})`), lost);
-        if (lost) break; // nobody is listening — free the queue slot
-      }
+      // --- silently truncated mid-code. Text is streamed live by the helper.
+      finalText = await streamPlainAnswer(res, agentMessages, gen, (u) => { usage = u; }, lost, firstPromise);
+      liveStreamed = true;
     } else {
       // --- agentic tool loop --------------------------------------------------
       let answered = false;
@@ -291,12 +328,35 @@ router.post('/', async (req, res) => {
       let automationSettled = false;
       for (let i = 0; i < config.toolMaxIterations; i++) {
         if (lost) break; // client gone — don't spend queue slots on nobody
-        const acc = await (i === 0
-          ? firstPromise
-          : complete({
-              payload: buildChatPayload(agentMessages, gen, { system: systemPrompt, tools }),
-              onUsage: (u) => { usage = u; },
-            }));
+        let acc;
+        try {
+          acc = await (i === 0
+            ? firstPromise
+            : complete({
+                payload: buildChatPayload(agentMessages, gen, { system: systemPrompt, tools }),
+                onUsage: (u) => { usage = u; },
+              }));
+        } catch (e) {
+          // A tool-enabled completion came back as an empty stream (some
+          // providers/models cannot carry the tools array — OpenRouter/Phala
+          // is known to do this). Instead of failing the whole turn, degrade
+          // THIS request to plain generation: the model answers (tool-less)
+          // and the user sees why. Real errors still propagate.
+          if (EMPTY_STREAM_RE.test((e && e.message) || String(e)) && !lost) {
+            safeWrite(
+              res,
+              statusChunk(
+                '⚠ The model returned an empty stream while tool calling was enabled — re-running this request without tool calling. (If this keeps happening, switch the active model in Tools → Models.)'
+              ),
+              lost
+            );
+            finalText = await streamPlainAnswer(res, agentMessages, gen, (u) => { usage = u; }, lost, null, plainSystemPrompt);
+            liveStreamed = true;
+            answered = true;
+            break;
+          }
+          throw e;
+        }
 
         // Collect the tool call(s) for this turn: native tool_calls first,
         // then the structured JSON-block fallback.
@@ -483,7 +543,7 @@ router.post('/', async (req, res) => {
     }
 
     if (!lost) {
-      emitTextChunks(res, finalText, lost);
+      if (finalText && !liveStreamed) emitTextChunks(res, finalText, lost);
       if (usage) safeWrite(res, usageChunk({ ...usage, elapsedMs: Date.now() - startTs }), lost);
       safeWrite(res, DONE_CHUNK, lost);
     }

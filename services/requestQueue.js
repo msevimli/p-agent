@@ -16,7 +16,7 @@
  */
 const config = require('../config');
 
-const TRANSIENT = /hang up|ECONNRESET|EPIPE|ETIMEDOUT|unreachable|empty stream/i;
+const TRANSIENT = /hang up|ECONNRESET|EPIPE|ETIMEDOUT|unreachable|empty stream|402|429|in_flight_budget|rate[- ]limited|temporarily rate-limited/i;
 
 const limit = Math.max(1, Number(config.queueLimit) || 1);
 const maxRetries = Math.max(0, Math.floor(Number(config.queueRetries) || 0));

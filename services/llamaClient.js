@@ -201,8 +201,12 @@ function completeInSlot(opts) {
       doComplete(opts).then(resolve).catch((err) => {
         const msg = String((err && err.message) || err || '');
         const transient = /hang up|ECONNRESET|EPIPE|ETIMEDOUT|unreachable|empty stream/i.test(msg);
-        if (transient && left > 0) {
-          setTimeout(() => tryOnce(left - 1), 350);
+        const throttled = /402|429|in_flight_budget|rate[- ]limited|temporarily rate-limited/i.test(msg);
+        // Rate-limit-class rejections (402 in-flight budget, 429) need the
+        // contending request/rate window to settle — retry on a longer
+        // backoff than plain network gremlins, still bounded by `left`.
+        if ((transient || throttled) && left > 0) {
+          setTimeout(() => tryOnce(left - 1), throttled ? 8000 : 350);
         } else {
           reject(err);
         }
