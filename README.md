@@ -41,6 +41,32 @@ The chat pipeline needs an active model. Two options:
 > The frontend loads Tailwind, marked and highlight.js from CDNs — an internet
 > connection is needed for UI styling on first load.
 
+## Model lifecycle & cold-start controls
+
+The header shows a live **model status badge** for the active model — green
+**ready**, amber spinner **loading** (warm-up or prompt prefill / cold start),
+gray **unloaded**, red **error** — with an approximate memory footprint in the
+tooltip. Clicking it opens a dropdown with **Warm-up** (background pre-load so
+the first prompt responds instantly) and **Eject** (free the weights from
+memory) plus a shortcut to the Models panel. The badge polls
+`GET /api/models/status` every 15s and refreshes immediately after sends,
+warm-ups and ejects.
+
+- Lifecycle states are derived per model endpoint from `/health`, `/v1/models`
+  and `/slots` (see `services/modelLifecycle.js`); a 2-probe debounce absorbs
+  llama.cpp's task "tombstones" (a finished task leaves `id_task` set, which
+  would otherwise pin the badge on "busy" forever).
+- **Warm-up** (`POST /api/models/warmup`) runs a `max_tokens=1` completion
+  through the same FIFO request queue as chat — never two concurrent
+  connections into a single-slot llama.cpp. Local endpoints only.
+- **Eject** (`POST /api/models/eject`) is capability-tiered: true weight
+  unload via llama.cpp's model-router API (`POST /models/unload`), a degraded
+  KV-cache erase where supported, and otherwise an honest response explaining
+  that this llama-server instance cannot unload at runtime — restart it with
+  the model router (`--router`) for true eject-from-memory.
+- Memory reporting is approximate: weights ≈ GGUF file size on disk plus the
+  KV context capacity reported by `/slots`.
+
 ## Daemon lifecycle management (`pagent.sh`)
 
 The root-level `pagent.sh` is the unified management script — instead of
@@ -184,7 +210,7 @@ p-agent/
 ├── routes/                # thin HTTP layer
 │   ├── chat.js            #   POST /api/chat — agentic tool loop + SSE
 │   ├── sessions.js        #   /api/sessions CRUD
-│   ├── models.js          #   /api/models registry + activate
+│   ├── models.js          #   /api/models registry + activate + status/warmup/eject
 │   ├── automations.js     #   /api/automations CRUD + run
 │   ├── skills.js          #   /api/skills registry + run
 │   ├── library.js         #   /api/library CRUD + upload
@@ -201,6 +227,7 @@ p-agent/
 │   ├── libraryManager.js  #   persistent file library
 │   ├── sessionStore.js    #   session persistence (data/sessions.json)
 │   ├── modelManager.js    #   model registry + .env key management
+│   ├── modelLifecycle.js  #   per-model lifecycle state, status probes, warm-up/eject
 │   ├── skillManager.js    #   SKILL.md registry
 │   └── automationManager.js # cron/interval engine
 ├── tools/                 # 16 agent tools (uniform {name,desc,parameters,execute})
@@ -216,7 +243,10 @@ p-agent/
 | GET | `/api/health` | Server + model status |
 | POST | `/api/chat` | Agentic chat (SSE streaming, `stream: true`) |
 | GET/POST/PUT/DELETE | `/api/sessions[/:id]` | Session CRUD |
-| GET/POST | `/api/models[/:id/activate]` | Model registry / activation |
+| GET/POST/PUT/DELETE | `/api/models[/:id]` + `POST /:id/activate` | Model registry / activation |
+| GET | `/api/models/status` | Live lifecycle: unloaded/loading/ready/error + memory |
+| POST | `/api/models/warmup` | Background pre-load (local, `{id?}`) |
+| POST | `/api/models/eject` | Free weights from memory (local, `{id?}`) |
 | GET/POST/DELETE | `/api/automations[/:id]` + `POST /:id/run` | Automations engine |
 | GET/POST | `/api/skills[/:name/run|toggle]` | Skills registry |
 | GET/POST/DELETE | `/api/library[/:id]` + `GET /:id/content` | File Library (upload via raw body) |

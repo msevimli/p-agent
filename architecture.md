@@ -56,9 +56,9 @@ p-agent/
 ├── routes/                   # thin HTTP endpoints (request/response only)
 │   ├── health.js             #   GET /api/health — server + model status
 │   ├── chat.js               #   POST /api/chat — agentic tool loop + SSE proxy
-│   ├── sessions.js           #   /api/sessions CRUD (JSON persistence)
-│   ├── models.js             #   /api/models CRUD, activate, status probes
-│   ├── automations.js        #   /api/automations CRUD, run, logs
+│   ├── sessions.js            #   /api/sessions CRUD (JSON persistence)
+│   ├── models.js              #   /api/models CRUD, activate, status/warmup/eject
+│   ├── automations.js         #   /api/automations CRUD, run, logs
 │   ├── skills.js             #   /api/skills CRUD, toggle, run
 │   ├── library.js            #   /api/library CRUD + upload (raw body)
 │   ├── channels.js           #   /api/channels — Telegram config/status/toggle
@@ -78,6 +78,8 @@ p-agent/
 │   ├── sessionStore.js       # session persistence (data/sessions.json)
 │   ├── modelManager.js       # model registry, active-model resolution,
 │   │                         #   writeDotEnvVar (.env key management)
+│   ├── modelLifecycle.js     # per-model lifecycle (unloaded/loading/ready/error),
+│   │                         #   status probes, warm-up / eject operations
 │   ├── skillManager.js       # SKILL.md registry, run/validate/migrate
 │   └── automationManager.js  # cron/interval engine, script/skill/prompt actions
 │
@@ -276,7 +278,8 @@ p-agent/
   QUEUE_*, TELEGRAM_*, LIBRARY_*, PLIFE_WORK_ROOT, PLIFE_DOTENV_FILE, …).
 
 - **Local LLM Integration** (`services/llamaClient.js` + `requestQueue.js` +
-  `services/modelManager.js`): the client builds the OpenAI-compatible payload
+  `services/modelManager.js` + `services/modelLifecycle.js`): the client
+  builds the OpenAI-compatible payload
   (system injection, role filtering, sampler overrides,
   `stream_options.include_usage`), opens the upstream SSE stream and parses it
   into `{content, toolCalls, usage, finishReason}`. All completions flow
@@ -286,6 +289,22 @@ p-agent/
   both bounded by `QUEUE_RETRIES`. Endpoints may be `http` or `https`
   (OpenRouter-style remotes). Probes: `/health`, `/props` (context window),
   `/slots` (liveness).
+  **Model lifecycle** (`modelLifecycle.js`): per-endpoint probes combine
+  `/health`, `/v1/models` (loaded-model check for router-mode servers),
+  `/slots` state drift, and the request queue's active flag into a four-state
+  badge (`unloaded | loading | ready | error`). "Working" detection is
+  dual-signal because llama.cpp builds differ: modern builds populate
+  `is_processing`/`n_prompt_tokens_processed` (live prefill %), while others
+  never flip `is_processing` and only advance `id_task`/`n_prompt_tokens`
+  between polls — a slot-state mutation detector + 2-probe debounce covers
+  both, and the request queue is the exact in-flight signal for the active
+  model. Warm-up runs a `max_tokens=1` completion through the queue against a
+  SPECIFIC endpoint (not the active one). Eject is capability-tiered: true
+  unload via the model-router `POST /models/unload` (200/204), degraded
+  KV-cache erase (`POST /slots/:id?action=erase`, needs `--slot-save-path`),
+  or an honest `degraded:true` response stating the weights stayed resident
+  (non-router llama-server answers 404 on `/models/unload`). Remote endpoints
+  reject warm-up/eject with 400 — there are no local weights to manage.
 
 - **Automations Engine** (`services/automationManager.js` +
   `routes/automations.js`): dependency-free 5-field cron engine with
@@ -300,8 +319,10 @@ p-agent/
   Library, Channels), streaming chat with Markdown/highlight rendering,
   generation settings + context-budget popovers, stop-generation via
   AbortController, per-message ⚡ duration/token badges, library grid tiles
-  with inline delete-confirm state machine, and a channels panel (token,
-  whitelist, toggle, test-connection, live status meta). No build pipeline.
+  with inline delete-confirm state machine, a channels panel (token,
+  whitelist, toggle, test-connection, live status meta), and the header model
+  lifecycle badge (color-coded dot, amber spinner while loading, warm-up /
+  eject dropdown with memory footprint). No build pipeline.
 
 ## 5. Data Flow
 

@@ -63,6 +63,10 @@ module.exports = {
   // any slot reports processing, generation is allowed to run indefinitely;
   // a slot confirmed idle without a result aborts the stream.
   llamaStallTimeoutMs: Number(process.env.LLAMA_STALL_TIMEOUT_MS || 120000),
+  // Timeout (ms) for a single model warm-up completion (POST /api/models/warmup).
+  // The warm-up shares the request queue with chat, so queue wait is not part
+  // of this budget — it bounds the upstream HTTP call itself.
+  warmupTimeoutMs: Number(process.env.WARMUP_TIMEOUT_MS || 120000),
   // How often the slot-liveness supervisor polls GET /slots during stream
   // silence (ms).
   llamaSlotPollMs: Number(process.env.LLAMA_SLOT_POLL_MS || 4000),

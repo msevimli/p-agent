@@ -27,6 +27,16 @@
   const sendBtn = $('#sendBtn');
   const statusDot = $('#statusDot');
   const statusText = $('#statusText');
+  const statusPill = $('#statusPill');
+  const modelStatusMenu = $('#modelStatusMenu');
+  const msmDot = $('#msmDot');
+  const msmName = $('#msmName');
+  const msmPhase = $('#msmPhase');
+  const msmDetail = $('#msmDetail');
+  const msmMemory = $('#msmMemory');
+  const msmWarmupBtn = $('#msmWarmupBtn');
+  const msmEjectBtn = $('#msmEjectBtn');
+  const msmManageBtn = $('#msmManageBtn');
   const contextBtn = $('#contextBtn');
   const contextRing = $('#contextRing');
   const contextSummary = $('#contextSummary');
@@ -470,6 +480,7 @@
         }
       });
       checkHealth(); // header status may reflect the newly active endpoint
+      refreshModelStatus();
       loadModels();  // refresh statuses quietly
     } catch (err) {
       modelToast(err.message);
@@ -1142,6 +1153,9 @@
       appendMessage('user', text);
     }
     setStreamingUI(true);
+    // Optimistic badge: the request is out — show the model as active even
+    // before the next status poll picks up the prefill phase.
+    if (state.modelStatus) renderModelStatus({ ...state.modelStatus, busy: true });
 
     // assistant placeholder: status feed (hidden) + content slot (typing first)
     const assistantEl = appendMessage(
@@ -1304,6 +1318,7 @@
     } finally {
       if (state.abortController === ac) state.abortController = null;
       setStreamingUI(false);
+      refreshModelStatus(); // badge returns to the real lifecycle state
     }
   }
 
@@ -1362,6 +1377,184 @@
       statusText.textContent = 'server unreachable';
     }
   }
+
+  // ----------------------------------------- model lifecycle status badge
+  // Header badge + dropdown driven by GET /api/models/status. Lifecycle
+  // states: ready (green), loading (amber spinner: warm-up or prompt
+  // prefill / cold start), unloaded (gray: weights not in memory),
+  // error (red). Polled alongside checkHealth and refreshed after sends,
+  // warm-ups and ejects.
+  state.modelStatus = null; // last active-model status entry
+  state.modelOp = null;     // 'warmup' | 'eject' while an op is in flight
+
+  function badgeSpec(s) {
+    if (!s) return { dot: 'bg-gray-400', label: 'checking…', spinner: false, pulse: false };
+    if (s.lifecycle === 'loading') {
+      return { dot: 'bg-amber-400', label: `loading${s.phase ? ` · ${s.phase}` : ''}`, spinner: true, pulse: false };
+    }
+    if (s.lifecycle === 'ready') {
+      return { dot: 'bg-emerald-500', label: s.busy ? 'generating…' : 'ready', spinner: false, pulse: s.busy };
+    }
+    if (s.lifecycle === 'unloaded') {
+      return { dot: 'bg-gray-400', label: s.online ? 'unloaded' : 'offline', spinner: false, pulse: false };
+    }
+    if (s.lifecycle === 'error') {
+      return { dot: 'bg-red-500', label: 'error', spinner: false, pulse: false };
+    }
+    return { dot: 'bg-gray-400', label: 'idle', spinner: false, pulse: false };
+  }
+
+  function shortModelName(s) {
+    const full = (s && s.name) || (s && s.id) || '';
+    const parts = full.split(/\s+/).filter(Boolean);
+    return parts.slice(0, 2).join(' ') || full;
+  }
+
+  function memoryLine(s) {
+    if (!s || !s.memory) return s && s.provider === 'local' ? 'memory footprint unknown' : '';
+    const parts = [];
+    if (Number.isFinite(s.memory.modelMiB) && s.memory.modelMiB > 0) parts.push(`≈ ${s.memory.modelMiB} MiB weights`);
+    if (Number.isFinite(s.memory.ctxTokens) && s.memory.ctxTokens > 0) parts.push(`ctx ${Math.round(s.memory.ctxTokens).toLocaleString()} tokens`);
+    if (Number.isFinite(s.memory.lastPromptTokens) && s.memory.lastPromptTokens > 0) parts.push(`last prompt ${Math.round(s.memory.lastPromptTokens).toLocaleString()} tokens`);
+    if (Number.isFinite(s.memory.slots) && s.memory.slots > 0) parts.push(`${s.memory.slots} slot${s.memory.slots === 1 ? '' : 's'}`);
+    return parts.join(' · ');
+  }
+
+  function fmtSince(iso) {
+    if (!iso) return '';
+    const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+    return s < 5 ? 'just now' : s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+  }
+
+  function renderModelStatus(s) {
+    state.modelStatus = s;
+    const spec = badgeSpec(s);
+    // Dot → animated spinner while loading (cold start / warm-up).
+    statusDot.className = spec.spinner
+      ? 'status-spinner'
+      : `w-2 h-2 rounded-full ${spec.dot}${spec.pulse ? ' status-pulse' : ''}`;
+    statusText.textContent = s ? `${shortModelName(s)} · ${spec.label}` : 'checking…';
+    const mem = memoryLine(s);
+    statusPill.title = s
+      ? `${s.name} — ${spec.label}${(s.detail ? ' · ' + s.detail : '')}${mem ? ' · ' + mem : ''}`
+      : 'Model lifecycle status — click for warm-up / eject';
+  }
+
+  function renderModelMenu(s) {
+    state.modelStatus = s;
+    if (!s) {
+      msmName.textContent = '—';
+      msmPhase.textContent = '';
+      msmDetail.textContent = 'No active model.';
+      msmMemory.textContent = '';
+      msmWarmupBtn.disabled = msmEjectBtn.disabled = true;
+      return;
+    }
+    const spec = badgeSpec(s);
+    msmDot.className = spec.spinner
+      ? 'status-spinner'
+      : `w-2.5 h-2.5 rounded-full ${spec.dot}${spec.pulse ? ' status-pulse' : ''}`;
+    msmName.textContent = s.name;
+    msmPhase.textContent = spec.label;
+    msmDetail.textContent = [s.detail, s.since ? `updated ${fmtSince(s.since)}` : ''].filter(Boolean).join(' · ');
+    msmMemory.textContent = s.provider === 'local' ? memoryLine(s) : 'remote endpoint — memory managed provider-side';
+    const remote = s.provider !== 'local';
+    const busyOp = !!state.modelOp;
+    msmWarmupBtn.disabled = busyOp || remote || s.lifecycle === 'loading';
+    msmWarmupBtn.textContent = state.modelOp === 'warmup' ? 'Warming…' : 'Warm-up';
+    msmWarmupBtn.title = remote
+      ? 'Remote endpoints have no local weights to pre-load'
+      : s.lifecycle === 'loading'
+        ? 'A load is already in progress'
+        : 'Pre-load the model so the first prompt is instant';
+    msmEjectBtn.disabled = busyOp || remote || s.lifecycle === 'loading' || s.lifecycle === 'unloaded';
+    msmEjectBtn.textContent = state.modelOp === 'eject' ? 'Ejecting…' : 'Eject';
+    msmEjectBtn.title = remote
+      ? 'Remote endpoints have no local weights to free'
+      : s.lifecycle === 'unloaded'
+        ? (s.online ? 'No model is loaded in memory' : 'Server not reachable — nothing loaded')
+        : 'Free the model weights from memory';
+  }
+
+  async function refreshModelStatus() {
+    try {
+      const res = await fetch('/api/models/status');
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'could not load model status');
+      const list = data.models || [];
+      const active = list.find((m) => m.id === data.active) || list[0] || null;
+      renderModelStatus(active);
+      renderModelMenu(active);
+    } catch {
+      statusDot.className = 'w-2 h-2 rounded-full bg-red-500';
+      statusText.textContent = 'server unreachable';
+      if (!state.modelStatus) msmName.textContent = '—';
+    }
+  }
+
+  function setModelMenu(open) {
+    modelStatusMenu.classList.toggle('hidden', !open);
+  }
+
+  function appToast(msg, { error = false } = {}) {
+    let toast = document.getElementById('skillToast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'skillToast';
+      toast.className = 'skill-toast';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = (error ? '⚠️ ' : '✓ ') + msg;
+    toast.classList.add('show');
+    clearTimeout(appToast._t);
+    appToast._t = setTimeout(() => toast.classList.remove('show'), 4000);
+  }
+
+  async function runModelOp(kind) {
+    const s = state.modelStatus;
+    if (!s || state.modelOp) return;
+    const url = kind === 'warmup' ? '/api/models/warmup' : '/api/models/eject';
+    state.modelOp = kind;
+    renderModelMenu(s);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: s.id }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || `${kind} failed`);
+      if (kind === 'warmup') {
+        if (data.already) appToast('Warm-up already in progress.');
+        else appToast(`${data.detail || 'model warm'} — first prompt will be instant.`);
+      } else {
+        if (data.unloaded) appToast('Model ejected — weights freed from memory.');
+        else if (data.degraded) appToast(`${data.detail}`, { error: true });
+        else appToast('Eject complete.');
+      }
+    } catch (err) {
+      appToast(err.message, { error: true });
+    } finally {
+      state.modelOp = null;
+      renderModelMenu(state.modelStatus);
+      refreshModelStatus();
+    }
+  }
+
+  statusPill.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setModelMenu(modelStatusMenu.classList.contains('hidden'));
+  });
+  modelStatusMenu.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', () => setModelMenu(false));
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setModelMenu(false); });
+  msmWarmupBtn.addEventListener('click', () => runModelOp('warmup'));
+  msmEjectBtn.addEventListener('click', () => runModelOp('eject'));
+  msmManageBtn.addEventListener('click', () => {
+    setModelMenu(false);
+    showView('models');
+    closeSidebar();
+  });
 
   // ------------------------------------------------------------- automations view
   const AUTO_ICON = `<svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
@@ -2159,9 +2352,11 @@
     if (state.sessions.length) switchSession(state.sessions[0].id);
     else renderMessages();
     checkHealth();
+    refreshModelStatus();
     setInterval(checkHealth, 15000);
-    // Keep the automations + channels lists fresh while their views are open.
+    // Keep the model lifecycle badge + the automations/channels lists fresh.
     setInterval(() => {
+      refreshModelStatus();
       if (state.view === 'automations') loadAutomations();
       if (state.view === 'channels') loadChannels();
     }, 15000);

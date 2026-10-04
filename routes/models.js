@@ -15,6 +15,7 @@
  */
 const express = require('express');
 const modelManager = require('../services/modelManager');
+const modelLifecycle = require('../services/modelLifecycle');
 const router = express.Router();
 
 // GET /api/models -> { ok, active, models: [...] }
@@ -24,6 +25,44 @@ router.get('/', async (_req, res) => {
     res.json({ ok: true, active, models });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message || 'could not list models' });
+  }
+});
+
+// GET /api/models/status -> live lifecycle status (unloaded | loading |
+// ready | error) per model + memory footprint. MUST stay registered before
+// GET /:id so "status" is never captured as a model id.
+router.get('/status', async (_req, res) => {
+  try {
+    const r = await modelLifecycle.getStatuses();
+    res.json({ ok: true, ...r });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'could not probe model status' });
+  }
+});
+
+// POST /api/models/warmup  body: { id? } (default: active model) — background
+// pre-load so the first user prompt responds instantly.
+router.post('/warmup', async (req, res) => {
+  try {
+    const active = modelManager.getActiveModel();
+    const target = (req.body && req.body.id) || (active && active.id) || '';
+    const r = await modelLifecycle.warmup(target);
+    res.status(r.ok ? 200 : r.code || 400).json(r);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'warm-up failed' });
+  }
+});
+
+// POST /api/models/eject  body: { id? } (default: active model) — free model
+// weights from memory (capability-tiered, see modelLifecycle).
+router.post('/eject', async (req, res) => {
+  try {
+    const active = modelManager.getActiveModel();
+    const target = (req.body && req.body.id) || (active && active.id) || '';
+    const r = await modelLifecycle.eject(target);
+    res.status(r.ok ? 200 : r.code || 400).json(r);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'eject failed' });
   }
 });
 

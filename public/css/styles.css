@@ -213,6 +213,32 @@ html.dark .popover {
   cursor: pointer;
 }
 
+/* Model lifecycle status badge: spinning ring shown while the model is
+   loading / warming up (cold start) instead of the static status dot. */
+@keyframes msmSpin {
+  to { transform: rotate(360deg); }
+}
+.status-spinner {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex-shrink: 0;
+  border: 2px solid rgba(245, 158, 11, 0.3);
+  border-top-color: #f59e0b;
+  border-radius: 50%;
+  animation: msmSpin 0.8s linear infinite;
+}
+html.dark .status-spinner {
+  border-color: rgba(251, 191, 36, 0.25);
+  border-top-color: #fbbf24;
+}
+@keyframes msmPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.status-pulse {
+  animation: msmPulse 1.1s ease-in-out infinite;
+}
+
 /* Mobile: sidebar off-canvas */
 @media (max-width: 1023px) {
   #sidebar {
