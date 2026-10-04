@@ -21,6 +21,7 @@ app.use('/api/health', require('./routes/health'));
 app.use('/api/chat', require('./routes/chat'));
 app.use('/api/sessions', require('./routes/sessions'));
 app.use('/api/fs', require('./routes/fs'));
+app.use('/api/library', require('./routes/library'));
 app.use('/api/skills', require('./routes/skills'));
 app.use('/api/models', require('./routes/models'));
 app.use('/api/automations', require('./routes/automations'));

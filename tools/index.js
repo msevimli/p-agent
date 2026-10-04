@@ -6,12 +6,14 @@ const fileTools = require('./fileTools');
 const shellTools = require('./shellTools');
 const skillsTools = require('./skillsTools');
 const automationsTools = require('./automationsTools');
+const libraryTools = require('./libraryTools');
 
 const registry = [
   ...fileTools.tools,
   ...shellTools.tools,
   ...skillsTools.tools,
   ...automationsTools.tools,
+  ...libraryTools.tools,
 ];
 
 module.exports = registry;

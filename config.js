@@ -104,6 +104,11 @@ module.exports = {
 
   // --- storage & tool sandbox -----------------------------------------------
   dataDir: path.join(ROOT_DIR, 'data'),
+  // Persistent file Library: uploaded blobs live here, metadata in
+  // data/library-index.json (both under data/*, i.e. gitignored runtime state).
+  libraryDir: path.join(ROOT_DIR, 'data', 'library'),
+  // Per-upload cap for the Library API (bytes; 413 beyond it).
+  libraryMaxUploadBytes: Number(process.env.LIBRARY_MAX_UPLOAD_MB || 50) * 1048576,
   sessionsFile: path.join(ROOT_DIR, 'data', 'sessions.json'),
   // File/shell tools may operate strictly inside this sandbox root
   // (defaults to the plife project directory; override with PLIFE_WORK_ROOT).
