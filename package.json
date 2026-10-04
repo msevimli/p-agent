@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Local AI agent dashboard powered by llama.cpp",
   "main": "server.js",
+  "bin": {
+    "pagent": "bin/pagent.js"
+  },
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
