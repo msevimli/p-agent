@@ -41,10 +41,57 @@ function getTool(name) {
 // (running a script twice on purpose must not be blocked). Every other tool
 // (file reads/writes/edits, listings, automations CRUD, skills writes) is
 // deduplicated by (name, canonical JSON args).
+//
+// run_shell additionally carries a CONSECUTIVE-duplicate guard: a shell
+// command that just succeeded is not executed again back-to-back with the
+// same (quotes/whitespace-normalized) command — small models often re-emit
+// the same curl/script in the next loop round, and each re-run is redundant
+// (result already in history) and may have side effects. A repeat after
+// other steps in between still executes, so intentional double runs remain
+// possible; a repeat of a FAILED command also still executes (recovery).
 
 const DEDUP_EXEMPT = new Set(['run_automation', 'run_skill', 'run_shell']);
 // Per-chat-request execution ledger: { name, argsKey } of every executed call.
 const seenCalls = [];
+
+// Normalized key of the last successfully executed shell command (null when
+// none yet / after the ledger reset). Reset with resetSeenCalls().
+let lastShellCommandKey = null;
+
+/**
+ * Normalize a shell command into a comparison key: tokenize on whitespace
+ * (respecting quotes), canonicalize quote characters, and strip quotes from
+ * fully-quoted single tokens — so `curl -s 'URL'`, `curl -s "URL"` and
+ * `curl -s URL` compare equal, while `echo "a b"` and `echo a b` stay
+ * distinct (quoted whitespace is semantically meaningful).
+ */
+function normalizeShellCommandKey(cmd) {
+  if (typeof cmd !== 'string') return '';
+  const s = cmd.trim();
+  if (!s) return '';
+  const tokens = [];
+  let cur = '';
+  let q = null;
+  const flush = () => { if (cur !== '') { tokens.push(cur); cur = ''; } };
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (q) { cur += ch; if (ch === q) q = null; }
+    else if (ch === '"' || ch === "'") { q = ch; cur += ch; }
+    else if (/\s/.test(ch)) flush();
+    else cur += ch;
+  }
+  flush();
+  return tokens
+    .map((t) => {
+      const tok = t.replace(/"/g, "'"); // canonical quote char
+      const inner = tok.slice(1, -1);
+      if (tok.length >= 2 && tok[0] === "'" && tok[tok.length - 1] === "'" && !inner.includes("'") && !/\s/.test(inner)) {
+        return inner; // fully-quoted single token: quotes are cosmetic here
+      }
+      return tok;
+    })
+    .join(' ');
+}
 
 /** Stable key for an args object: sorted keys, stable-JSON, trimmed. */
 function canonicalArgsKey(args) {
@@ -73,6 +120,7 @@ function wasCallExecuted(name, args) {
 /** Forget all recorded calls (start of a new chat request). */
 function resetSeenCalls() {
   seenCalls.length = 0;
+  lastShellCommandKey = null;
 }
 
 /** Remember an executed (name, args) pair. */
@@ -238,6 +286,23 @@ async function executeTool(name, args) {
     return { ok: false, invalidArgs: true, error: `invalid arguments for ${name}: ${v.error}` };
   }
   const nargs = v.args;
+  // Consecutive-duplicate guard for shell commands: if the SAME command
+  // (quotes/whitespace-normalized) just executed successfully, a back-to-back
+  // repeat is a redundant model re-emission — skip it with a corrective note
+  // instead of re-running side-effectful shell. Repeats after other steps,
+  // and repeats of FAILED commands (recovery), still execute.
+  if (name === 'run_shell' && typeof nargs.command === 'string') {
+    const key = normalizeShellCommandKey(nargs.command);
+    if (key && key === lastShellCommandKey) {
+      return {
+        ok: false,
+        error:
+          `duplicate shell command skipped: "${nargs.command.slice(0, 90)}" was just executed with the same command — ` +
+          'do NOT run it again; interpret the existing result and continue towards the final answer',
+        skippedDuplicate: true,
+      };
+    }
+  }
   if (!DEDUP_EXEMPT.has(name)) {
     if (wasCallExecuted(name, nargs)) {
       return {
@@ -251,7 +316,11 @@ async function executeTool(name, args) {
     recordCall(name, nargs);
   }
   try {
-    return await Promise.resolve(tool.execute(nargs));
+    const result = await Promise.resolve(tool.execute(nargs));
+    if (name === 'run_shell' && result && result.ok) {
+      lastShellCommandKey = normalizeShellCommandKey(nargs.command);
+    }
+    return result;
   } catch (e) {
     return { ok: false, error: e && e.message ? e.message : String(e) };
   }
@@ -578,6 +647,7 @@ module.exports = {
   registry,
   resetSeenCalls,
   canonicalArgsKey,
+  normalizeShellCommandKey,
   validateArgs,
   toOpenAITools,
   hasTool,

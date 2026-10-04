@@ -524,6 +524,17 @@ router.post('/', async (req, res) => {
               lost
             );
           }
+          // Dedup intercepts (exact-args ledger / consecutive-run_shell guard)
+          // also deserve a visible note: the ⚙ "Running command" line above is
+          // emitted pre-execution, so without this the UI would look like the
+          // command ran multiple times when it was actually deduplicated.
+          if (result && result.skippedDuplicate) {
+            safeWrite(
+              res,
+              statusChunk('⚠ ' + ((result.error || 'duplicate tool call skipped').slice(0, 220))),
+              lost
+            );
+          }
           results.push({ name: c.name, result });
         }
 
