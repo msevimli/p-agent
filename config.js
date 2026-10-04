@@ -2,7 +2,33 @@
  * Central application configuration for plife.
  * Every value is overridable via environment variables.
  */
+const fs = require('fs');
 const path = require('path');
+
+// --- dependency-free .env loader ------------------------------------------
+// Reads <project>/.env (KEY=VALUE lines; '#' comments; optional quotes) into
+// process.env WITHOUT overriding variables that are already set — so a real
+// shell export or a systemd/container env still wins. .env is gitignored and
+// is the home for secrets like LLAMA_API_KEY, keeping them out of
+// data/models-state.json (where the Models UI would otherwise store them in
+// plaintext) and out of the repository.
+(function loadDotEnv() {
+  const envFile = path.join(__dirname, '.env');
+  let raw;
+  try { raw = fs.readFileSync(envFile, 'utf8'); } catch { return; }
+  for (const line of raw.split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#')) continue;
+    const eq = t.indexOf('=');
+    if (eq <= 0) continue;
+    const k = t.slice(0, eq).trim();
+    let v = t.slice(eq + 1).trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+    if (k && process.env[k] === undefined) process.env[k] = v;
+  }
+})();
 
 // Project root = the directory that holds server.js (/home/openclaw/plife).
 const ROOT_DIR = path.resolve(__dirname);
