@@ -1751,16 +1751,21 @@
       tile.querySelector('[data-attach]').addEventListener('click', () => attachFile(f));
       const delBtn = tile.querySelector('[data-del]');
       const confirmEl = tile.querySelector('[data-confirm]');
+      // Confirm state is driven by a `confirming` class on the tile: the CSS
+      // hides the regular action buttons and lets the confirm row take over
+      // the action bar (no absolute positioning, nothing to collide with).
+      const setConfirming = (on) => {
+        confirmEl.classList.toggle('hidden', !on);
+        tile.classList.toggle('confirming', on);
+        delBtn.classList.toggle('danger', on);
+      };
       delBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const show = confirmEl.classList.contains('hidden');
-        confirmEl.classList.toggle('hidden', !show);
-        delBtn.classList.toggle('danger', show);
+        setConfirming(confirmEl.classList.contains('hidden'));
       });
       tile.querySelector('[data-cancel-del]').addEventListener('click', (e) => {
         e.stopPropagation();
-        confirmEl.classList.add('hidden');
-        delBtn.classList.remove('danger');
+        setConfirming(false);
       });
       tile.querySelector('[data-confirm-del]').addEventListener('click', (e) => {
         e.stopPropagation();

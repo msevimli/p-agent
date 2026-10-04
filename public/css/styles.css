@@ -891,19 +891,24 @@ html.dark .lib-tile-meta { color: #6b7280; }
 html.dark .lib-tile-type { background: rgba(255, 255, 255, 0.09); }
 .lib-tile-size { flex-shrink: 0; }
 
-/* action row: muted by default, disclosed on hover (always on touch) */
+/* action row: structured flex with 8px gap; muted by default, disclosed on
+   hover (always visible on touch devices) */
 .lib-tile-actions {
-  display: flex; align-items: center; gap: 0.35rem; padding-top: 0.55rem;
-  border-top: 1px solid #f3f4f6; opacity: 0.45; transition: opacity 0.15s;
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding-top: 0.7rem; border-top: 1px solid #f3f4f6;
+  opacity: 0.45; transition: opacity 0.15s;
 }
-html.dark .lib-tile-actions { border-top-color: rgba(255, 255, 255, 0.08); }
+html.dark .lib-tile-actions { border-top-color: rgba(255,255,255,0.08); }
 .lib-tile:hover .lib-tile-actions { opacity: 1; }
 @media (hover: none) { .lib-tile-actions { opacity: 1; } }
 
+/* text buttons (View / Attach): match the app's .auto-run / .skill-danger sizing */
 .lib-tile-actions .lib-view, .lib-tile-actions .lib-attach {
-  border: none; border-radius: 0.45rem; padding: 0.28rem 0.62rem; cursor: pointer;
-  font-size: 0.74rem; font-weight: 600; color: #fff; background: #2563eb;
-  transition: background 0.15s; white-space: nowrap;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 0.45rem; padding: 0.32rem 0.7rem; cursor: pointer;
+  font-size: 0.78rem; font-weight: 600; line-height: 1; color: #fff;
+  background: #2563eb; white-space: nowrap; flex-shrink: 0;
+  transition: background 0.15s;
 }
 .lib-tile-actions .lib-view:hover, .lib-tile-actions .lib-attach:hover { background: #1d4ed8; }
 html.dark .lib-tile-actions .lib-view, html.dark .lib-tile-actions .lib-attach { background: #3b82f6; }
@@ -912,28 +917,47 @@ html.dark .lib-tile-actions .lib-view:hover, html.dark .lib-tile-actions .lib-at
 .lib-tile-actions .lib-attach:hover { background: #047857; }
 html.dark .lib-tile-actions .lib-attach { background: #10b981; }
 html.dark .lib-tile-actions .lib-attach:hover { background: #059669; }
-.lib-tile-actions .lib-dl {
-  width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
-  border: none; background: transparent; border-radius: 0.45rem; cursor: pointer;
-  font-size: 0.82rem; text-decoration: none; color: #6b7280; flex-shrink: 0;
-  transition: background 0.15s, color 0.15s;
+
+/* icon buttons (download / delete): identical 30px footprint + rounding */
+.lib-tile-actions .lib-dl,
+.lib-tile-actions .lib-del {
+  width: 30px; height: 30px; display: inline-flex; align-items: center;
+  justify-content: center; border: none; background: transparent;
+  border-radius: 0.45rem; cursor: pointer; flex-shrink: 0;
+  color: #6b7280; transition: color 0.15s, background 0.15s;
 }
-html.dark .lib-tile-actions .lib-dl { color: #9ca3af; }
-.lib-tile-actions .lib-dl:hover { background: rgba(128, 128, 128, 0.12); color: #111827; }
+html.dark .lib-tile-actions .lib-dl, html.dark .lib-tile-actions .lib-del { color: #9ca3af; }
+.lib-tile-actions .lib-dl { font-size: 0.85rem; text-decoration: none; }
+.lib-tile-actions .lib-dl:hover { background: rgba(128,128,128,0.12); color: #111827; }
 html.dark .lib-tile-actions .lib-dl:hover { color: #fff; }
-.lib-tile-actions .lib-del { margin-left: auto; }
+.lib-tile-actions .lib-del:hover { color: #ef4444; background: rgba(239,68,68,0.1); }
 .lib-tile-actions .lib-del.danger { color: #dc2626; }
 html.dark .lib-tile-actions .lib-del.danger { color: #f87171; }
 
-/* inline delete confirmation overlays the action row inside the tile */
-.lib-tile .auto-confirm {
-  position: absolute; left: 0.7rem; right: 0.7rem; bottom: 0.6rem;
-  display: flex; justify-content: flex-end; gap: 0.4rem;
-  padding: 0.45rem 0.55rem; border-radius: 0.6rem;
-  background: #fff; border: 1px solid rgba(220, 38, 38, 0.35);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15); z-index: 2;
+/* delete + confirm group pinned to the right edge of the action bar */
+.lib-tile-actions .auto-del-wrap {
+  margin-left: auto; display: inline-flex; align-items: center;
+  gap: 8px; position: relative; flex-shrink: 0;
 }
-html.dark .lib-tile .auto-confirm { background: #1e1f20; }
+
+/* confirming: the regular action buttons leave the flow entirely… */
+.lib-tile.confirming .lib-tile-actions > .lib-view,
+.lib-tile.confirming .lib-tile-actions > .lib-attach,
+.lib-tile.confirming .lib-tile-actions > .lib-dl,
+.lib-tile.confirming .lib-tile-actions .lib-del { display: none; }
+
+/* …and the confirm row takes over the action bar in place — no absolute
+   positioning, no overlay, nothing left behind to clip or collide with */
+.lib-tile.confirming .auto-confirm {
+  position: static; top: auto; right: auto; z-index: auto; animation: none;
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  white-space: nowrap; background: transparent; border: none;
+  box-shadow: none; padding: 0; flex: 1; min-width: 0;
+}
+.lib-tile-actions .skill-danger, .lib-tile-actions .skill-cancel {
+  display: inline-flex; align-items: center; white-space: nowrap;
+  line-height: 1; flex-shrink: 0;
+}
 
 /* Library file preview modal */
 .modal-lg { width: min(60rem, 94vw); max-height: 88vh; display: flex; flex-direction: column; }
