@@ -408,7 +408,7 @@
             </div>
             <div class="modal-field">
               <label for="modelCtx">Context length (tokens)</label>
-              <input id="modelCtx" type="number" min="256" step="256" value="8192" autocomplete="off" />
+              <input id="modelCtx" type="number" min="1" max="1000000" step="1" value="8192" autocomplete="off" inputmode="numeric" />
             </div>
             <div class="modal-field">
               <label for="modelApiKey">API key <span class="field-hint">(optional, for remote endpoints)</span></label>

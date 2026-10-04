@@ -192,6 +192,10 @@ function validate(body) {
   if (!model || !MODEL_RE.test(model)) errs.push('model identifier is required');
   let contextLength = Number(b.contextLength);
   if (!(contextLength > 0)) contextLength = 8192;
+  // Hard cap of 1M tokens: modern large models (DeepSeek 3.x, Claude, ...)
+  // legitimately run 100k–1M context windows, so only an absurd value is
+  // clamped rather than rejecting.
+  contextLength = Math.min(contextLength, 1000000);
   if (errs.length) return { ok: false, errors: errs };
   return {
     ok: true,
@@ -205,15 +209,44 @@ function validate(body) {
 }
 
 // ---------------------------------------------------------------- live status
-/** Best-effort online check against a model's endpoint /health (llama.cpp). */
-function probeStatus(endpoint) {
+/** OpenAI-compatible liveness path, mirroring llamaClient.chatCompletionsUrl
+ * normalization: strip a trailing /chat/completions, add /v1 when missing,
+ * then /models. OpenRouter and friends answer GET /v1/models with the bearer
+ * token; a llama.cpp /health ping against them returns 404 and looks "offline". */
+function probeUrlFor(endpoint) {
+  const base = String(endpoint || '')
+    .replace(/\/+$/, '')
+    .replace(/\/chat\/completions$/i, '');
+  return /\/v1$/i.test(base) ? `${base}/models` : `${base}/v1/models`;
+}
+
+/**
+ * Best-effort liveness check.
+ * - Loopback (local llama.cpp): GET /health, 2xx/3xx = online (llama.cpp
+ *   reports 200 only when a model is loaded).
+ * - Remote (OpenRouter etc.): GET the OpenAI-compatible /models endpoint with
+ *   the model's resolved bearer token. Any HTTP answer (2xx, and 401/403 when
+ *   the server is up but the key is rejected) counts as reachable/online;
+ *   404 = wrong base URL, other 4xx/5xx = offline, transport errors
+ *   distinguish 'unreachable' / 'timeout'.
+ */
+function probeStatus(endpoint, apiKey) {
   return new Promise((resolve) => {
+    const remote = !isLoopback(endpoint);
     const client = /^https:/i.test(endpoint) ? https : http;
+    const url = remote ? probeUrlFor(endpoint) : `${endpoint}/health`;
+    const opts = { timeout: remote ? 3000 : 1500 };
+    if (remote && apiKey) opts.headers = { Authorization: `Bearer ${apiKey}` };
     let req;
     try {
-      req = client.get(`${endpoint}/health`, { timeout: 1500 }, (res) => {
+      req = client.get(url, opts, (res) => {
         res.resume();
-        resolve(res.statusCode >= 200 && res.statusCode < 400 ? 'online' : 'offline');
+        const code = res.statusCode || 0;
+        if (remote) {
+          resolve(code >= 200 && code < 300 ? 'online' : code === 401 || code === 403 ? 'online' : 'offline');
+        } else {
+          resolve(code >= 200 && code < 400 ? 'online' : 'offline');
+        }
       });
     } catch {
       return resolve('unreachable');
@@ -231,7 +264,7 @@ async function listModels() {
     state.models.map(async (m) => {
       const pub = publicModel(m);
       pub.active = m.id === state.activeId;
-      pub.status = await probeStatus(m.endpoint);
+      pub.status = await probeStatus(m.endpoint, resolveApiKey(m.id));
       return pub;
     })
   );
@@ -387,4 +420,6 @@ module.exports = {
   resolveApiKey,
   writeDotEnvVar,
   envVarForModel,
+  probeStatus,
+  probeUrlFor,
 };
