@@ -7,7 +7,8 @@
       "provider": "local",
       "endpoint": "http://127.0.0.1:8080",
       "model": "gemma-2-2b-it-Q4_K_M.gguf",
-      "contextLength": 8192
+      "contextLength": 8192,
+      "hasKey": false
     },
     {
       "id": "qwen-coder",
@@ -15,7 +16,8 @@
       "provider": "local",
       "endpoint": "http://127.0.0.1:8081",
       "model": "qwen2.5-coder-3b-instruct-q4_0.gguf",
-      "contextLength": 32768
+      "contextLength": 32768,
+      "hasKey": false
     },
     {
       "id": "mistral",
@@ -23,7 +25,8 @@
       "provider": "local",
       "endpoint": "http://127.0.0.1:8082",
       "model": "mistral-7b-instruct-v0.3.Q4_K_M.gguf",
-      "contextLength": 32768
+      "contextLength": 32768,
+      "hasKey": false
     },
     {
       "id": "llama",
@@ -31,7 +34,8 @@
       "provider": "local",
       "endpoint": "http://127.0.0.1:8083",
       "model": "llama-3.2-3b-instruct.Q4_K_M.gguf",
-      "contextLength": 8192
+      "contextLength": 8192,
+      "hasKey": false
     },
     {
       "id": "Qwen2.5-VL-3B",
@@ -39,23 +43,26 @@
       "provider": "local",
       "endpoint": "http://127.0.0.1:8080",
       "model": "Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
-      "contextLength": 8192
+      "contextLength": 8192,
+      "hasKey": false
     },
     {
       "id": "ling_3_0",
       "name": "Ling: Ling 3.0 Flash Sante",
-      "provider": "local",
+      "provider": "openrouter",
       "endpoint": "https://openrouter.ai/api/v1",
       "model": "inclusionai/ling-3.0-flash-sante:free",
-      "contextLength": 8192
+      "contextLength": 8192,
+      "hasKey": true
     },
     {
       "id": "deepseek",
       "name": "DeepSeek: DeepSeek V3.2",
-      "provider": "local",
+      "provider": "openrouter",
       "endpoint": "https://openrouter.ai/api/v1",
       "model": "deepseek/deepseek-v3.2",
-      "contextLength": 250000
+      "contextLength": 250000,
+      "hasKey": true
     }
   ]
 }

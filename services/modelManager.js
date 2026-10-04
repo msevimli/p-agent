@@ -100,6 +100,22 @@ function loadState() {
   if (!o || typeof o !== 'object' || Array.isArray(o)) o = {};
   if (!Array.isArray(o.models)) o.models = [];
   if (typeof o.activeId !== 'string') o.activeId = null;
+  // Schema normalization + one-time migration on load: every entry carries a
+  // hasKey boolean (true only where a key is configured AND needed, i.e. not
+  // loopback) and a provider auto-detected from the endpoint URL. Existing
+  // entries that predate the schema (provider 'local' on remote endpoints,
+  // missing hasKey) are corrected and persisted once.
+  let dirty = false;
+  for (const m of o.models) {
+    if (!m || typeof m !== 'object') continue;
+    if (!m.provider || m.provider === 'local') {
+      const auto = detectProvider(m.endpoint, undefined);
+      if (m.provider !== auto) { m.provider = auto; dirty = true; }
+    }
+    const hk = !!resolveApiKey(m.id) && !isLoopback(m.endpoint);
+    if (m.hasKey !== hk) { m.hasKey = hk; dirty = true; }
+  }
+  if (dirty) saveState(o);
   return o;
 }
 
@@ -111,6 +127,24 @@ function saveState(state) {
 /** Local llama.cpp endpoints never need a bearer token. */
 function isLoopback(url) {
   return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])([:/]|$)/i.test(String(url || ''));
+}
+
+/**
+ * Assign a provider label from the endpoint URL when none was given:
+ * loopback llama.cpp servers → 'local', openrouter.ai hosts → 'openrouter',
+ * any other non-loopback endpoint → 'remote'. An explicit provider always
+ * wins — this only fixes the old "everything defaults to local" behavior.
+ */
+function detectProvider(endpoint, explicit) {
+  const given = explicit !== undefined && explicit !== null ? String(explicit).trim() : '';
+  if (given) return given;
+  if (isLoopback(endpoint)) return 'local';
+  const host = String(endpoint || '')
+    .replace(/^https?:\/\//i, '')
+    .split(/[/:]/)[0]
+    .toLowerCase();
+  if (host === 'openrouter.ai' || host.endsWith('.openrouter.ai')) return 'openrouter';
+  return 'remote';
 }
 
 /** Strip secrets from a model before sending it to the client (still has hasKey). */
@@ -201,7 +235,7 @@ function validate(body) {
     ok: true,
     id: b.id,
     name: String(b.name).trim(),
-    provider: String(b.provider || 'local').trim() || 'local',
+    provider: detectProvider(b.endpoint, b.provider),
     endpoint: String(b.endpoint).trim().replace(/\/+$/, ''),
     model: String(model).trim(),
     contextLength,
@@ -422,4 +456,5 @@ module.exports = {
   envVarForModel,
   probeStatus,
   probeUrlFor,
+  detectProvider,
 };
