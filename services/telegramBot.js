@@ -26,6 +26,7 @@ const https = require('https');
 const config = require('../config');
 const { runAgentSession } = require('./chatLoopback');
 const modelManager = require('./modelManager');
+const sessionStore = require('./sessionStore');
 
 const STATE_FILE = path.join(config.dataDir, 'channels-state.json');
 const TOKEN_VAR = 'TELEGRAM_BOT_TOKEN';
@@ -34,6 +35,54 @@ const ADMIN_VAR = 'TELEGRAM_ADMIN_CHAT_ID';
 const MAX_REPLY_CHARS = config.telegramMaxReplyChars;
 const MAX_POLL_TIMEOUT = 50;
 const MAX_BACKOFF_MS = 30000;
+
+// ------------------------------------------------------------------ sessions
+// Telegram conversations are persisted as ordinary dashboard sessions so they
+// appear in the sidebar (and survive restarts). Each chat_id maps to exactly
+// one session: `tg-<chat_id>` (negative group ids are fine — session ids are
+// opaque strings). History is replayed into every agent call, so the bot has
+// conversation memory, and each exchange is appended after the reply lands.
+const TG_SESSION_PREFIX = 'tg-';
+const TG_SESSION_META = '📡 via Telegram';
+// Cap replayed history (~20 turns) to keep agent prompts bounded.
+const MAX_TG_HISTORY_MESSAGES = 40;
+
+function sessionIdForChat(chatId) {
+  return TG_SESSION_PREFIX + String(chatId);
+}
+
+/**
+ * Load (or create) the persisted session for a chat. Returns
+ * { sessions, session } — the `sessions` array is the LIVE array that must be
+ * saved back via persistTelegramSession(), so a load→modify→save cycle never
+ * re-reads stale state from disk.
+ */
+function loadTelegramSession(chatId, firstUserText) {
+  const id = sessionIdForChat(chatId);
+  const sessions = sessionStore.load();
+  let session = sessions.find((s) => s && s.id === id);
+  const now = new Date().toISOString();
+  if (!session) {
+    session = {
+      id,
+      title: String(firstUserText || '').slice(0, 60) || 'Telegram chat',
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    sessions.unshift(session);
+  }
+  return { sessions, session };
+}
+
+function persistTelegramSession(sessions, session) {
+  session.updatedAt = new Date().toISOString();
+  try {
+    sessionStore.save(sessions);
+  } catch (e) {
+    console.error('[telegram] could not persist session:', e && e.message ? e.message : e);
+  }
+}
 
 // ------------------------------------------------------------------ state
 function defaultState() {
@@ -348,7 +397,15 @@ async function handleMessage(msg) {
   if (text === '/start' || text === '/help') { await sendMarkdown(chatId, HELP_TEXT); return; }
   if (text === '/status') { await sendMarkdown(chatId, buildStatusText()); return; }
 
-  // ---- agent roundtrip --------------------------------------------------
+  // ---- agent roundtrip (persisted per-chat session) ------------------------
+  // The chat's session is loaded FIRST: its history is replayed into the
+  // agent call (conversation memory across messages) and the new exchange is
+  // appended to the SAME array that gets saved back — one load→modify→save
+  // cycle, no stale re-reads.
+  const { sessions, session } = loadTelegramSession(chatId, text);
+  const userMsg = { role: 'user', content: text };
+  const history = session.messages.slice(-MAX_TG_HISTORY_MESSAGES);
+
   let workingMsg = null;
   try {
     workingMsg = await sendMessage(chatId, '⏳ Working on it…');
@@ -357,11 +414,13 @@ async function handleMessage(msg) {
   let result;
   try {
     result = await runAgentSession({
-      messages: [{ role: 'user', content: text }],
+      messages: [...history, userMsg],
       generation: { temperature: 0.4, top_p: 0.95, max_tokens: 2048 },
     });
   } catch (e) {
     const errText = `⚠️ Agent request failed: ${e && e.message ? e.message : e}`;
+    session.messages.push(userMsg, { role: 'assistant', content: errText, meta: TG_SESSION_META });
+    persistTelegramSession(sessions, session);
     updateChannel({ lastRunAt: new Date().toISOString(), lastError: errText.slice(0, 300) });
     if (workingMsg) { try { await editMessage(chatId, workingMsg.message_id, errText); } catch { await sendMessage(chatId, errText); } }
     else { try { await sendMessage(chatId, errText); } catch { /* chat unreachable */ } }
@@ -373,9 +432,15 @@ async function handleMessage(msg) {
   const answer = (result.text || '').trim();
   if (!answer) {
     const note = '⚠️ The agent returned an empty response. Try rephrasing, or check the model endpoint in Models.';
+    session.messages.push(userMsg, { role: 'assistant', content: note, meta: TG_SESSION_META });
+    persistTelegramSession(sessions, session);
     if (workingMsg) { try { await editMessage(chatId, workingMsg.message_id, note); } catch { try { await sendMessage(chatId, note); } catch {} } }
     return;
   }
+
+  // Record the exchange in the dashboard session (visible in the sidebar).
+  session.messages.push(userMsg, { role: 'assistant', content: answer, meta: TG_SESSION_META });
+  persistTelegramSession(sessions, session);
 
   const chunks = splitReply(answer);
   const footer = result.statuses && result.statuses.length
