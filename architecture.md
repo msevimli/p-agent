@@ -2,67 +2,81 @@
 
 ## 1. Introduction & Tech Stack
 
-plife is a **local AI agent dashboard** that serves a browser UI and an agentic
-chat API over a locally hosted llama.cpp backend. It is 100% local by default —
-no cloud LLM required — while remaining compatible with remote
-OpenAI-style endpoints (OpenRouter etc.) through the same client layer.
+p-agent (plife) is a **multi-channel, self-hosted AI agent platform**: a web
+dashboard, a Telegram bot, and a terminal CLI (`pagent`) all drive ONE agentic
+pipeline — tool calling (shell, files, library, skills, automations),
+streaming answers, persistent conversations, and an automations scheduler.
+Model backends are pluggable: local llama.cpp servers or remote
+OpenAI-compatible endpoints (OpenRouter etc.) through the same client layer.
 
 - **Runtime:** Node.js >= 18, CommonJS modules; single runtime dependency is
   `express` (^4.19).
 - **Backend:** Express app in `server.js` (entry point/router only). Business
   logic is split into `routes/` (thin HTTP layer) and `services/` (no HTTP).
-- **Model backend:** llama.cpp `llama-server` exposed via its OpenAI-compatible
-  `/v1/chat/completions` SSE endpoint (default `http://127.0.0.1:8080`).
-- **Models:** multi-model registry (`data/models-state.json`), all GGUF Q4:
-  `gemma-2-2b-it-Q4_K_M.gguf` (default, :8080, active), `qwen2.5-coder-3b-instruct`,
-  `mistral-7b-instruct`, `Llama-3.2-3B-Instruct`. Model selection is dynamic —
-  the active model's endpoint/model is resolved per request, no restart; the
-  bearer token resolves from .env (`LLAMA_API_KEY_<MODEL_ID>` per-model var,
-  falling back to the global `LLAMA_API_KEY`) — keys are never stored in
-  models-state.json, and keys typed into the dashboard are routed to .env by
-  modelManager.writeDotEnvVar (see `docs` in services/modelManager.js).
-- **Model format caveat (important):** this llama.cpp build reports
-  `chat_format: Content-only`, so native OpenAI `tool_calls` never fire.
-  Tool calling therefore relies on a structured **JSON-block contract** the
-  system prompt teaches the model, plus a tolerant client-side extractor.
-- **Frontend:** vanilla JS single-page app (`public/`), Gemini-inspired
-  dark/light theme, Tailwind/marked/highlight.js from CDNs, SSE chat streaming,
-  session list, file explorer, skills, models, and automations panels.
-- **Storage:** flat JSON files under `data/` (no database).
-  No vector DB — "memory" is session history plus the skills registry.
-- **Scheduling:** built-in automations engine (cron/interval), 15s tick,
-  never system cron.
+- **Model backends:** local llama.cpp `llama-server` (OpenAI-compatible
+  `/v1/chat/completions` SSE, default `http://127.0.0.1:8080`) and/or remote
+  OpenAI-compatible providers (OpenRouter). The active model is resolved per
+  request from the registry — no restart to switch.
+- **Models:** multi-model registry (`data/models-state.json`) mixing local GGUF
+  models (gemma, qwen-coder, mistral, llama, Qwen2.5-VL) and remote OpenRouter
+  models (deepseek/deepseek-v3.2, qwen-2.5-7b, nemotron-3-120b, ling-3).
+  Bearer tokens resolve from `.env` (`LLAMA_API_KEY_<MODEL_ID>` per-model,
+  falling back to `LLAMA_API_KEY`) — keys never live in state files; keys typed
+  into the dashboard are routed to `.env` by `modelManager.writeDotEnvVar`.
+- **Tool-calling formats:** Content-only llama.cpp builds cannot emit native
+  `tool_calls`, so the system prompt teaches a structured **JSON-block
+  contract** (`{"tool":"<name>","args":{...}}`) plus a tolerant extractor;
+  OpenAI-compatible remotes additionally flow native `tool_calls` through the
+  same loop (native first, block extractor as fallback).
+- **Frontend:** vanilla JS single-page app (`public/`), dark/light theme,
+  Tailwind/marked/highlight.js from CDNs, SSE chat streaming, session list,
+  file explorer, skills, models, automations, library, and channels panels.
+- **Channels:** web (SSE via browser), Telegram (`services/telegramBot.js`,
+  native long-polling, zero new dependencies) and terminal CLI
+  (`bin/pagent.js`, npm-linked as `pagent`).
+- **Storage:** flat JSON files under `data/` (no database); library blobs in
+  `data/library/`. No vector DB — “memory” is session history + skills.
+- **Scheduling:** built-in automations engine (cron/interval), 15s tick, never
+  system cron.
 
 ## 2. Directory Structure
 
 ```
-plife/
+p-agent/
 ├── server.js                 # Express init, middleware, route mounting, listener,
-│                             #   automation scheduler start/stop (entry only)
+│                             #   automation scheduler + telegram syncStart/stop
 ├── config.js                 # env-driven config: port, llama params, timeouts,
-│                             #   queue limits, workRoot sandbox, tool-loop knobs
-├── package.json              # express dependency, npm start/dev scripts
-├── README.md                 # usage, API table, llama.cpp notes
-├── architecture.md           # this document
+│                             #   queue limits, workRoot sandbox, tool-loop knobs,
+│                             #   telegram knobs, library knobs
+├── package.json              # express dependency; bin: pagent -> bin/pagent.js
+├── bin/pagent.js             # terminal CLI: REPL chat + management subcommands
+├── README.md / architecture.md   # this documentation
 │
 ├── routes/                   # thin HTTP endpoints (request/response only)
-│   ├── health.js             #   GET /api/health — server + llama status, context
+│   ├── health.js             #   GET /api/health — server + model status
 │   ├── chat.js               #   POST /api/chat — agentic tool loop + SSE proxy
 │   ├── sessions.js           #   /api/sessions CRUD (JSON persistence)
-│   ├── fs.js                 #   /api/fs/list, /api/fs/read (file explorer)
-│   ├── skills.js             #   /api/skills CRUD, toggle, run
 │   ├── models.js             #   /api/models CRUD, activate, status probes
 │   ├── automations.js        #   /api/automations CRUD, run, logs
+│   ├── skills.js             #   /api/skills CRUD, toggle, run
+│   ├── library.js            #   /api/library CRUD + upload (raw body)
+│   ├── channels.js           #   /api/channels — Telegram config/status/toggle
+│   ├── fs.js                 #   /api/fs/list, /api/fs/read (file explorer)
 │   └── queue.js              #   GET /api/queue — LLM queue stats
 │
 ├── services/                 # business logic (no HTTP)
 │   ├── llamaClient.js        # payload build, streaming client, SSE parse,
 │   │                         #   /health /props /slots probes, slot supervisor
-│   ├── toolLoop.js           # tool registry dispatch, system-prompt builder,
-│   │                         #   JSON tool-call extractor, automation enforcement
 │   ├── requestQueue.js       # strict FIFO (limit 1) + transient retries/backoff
+│   ├── toolLoop.js           # tool registry dispatch, system-prompt builder,
+│   │                         #   JSON tool-call extractor, dedup guards,
+│   │                         #   automation enforcement
+│   ├── chatLoopback.js       # HTTP loopback into /api/chat (channel bridge)
+│   ├── telegramBot.js        # Telegram channel: long-poll, auth, replies
+│   ├── libraryManager.js     # persistent file library (index + blobs)
 │   ├── sessionStore.js       # session persistence (data/sessions.json)
-│   ├── modelManager.js       # model registry, active-model resolution
+│   ├── modelManager.js       # model registry, active-model resolution,
+│   │                         #   writeDotEnvVar (.env key management)
 │   ├── skillManager.js       # SKILL.md registry, run/validate/migrate
 │   └── automationManager.js  # cron/interval engine, script/skill/prompt actions
 │
@@ -71,154 +85,241 @@ plife/
 │   ├── shellTools.js         #   run_shell (timeout, destructive-command denylist)
 │   ├── skillsTools.js        #   list/run/write/delete_skill
 │   ├── automationsTools.js   #   create/list/run/delete_automation
-│   └── index.js              #   registry = concat of the four (13 tools)
+│   ├── libraryTools.js       #   list/read/upload_library_file
+│   └── index.js              #   registry = concat of the above (16 tools)
 │
 ├── public/                   # frontend (no build step)
 │   ├── index.html            #   single page, CDN Tailwind/marked/highlight.js
-│   ├── css/styles.css        #   dark/light theme, sidebar accordions, panels
-│   └── js/app.js             #   SSE chat, sessions, file explorer, skills,
-│                             #   models, automations, queue/usage UI
+│   ├── css/styles.css        #   dark/light theme, sidebar, panels, grid tiles
+│   └── js/app.js             #   SSE chat, sessions, explorer, skills, models,
+│                             #   automations, library, channels, queue/usage UI
 │
-├── data/                     # JSON persistence (gitignored state)
-│   ├── sessions.json         #   chat sessions/messages
+├── data/                     # JSON persistence (gitignored runtime state;
+│   │                         #   models-state.json is tracked)
+│   ├── sessions.json         #   chat sessions (browser s_*, Telegram tg-*, CLI cli)
 │   ├── models-state.json     #   model registry + activeId
 │   ├── automations-state.json#   automations + logs (bounded 20)
-│   └── skills-state.json     #   skill enabled/disabled state
+│   ├── skills-state.json     #   skill enabled/disabled state
+│   ├── channels-state.json   #   telegram metadata (enabled, whitelist, lastError)
+│   ├── library-index.json    #   library file metadata
+│   └── library/              #   library blobs (uuid files)
 │
 ├── skills/                   # workspace skills (user-authored, agent-runnable)
-│   └── <name>/SKILL.md       #   YAML frontmatter (name/version/description/entry)
-│                             #   + Markdown instructions; run via node run.js
+│   └── <name>/SKILL.md       #   YAML frontmatter + Markdown instructions
 │
-└── scripts/                  # test harnesses / dev utilities
-    ├── stall-cap-test.js     #   mock-upstream slot-stall scenarios
-    ├── enforce-test.js       #   automation-enforcement unit cases
-    └── automation-tool-smoke.js # automation API smoke test
+└── scripts/                  # dev utilities / test harnesses
 ```
 
-## 3. Core Components & Modules
+## 3. High-Level Component Flow
+
+```
+   ┌──────────────┐   ┌───────────────┐   ┌───────────────┐
+   │  Web UI      │   │  Telegram     │   │  pagent CLI   │
+   │ (browser)    │   │  chat_id      │   │  (terminal)   │
+   └──────┬───────┘   └───────┬───────┘   └───────┬───────┘
+          │ /api/chat SSE    │ getUpdates·sendMSG │ /api/chat SSE
+          │                  │ (telegramBot.js)   │ (bin/pagent.js)
+          │                  └─────────┬───────────┘
+          │                            │ chatLoopback.runAgentSession()
+          │                            │  (POST own /api/chat, consume SSE)
+          ▼                            ▼
+   ┌───────────────────────────────────────────────────────┐
+   │                 /api/chat  (routes/chat.js)           │
+   │  agentic tool loop: complete() → tool calls → tools   │
+   │  → results fed back → final answer (≤10 iterations)   │
+   │  • empty-stream fallback (re-run without tools)       │
+   │  • length-cap continuation (≤8 rounds)                │
+   │  • automation enforcement                             │
+   └───────┬───────────────────────────────┬───────────────┘
+           │ completes (SSE)               │ toolLoop.executeTool()
+           ▼                               ▼
+   ┌───────────────┐              ┌─────────────────────────┐
+   │ llamaClient   │              │ tools/ (16 tools)       │
+   │ requestQueue  │              │ fileTools / shellTools  │
+   │ (FIFO limit 1,│              │ skillsTools /           │
+   │  retry+backoff)              │ automationsTools /      │
+   │   │                          │ libraryTools            │
+   │   ▼                          └─────────┬───────────────┘
+   │ llama.cpp / OpenRouter                 ▼
+   └───────────────┘              dedup guards (toolLoop):
+                                  • exact-args ledger (side-effectful tools)
+                                  • consecutive run_shell guard (normalized)
+                                  • schema validation before execution
+                                          │
+         ┌────────────────────────────────┘
+         ▼
+   sessionStore (data/sessions.json)
+   • browser: s_*        (client-persisted)
+   • telegram: tg-<chat_id>  (telegramBot.js, history replayed)
+   • cli: cli             (bin/pagent.js)
+```
+
+## 4. Core Components & Modules
 
 - **Agent Core / ReAct Loop** (`routes/chat.js` + `services/toolLoop.js`):
-  Single SSE connection to the browser drives an agentic loop. Each turn sends
-  an OpenAI `tools` array AND a system prompt that instructs the model to emit
-  exactly one JSON object `{"tool":"<name>","args":{...}}` when a tool is
-  needed. The loop: complete() -> collect calls (native `tool_calls`, if ever
-  emitted, first; else the JSON-block extractor) -> execute via the registry ->
-  feed results back as alternating assistant/user messages (this llama build
-  rejects `role:"tool"`) -> repeat until a plain-text final answer or
-  `toolMaxIterations` (default 10). `type:"status"` SSE events stream tool
-  activity ("⚙ Writing file: …") live. `finish_reason:"length"` outputs are
-  continued automatically (chunked continuation, up to 8 rounds) instead of
-  being truncated — this also recovers JSON tool calls cut off mid-object.
-  An automation-enforcement layer intercepts model explanations on
-  automation-creation requests and forces/executes the `create_automation`
-  call. A slot-aware supervisor polls llama.cpp `/slots` so slow prompt
-  processing is never killed by a fixed timeout, while genuinely dead streams
-  abort with a status event; SSE heartbeats keep long streams alive.
+  Single SSE connection drives the agentic loop. Each turn sends an OpenAI
+  `tools` array AND a system prompt that instructs the model to emit exactly
+  one JSON object when a tool is needed. The loop: `complete()` → collect
+  calls (native `tool_calls` first, else the JSON-block extractor) → execute
+  via the registry → feed results back as alternating assistant/user messages
+  (this llama build rejects `role:"tool"`) → repeat until a plain-text final
+  answer or `toolMaxIterations` (default 10). `type:"status"` SSE events
+  stream tool activity (”⚙ Running command: …”) live, and dedup intercepts
+  surface as explicit ”⚠ duplicate … skipped” events.
+  **Empty-stream fallback:** if a tools-enabled completion ends in an empty
+  stream (some providers/models cannot carry the tools array — e.g.
+  qwen-2.5-7b via OpenRouter/Phala), the request is re-run WITHOUT the tools
+  array (base system prompt) and still streams a conversational answer, with
+  a status event explaining the degradation — the turn never stalls.
+  **Continuation:** `finish_reason:"length"` outputs are completed in up to 8
+  rounds (also recovers truncated JSON tool calls). A slot-aware supervisor
+  polls llama.cpp `/slots`; SSE heartbeats keep long streams alive.
+  Automation enforcement intercepts explanations on automation-creation
+  requests and forces/executes the `create_automation` call.
 
-- **Tool-Calling System** (`tools/` + `services/toolLoop.js`): 13 registered
-  tools in the registry (`tools/index.js`), each
-  `{ name, description, parameters, execute }` — file tools (read/write/edit,
-  sandboxed to `workRoot`, traversal-blocked), shell (timeout-clamped,
-  destructive-command denylist), skills tools, and automations tools. The
-  system prompt embeds the full JSON schema of every tool, and
-  `toOpenAITools()` builds the parallel OpenAI `tools` array. The extractor
-  (`extractToolCall`) recognizes, in order: fenced ` ```json ` blocks,
-  `<tool_call>` blocks, a bare object with a `"tool"` key anywhere in the text,
-  or whole-output pure JSON — each candidate must parse as valid JSON and name
-  a registered tool (validation never throws; results come back as
-  `{ok, …}` objects, so the loop always has something to feed back).
-  Streaming robustness: native `tool_calls.arguments` fragments can split
-  mid-token (`"scripts/c` + `urrent"`); `joinToolCallArgs` re-joins them on
-  JSON token boundaries (quote re-balancing) so parsed args are not silently
-  emptied. Per-execution safety rails live in `toolLoop.executeTool` + the
-  chat loop: exact-duplicate calls (same name + canonical args, one chat
-  request) are refused with a "duplicate tool call skipped" result —
-  writable/side-effectful tools (file writes, automations CRUD) execute once —
-  while `run_shell`/`run_skill`/`run_automation` stay exempt (repeatable on
-  purpose); a tool that throws is converted to an `{ok:false}` result (never
-  crashes the loop); and every call is schema-validated BEFORE execution
-  (`validateArgs`): required parameters must be present, type-coerced
-  (numeric strings like `"5"` become numbers), non-empty and free of
-  placeholder tokens (`?`, `...`, `<path>`, `N/A`, `your_file_name`) — an
-  invalid call is rejected with a corrective `invalidArgs` error that is fed
-  back to the model for retry (never executed, never recorded in the dedup
-  ledger), surfacing live as a "Tool call rejected" status event.
+- **Tool-Calling System** (`tools/` + `services/toolLoop.js`): 16 registered
+  tools, each `{ name, description, parameters, execute }` — file tools
+  (sandboxed to `workRoot`, traversal-blocked), shell (timeout-clamped,
+  destructive-command denylist), skills, automations, and library tools. The
+  extractor recognizes fenced ` ```json ` blocks, `<tool_call>` blocks, bare
+  `{"tool":…}` objects, and whole-output JSON — always validated against the
+  registry. Fragmented native `tool_calls.arguments` are re-joined on JSON
+  token boundaries (`joinToolCallArgs`).
+  **Deduplication (per chat request):**
+  - *Exact-args ledger* — writable/side-effectful tools (file writes,
+    automations CRUD) execute once per request; exact repeats are refused with
+    a corrective result (`skippedDuplicate`) fed back to the model.
+  - *Consecutive `run_shell` guard* — a shell command that just succeeded is
+    not executed again back-to-back with the same normalized command, even if
+    the model re-emits it re-quoted: `curl -s 'URL'`, `curl -s "URL"` and
+    `curl -s URL` compare equal (quote-char + whitespace-insensitive key,
+    quoted inner whitespace stays distinct). A repeat after other steps still
+    executes (intentional double runs work), and retries of FAILED commands
+    still execute (recovery).
+  **Validation before execution:** required parameters must be present,
+  type-coerced, non-empty and free of placeholder tokens; an invalid call is
+  rejected with a corrective `invalidArgs` error (never executed, never
+  recorded in the ledger) and surfaces live as a “Tool call rejected” event.
+
+- **Channels & Loopback** (`services/telegramBot.js` + `services/chatLoopback.js`
+  + `routes/channels.js`): Telegram long-polls `getUpdates` (no new
+  dependencies), processes updates sequentially with exponential backoff, and
+  authorizes each chat against the whitelist (`allowedChatIds` from
+  `channels-state.json`) plus `TELEGRAM_ADMIN_CHAT_ID` (always allowed,
+  non-removable). Authorized messages go through `chatLoopback`, which POSTs
+  the conversation to the server's own `/api/chat` and consumes the SSE stream
+  — the EXACT pipeline the browser uses (tools, library attachments,
+  automations enforcement, request queue), so Telegram requests serialize with
+  web/CLI requests on the single model slot. Replies use markdown with a
+  plain-text fallback (HTTP 400), chunked at 4000 chars, with a live
+  ”⏳ Working…” bubble that is edited into the final answer and a tool-activity
+  footer. `/api/channels` exposes status/config: token is written ONLY to
+  `.env` via `writeDotEnvVar` (`tokenSet` boolean in responses), the whitelist
+  is stored in `channels-state.json`, and a `getMe` test endpoint validates
+  connectivity.
+
+- **Terminal CLI** (`bin/pagent.js`): executable zero-dependency client
+  (node core + readline), npm-linked as `pagent`. `chat` opens a REPL
+  (streaming /api/chat SSE, statuses printed live, commands `/help`, `/exit`,
+  `/quit`, `/new`, `/attach`, `/model`; Ctrl+C aborts the in-flight
+  generation, second press exits; piped input is serialized and exit waits for
+  the in-flight exchange). `pagent chat "<text>"` is one-shot. Management
+  subcommands: `sessions`, `models [id]`, `channels [on|off]`, `config
+  [set KEY=value]`, with `--json` output. Server-first with offline
+  degradation: read-only commands fall back to the local `data/*` files when
+  the server is down; secrets are never printed (presence-only).
+
+- **Session State Persistence** (`services/sessionStore.js` +
+  `data/sessions.json`): one shared store for ALL channels.
+  - Browser sessions (`s_*`) are client-driven: the UI POSTs the full message
+    array per exchange (replace semantics).
+  - Telegram sessions (`tg-<chat_id>`) and CLI sessions (`cli`) are
+    server/CLI-driven: `telegramBot.js` (resp. `bin/pagent.js`) load the chat's
+    session, replay the last 40 messages into every agent call (conversation
+    memory), and append each user/assistant exchange with an
+    `📡 via Telegram` / `⌨ via CLI` meta badge. Every channel's history is
+    visible in the dashboard sidebar and survives restarts.
+
+- **File Library** (`services/libraryManager.js` + `routes/library.js` +
+  `tools/libraryTools.js`): persistent user-file store (blobs in
+  `data/library/`, metadata in `library-index.json`), raw-body uploads capped
+  at `LIBRARY_MAX_UPLOAD_MB` (50). Chat attachments are resolved server-side
+  and inlined into the last user message (60k/file, 120k total caps; binary
+  files replaced by metadata pointers to `read_library_file`). The dashboard
+  renders the library as a grid of tiles; `pagent` REPL attaches files via
+  `/attach`.
 
 - **Memory & Storage** (`data/`, `services/sessionStore.js`,
-  `services/skillManager.js`): flat JSON persistence — sessions (messages with
-  per-message usage metadata), model registry (`models-state.json`,
-  re-read per request; masked API keys), automations state + bounded logs, and
-  per-skill enabled state (`skills-state.json`). Skills live as
-  `skills/<name>/SKILL.md` (frontmatter + Markdown instructions) with an entry
-  script run by `run_skill`; legacy `skill.json` skills auto-migrate. The
-  config layer (`config.js`) is env-driven end to end (PORT, LLAMA_*,
-  TOOL_CALLING, TOOL_MAX_ITERATIONS, QUEUE_*, PLIFE_WORK_ROOT, …). No vector
-  database — retrieval is session history + the skills registry only.
+  `services/skillManager.js`): flat JSON persistence — sessions, model
+  registry (re-read per request, masked keys), automations state + bounded
+  logs, skills state, channels state, library index + blobs. The config layer
+  is env-driven end to end (PORT, LLAMA_*, TOOL_CALLING, TOOL_MAX_ITERATIONS,
+  QUEUE_*, TELEGRAM_*, LIBRARY_*, PLIFE_WORK_ROOT, PLIFE_DOTENV_FILE, …).
 
 - **Local LLM Integration** (`services/llamaClient.js` + `requestQueue.js` +
   `services/modelManager.js`): the client builds the OpenAI-compatible payload
   (system injection, role filtering, sampler overrides,
-  `stream_options.include_usage` for real token counts), opens the upstream
-  SSE stream, and parses it into `{content, toolCalls, usage, finishReason}`.
-  All completions flow through a strict FIFO queue (`QUEUE_LIMIT=1` — parallel
-  requests to a single-slot llama.cpp produce empty streams), with transient
-  failures (hang-up/ECONNRESET/empty stream) re-queued at the back with
-  backoff. Endpoints may be `http` or `https` (OpenRouter-style remotes work).
-  Probes: `/health` (status), `/props` (context window), `/slots` (liveness).
+  `stream_options.include_usage`), opens the upstream SSE stream and parses it
+  into `{content, toolCalls, usage, finishReason}`. All completions flow
+  through a strict FIFO queue (`QUEUE_LIMIT=1`). Transient failures
+  (hang-up/ECONNRESET/empty stream) retry at 350ms; throttling-class errors
+  (OpenRouter 402 in-flight-budget, 429 rate-limited) retry at 8s backoff —
+  both bounded by `QUEUE_RETRIES`. Endpoints may be `http` or `https`
+  (OpenRouter-style remotes). Probes: `/health`, `/props` (context window),
+  `/slots` (liveness).
 
 - **Automations Engine** (`services/automationManager.js` +
-  `routes/automations.js`): dependency-free 5-field cron engine with wall-clock
-  aligned intervals (no drift/catch-up storms), 15s tick started from
-  `server.js`. Actions: `script` (workspace-relative, `node`, traversal-blocked),
-  `skill` (via skillManager), `prompt` (LLM completion with a directive task
-  system prompt — the bare default makes small models emit whitespace).
-  Logs bounded at 20 entries; runs are serialized through the request queue.
-  Automation-creation enforcement: when the current user turn commands a
-  creation, the loop intercepts explanations instead of `create_automation`
-  calls (forced corrective rounds, then server-side creation inferred from the
-  user's wording). A successful `create_automation` through the NORMAL tool
-  path marks the request settled, so the model's legitimate final answer is
-  never misread as an evasion (this false-positive previously burned the
-  iteration budget and reported "max tool steps" for a task that had already
-  succeeded).
+  `routes/automations.js`): dependency-free 5-field cron engine with
+  wall-clock aligned intervals, 15s tick started from `server.js`. Actions:
+  `script` (workspace-relative, `node`, traversal-blocked), `skill` (via
+  skillManager), `prompt` (LLM completion). Logs bounded at 20 entries; runs
+  serialize through the request queue. Creation enforcement as described in
+  the Agent Core section.
 
 - **Frontend** (`public/`): single-page vanilla JS app with a sidebar
-  (SESSIONS accordion + TOOLS: File Explorer, Skills, Models, Automations),
-  streaming chat with Markdown/highlight rendering, generation settings and
-  context-budget popovers, stop-generation via AbortController, per-message
-  ⚡ duration/token badges, and a queue-position status event. All panels are
-  plain JS view toggles over the REST/SSE APIs — no build pipeline.
+  (SESSIONS accordion + TOOLS: File Explorer, Skills, Models, Automations,
+  Library, Channels), streaming chat with Markdown/highlight rendering,
+  generation settings + context-budget popovers, stop-generation via
+  AbortController, per-message ⚡ duration/token badges, library grid tiles
+  with inline delete-confirm state machine, and a channels panel (token,
+  whitelist, toggle, test-connection, live status meta). No build pipeline.
 
-## 4. Data Flow
+## 5. Data Flow
 
-1. **User input:** the browser sends `POST /api/chat` (JSON `{messages,
-   generation?}`) and holds an SSE connection open.
-2. **Payload build** (`routes/chat.js` -> `services/llamaClient.js`): a system
-   prompt is assembled (`toolLoop.buildSystemPrompt` = base prompt + tool
-   instructions + embedded JSON schema of all 13 tools + automations guidance)
-   and prepended to history; the OpenAI `tools` array is attached; sampler
-   overrides from the UI's `generation` object are applied.
-3. **Queue:** the call enters the strict FIFO request queue (limit 1); queue
-   position is surfaced via `X-Queue-Position` and a status event.
-4. **Upstream generation:** `complete()` -> `doComplete()` POSTs the payload to
-   the active model's `/v1/chat/completions`, consumes the SSE stream, and
-   resolves `{content, toolCalls, usage, finishReason}` (chunks are also
-   forwarded live for the non-tool path). The slot supervisor and SSE
-   heartbeats keep the stream alive.
-5. **Tool detection & execution:** if native `tool_calls` or an
-   extractable JSON block is found, `toolLoop.executeTool` runs the tool; the
-   call is recorded as an assistant message and the result fed back as a user
-   message; the loop repeats (step 4) with the extended history.
-6. **Answer:** when the model replies with plain text and no further call, the
-   text is streamed to the browser as OpenAI-format content chunks, followed by
-   a usage chunk (`usage.elapsedMs` badge) and `data: [DONE]`.
-7. **Persistence & UI:** the exchange is saved to `data/sessions.json` via
-   `sessionStore`; the frontend renders the transcript with Markdown/syntax
-   highlighting and updates the context/token budget display.
+1. **User input:** the browser sends `POST /api/chat` (SSE); the Telegram bot
+   (after whitelist auth) and the CLI loop through `chatLoopback`/`streamChat`
+   into the same endpoint, each replaying its persisted session history.
+2. **Payload build** (`routes/chat.js` → `services/llamaClient.js`): the
+   system prompt (`toolLoop.buildSystemPrompt` = base + tool instructions +
+   embedded schema of all 16 tools + automations + library guidance) is
+   prepended; the OpenAI `tools` array is attached; attachments are inlined
+   into the last user message.
+3. **Queue:** the completion enters the strict FIFO request queue (limit 1);
+   position surfaced via `X-Queue-Position` + a status event.
+4. **Upstream generation:** `complete()` POSTs to the active model's
+   `/v1/chat/completions`, consumes the SSE stream, resolves
+   `{content, toolCalls, usage, finishReason}`. Slot supervisor + heartbeats
+   keep the stream alive.
+5. **Tool detection & execution:** native `tool_calls` or an extracted JSON
+   block → `toolLoop.executeTool` (dedup guards + validation first) → the call
+   is recorded as an assistant message, the result fed back as a user message;
+   the loop repeats with extended history. An empty-stream completion
+   degrades to a tool-less re-run instead of failing.
+6. **Answer:** plain text with no further call → streamed as content chunks,
+   then a usage chunk (`elapsedMs` badge) and `data: [DONE]`.
+7. **Persistence & UI:** the channel owner persists the exchange — browser:
+   client POSTs to `/api/sessions`; Telegram: `telegramBot.js` appends to
+   `tg-<chat_id>`; CLI: `bin/pagent.js` appends to `cli` — all into
+   `data/sessions.json`, visible in the dashboard sidebar.
 
-(Note: while debugging tool-call formatting, a diagnostic dump in
-`services/llamaClient.js` appended the exact upstream payload and raw response
-chunks to `/tmp/plife-dump.log`. The investigation concluded — root causes:
-fragmented native tool-call arguments silently parsing to `{}`, no duplicate-
-call guard, and the automation-enforcement false-positive — and the dump is
-now opt-in via `PLIFE_DEBUG_DUMP=1` (`config.debugDump`).)
+## 6. Resilience Notes (learned in production)
+
+- Diagnostic dump (exact upstream payload + raw chunks) is opt-in via
+  `PLIFE_DEBUG_DUMP=1` writing `/tmp/plife-dump.log`.
+- Provider quirks observed: qwen-2.5-7b-instruct via OpenRouter/Phala returns
+  EMPTY streams whenever the `tools` array is present — the empty-stream
+  fallback absorbs this, but the reliable agentic defaults are
+  deepseek/deepseek-v3.2 (and similar tool-capable remotes).
+- Models often re-emit the same shell command back-to-back with different
+  quoting — the consecutive `run_shell` guard with quote/whitespace-normalized
+  keys is what keeps side effects single-execution in the loop.
