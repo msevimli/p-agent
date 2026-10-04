@@ -840,3 +840,74 @@ html.dark .modal-error { color: #f87171; }
 html.dark .skill-danger.save { background: #3b82f6; }
 html.dark .skill-danger.save:hover { background: #2563eb; }
 .model-busy { opacity: 0.6; pointer-events: none; }
+
+/* ==================================================================
+   Library view + chat attachments
+   ================================================================== */
+.lib-row {
+  display: flex; align-items: flex-start; gap: 0.85rem; min-width: 0;
+}
+.lib-icon { font-size: 1.5rem; line-height: 1.4; flex-shrink: 0; }
+.lib-name { word-break: break-all; }
+.lib-actions {
+  display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; margin-left: auto;
+}
+.lib-actions .lib-view, .lib-actions .lib-attach {
+  border: none; border-radius: 0.45rem; padding: 0.3rem 0.7rem; cursor: pointer;
+  font-size: 0.76rem; font-weight: 600; color: #fff; background: #2563eb;
+  transition: background 0.15s;
+}
+.lib-actions .lib-view:hover, .lib-actions .lib-attach:hover { background: #1d4ed8; }
+html.dark .lib-actions .lib-view, html.dark .lib-actions .lib-attach { background: #3b82f6; }
+html.dark .lib-actions .lib-view:hover, html.dark .lib-actions .lib-attach:hover { background: #2563eb; }
+.lib-actions .lib-attach { background: #059669; }
+.lib-actions .lib-attach:hover { background: #047857; }
+html.dark .lib-actions .lib-attach { background: #10b981; }
+html.dark .lib-actions .lib-attach:hover { background: #059669; }
+.lib-actions .lib-dl {
+  border: none; background: transparent; border-radius: 0.45rem; padding: 0.25rem 0.55rem;
+  cursor: pointer; font-size: 0.74rem; font-weight: 600; text-decoration: none;
+  color: #6b7280; transition: background 0.15s, color 0.15s;
+}
+html.dark .lib-actions .lib-dl { color: #9ca3af; }
+.lib-actions .lib-dl:hover { background: rgba(128,128,128,0.12); color: #111827; }
+html.dark .lib-actions .lib-dl:hover { color: #fff; }
+.lib-card.deleting { opacity: 0.5; pointer-events: none; }
+
+/* Library file preview modal */
+.modal-lg { width: min(60rem, 94vw); max-height: 88vh; display: flex; flex-direction: column; }
+.modal-lg .modal-body, .modal-lg > div:not(.modal-head):not(.modal-actions) { min-height: 0; }
+.lib-preview-img { max-width: 100%; max-height: 55vh; border-radius: 0.6rem; display: block; margin: 0 auto; }
+
+/* Compose-row attachment chips + chips inside a sent user bubble */
+.attach-chip {
+  display: inline-flex; align-items: center; gap: 0.35rem; max-width: 100%;
+  padding: 0.28rem 0.6rem 0.28rem 0.55rem; border-radius: 9999px;
+  font-size: 0.75rem; font-weight: 500; white-space: nowrap;
+  background: rgba(37, 99, 235, 0.12); border: 1px solid rgba(37, 99, 235, 0.35);
+  color: #1f2937;
+}
+html.dark .attach-chip { color: #e5e7eb; }
+.attach-chip .chip-name { overflow: hidden; text-overflow: ellipsis; max-width: 18rem; }
+.attach-chip .chip-x {
+  border: none; background: transparent; cursor: pointer; font-size: 0.8rem;
+  line-height: 1; color: inherit; opacity: 0.55; padding: 0 0.15rem;
+}
+.attach-chip .chip-x:hover { opacity: 1; }
+.attach-chip.static { pointer-events: none; }
+.msg-attach-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.45rem; }
+
+/* Paperclip popover rows */
+.attach-row {
+  display: flex; align-items: center; gap: 0.55rem; padding: 0.45rem 0.55rem;
+  border-radius: 0.55rem; cursor: pointer; min-width: 0;
+}
+.attach-row:hover { background: rgba(128,128,128,0.1); }
+.attach-row.attached { opacity: 0.55; cursor: default; }
+.attach-row.attached:hover { background: rgba(128,128,128,0.1); }
+.attach-row .att-ic { font-size: 1.05rem; flex-shrink: 0; }
+.attach-row .att-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.82rem; font-weight: 500;
+}
+.attach-row .att-meta { font-size: 0.72rem; color: #9ca3af; flex-shrink: 0; white-space: nowrap; }

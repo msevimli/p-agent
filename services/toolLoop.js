@@ -369,6 +369,12 @@ const AUTOMATIONS_GUIDANCE =
   'body as create_automation). NEVER suggest system-level Unix cron jobs or ' +
   'external OS crontabs — use the built-in Automations engine.\n';
 
+const LIBRARY_GUIDANCE =
+  'File Library: the server keeps a persistent Library of user files (documents, code, assets). ' +
+  'When the user refers to an attached file, asks what is in their Library, or wants you to store ' +
+  'a document, use the library tools (list_library_files, read_library_file, upload_library_file). ' +
+  'Attached files are usually inlined in the user message; read_library_file can fetch more of them.\n';
+
 /**
  * Build the system prompt that teaches the model how/when to emit a tool call.
  * Appended to the base system prompt. Kept schema-driven so adding a tool
@@ -387,6 +393,7 @@ function buildSystemPrompt(base) {
     'To list directory contents or see what files exist in the project, call list_files ' +
     '(never read_file on a directory). To read a specific file, use read_file.\n' +
     AUTOMATIONS_GUIDANCE +
+    LIBRARY_GUIDANCE +
     'When you decide a tool is needed, respond with EXACTLY one JSON object on its ' +
     'own (no code fences, no other text), in this shape:\n' +
     '{"tool": "<tool_name>", "args": { ...arg names and values for that tool }}\n' +

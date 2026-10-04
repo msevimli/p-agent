@@ -94,6 +94,13 @@
                 </svg>
                 <span>Skills</span>
               </button>
+              <button id="libraryBtn" class="sidebar-tool-item" title="Persistent file library">
+                <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M4 19V6a2 2 0 0 1 2-2h3l2 2h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />
+                </svg>
+                <span>Library</span>
+              </button>
               <button id="automationsBtn" class="sidebar-tool-item" title="Schedule automated tasks">
                 <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
                   <circle cx="12" cy="12" r="9" />
@@ -267,6 +274,19 @@
                 <p class="text-[11px] text-gray-400 dark:text-gray-600 mt-3">Applied on your next message.</p>
               </div>
 
+              <!-- attach popover: pick from the Library or upload a new file -->
+              <div id="attachPopover" class="popover hidden absolute bottom-full left-0 mb-2 z-40 w-96 max-w-[calc(100vw-1.5rem)] p-4">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-xs font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Attach from Library</span>
+                  <button id="attachUploadBtn" class="text-xs text-blue-600 dark:text-blue-400 hover:underline">Upload new…</button>
+                </div>
+                <div id="attachList" class="max-h-72 overflow-y-auto -mx-1 px-1"></div>
+              </div>
+              <input type="file" id="attachFileInput" class="hidden" multiple />
+
+              <!-- attached file chips (shown above the input bar while composing) -->
+              <div id="attachChips" class="hidden flex flex-wrap gap-1.5 px-1 pb-2"></div>
+
               <!-- input bar -->
               <div id="inputBar"
                 class="flex items-end gap-2 rounded-2xl border border-gray-300 dark:border-white/15
@@ -343,6 +363,60 @@
         <div id="skillsList" class="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
         </div>
       </main><!-- /skillsView -->
+
+      <!-- ===== Library view ===== -->
+      <main id="libraryView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
+        <!-- top bar: back to chat + title + upload/refresh -->
+        <div class="fe-topbar shrink-0">
+          <button id="libraryBackChat" class="fe-btn-back" title="Back to chat">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            <span>Chat</span>
+          </button>
+          <div class="fe-view-title">Library</div>
+          <button id="libraryUploadBtn" class="fe-action-btn" title="Upload files to the Library">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+            </svg>
+            <span>Upload</span>
+          </button>
+          <button id="libraryRefresh" class="fe-btn-back" title="Refresh library">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M4 4v6h6M20 20v-6h-6M20 9a8 8 0 0 0-14.5-3M4 15a8 8 0 0 0 14.5 3" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+        <div class="px-4 sm:px-6 py-2.5 max-w-3xl mx-auto shrink-0 w-full">
+          <p class="text-[13px] text-gray-500 dark:text-gray-400">
+            Persistent file library — documents, code, and assets you can attach to chats or let the
+            agent read. Files are stored in <code class="sc-code">data/library/</code>. Use the
+            paperclip in the chat input to attach any of these files to your next message.
+          </p>
+        </div>
+        <input type="file" id="libraryFileInput" class="hidden" multiple />
+        <!-- body: file cards -->
+        <div id="libraryList" class="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
+        </div>
+      </main><!-- /libraryView -->
+
+      <!-- ===== Library file preview modal ===== -->
+      <div id="libraryViewModal" class="modal-backdrop hidden">
+        <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="libViewTitle">
+          <div class="modal-head">
+            <h3 id="libViewTitle" class="modal-title">File</h3>
+            <button id="libViewClose" class="modal-close" title="Close">&times;</button>
+          </div>
+          <div id="libViewMeta" class="text-xs text-gray-400 dark:text-gray-500 px-5 pb-1"></div>
+          <div id="libViewBody" class="px-5 pb-4 overflow-auto max-h-[55vh]"></div>
+          <div class="modal-actions">
+            <a id="libViewDownload" class="skill-cancel" href="#" download>Download</a>
+            <button id="libViewCloseBtn" class="skill-danger save">Close</button>
+          </div>
+        </div>
+      </div><!-- /libraryViewModal -->
 
       <!-- ===== Models Management view ===== -->
       <main id="modelsView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">

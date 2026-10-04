@@ -29,6 +29,7 @@ const router = express.Router();
 const config = require('../config');
 const { complete, buildChatPayload } = require('../services/llamaClient');
 const toolLoop = require('../services/toolLoop');
+const libraryManager = require('../services/libraryManager');
 const automationsTools = require('../tools/automationsTools');
 const createAutomationTool = automationsTools.tools.find((t) => t.name === 'create_automation');
 
@@ -90,8 +91,77 @@ function toolLabel(name, args) {
     case 'run_automation': return `Triggering automation: ${a.id || '?'}`;
     case 'delete_automation': return `Deleting automation: ${a.id || '?'}`;
     case 'list_automations': return 'Listing automations';
+    case 'list_library_files': return 'Listing Library files';
+    case 'read_library_file': return `Reading library file: ${a.file_id || a.name || '?'}`;
+    case 'upload_library_file': return `Saving to Library: ${a.name || '?'}`;
     default: return `Calling tool: ${name}`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Library attachments — resolve chat `attachments: [{id|name}]` against the
+// persistent Library and inline their content into the LAST user message so
+// the model sees them like any other part of the conversation. Text files are
+// inlined as fenced blocks (per-file and total caps, truncated with a pointer
+// to read_library_file); binary files are replaced by a metadata pointer so
+// the agent can still fetch them via the read_library_file tool. Unresolvable
+// attachments produce an explicit note instead of failing the request.
+// ---------------------------------------------------------------------------
+const ATTACH_MAX_CHARS_PER_FILE = 60000; // inlined per attachment
+const ATTACH_MAX_CHARS_TOTAL = 120000; // inlined across all attachments
+
+function formatBytes(n) {
+  n = Number(n) || 0;
+  if (n >= 1048576) return (n / 1048576).toFixed(2) + ' MB';
+  if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
+function injectAttachments(messages, attachments) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return messages;
+  const lastUser = [...messages].reverse().find((m) => m && m.role === 'user');
+  if (!lastUser) return messages;
+
+  const blocks = [];
+  let total = 0;
+
+  for (const att of attachments) {
+    const id =
+      typeof att === 'string' ? att
+        : att && typeof att === 'object' ? (att.id || att.fileId || '') : '';
+    const entry = id ? libraryManager.get(id) : null;
+    if (!entry) {
+      blocks.push(`[Attached file not found in the Library: ${JSON.stringify(att)}]`);
+      continue;
+    }
+
+    const r = libraryManager.readText(entry.id, ATTACH_MAX_CHARS_PER_FILE);
+    if (r.ok) {
+      if (total + r.text.length > ATTACH_MAX_CHARS_TOTAL) {
+        blocks.push(`[Attached file: ${entry.name} — omitted, total inline-attachment limit reached; use read_library_file (file_id "${entry.id}") if needed]`);
+        continue;
+      }
+      total += r.text.length;
+      blocks.push(
+        `[Attached library file: ${entry.name} (${formatBytes(entry.size)}, ${entry.mime || 'unknown'})]\n` +
+          '```\n' + r.text + '\n```' +
+          (r.truncated
+            ? `\n[content truncated at ${ATTACH_MAX_CHARS_PER_FILE.toLocaleString()} characters — use read_library_file with file_id "${entry.id}" to read more]`
+            : '')
+      );
+    } else {
+      blocks.push(
+        `[Attached library file: ${entry.name} (${formatBytes(entry.size)}, ${entry.mime || 'unknown'}) — ${r.reason === 'binary' ? 'binary, not inlined' : 'content unavailable'}; use read_library_file with file_id "${entry.id}" to inspect it]`
+      );
+    }
+  }
+
+  if (!blocks.length) return messages;
+  return messages.map((m) =>
+    m === lastUser
+      ? { ...m, content: (m.content ? m.content + '\n\n' : '') + blocks.join('\n\n') }
+      : m
+  );
 }
 
 // Stream final text in bounded word-safe chunks for a natural streaming feel.
@@ -111,7 +181,7 @@ router.post('/', async (req, res) => {
   // Fresh per-request tool-call ledger (deduplication scope).
   toolLoop.resetSeenCalls();
 
-  const { messages, stream = true } = req.body || {};
+  const { messages, stream = true, attachments } = req.body || {};
   const gen = req.body && typeof req.body.generation === 'object' ? req.body.generation : {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages array is required' });
@@ -126,8 +196,10 @@ router.post('/', async (req, res) => {
     : `${config.llamaSystemPrompt}\n\n${toolLoop.AUTOMATIONS_GUIDANCE}`;
   const tools = toolsEnabled ? toolLoop.toOpenAITools() : undefined;
 
-  // Working conversation history (system-first) mutated by the loop.
-  let agentMessages = ensureSystem(messages, systemPrompt);
+  // Working conversation history (system-first) mutated by the loop. Library
+  // attachments are resolved and inlined into the last user message BEFORE
+  // the first upstream call, so the model sees file content from the start.
+  let agentMessages = injectAttachments(ensureSystem(messages, systemPrompt), attachments);
   let lost = false;
   res.on('close', () => { lost = true; });
 

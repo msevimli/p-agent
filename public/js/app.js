@@ -15,6 +15,7 @@
     abortController: null, // AbortController for the active stream
     view: 'chat', // 'chat' | 'files' — which panel is shown in the main area
     fsDir: '', // current directory in the File Explorer (workspace-relative; '' = root)
+    attachments: [], // [{ id, name, size }] queued for the next chat message
   };
 
   // ------------------------------------------------------------- dom refs
@@ -95,6 +96,26 @@
   const autoArgs = $('#autoArgs');
   const autoMaxTokens = $('#autoMaxTokens');
 
+  // Library view + preview modal + chat attach refs
+  const libraryViewEl = $('#libraryView');
+  const libraryBtn = $('#libraryBtn');
+  const libraryListEl = $('#libraryList');
+  const libraryBackChat = $('#libraryBackChat');
+  const libraryRefresh = $('#libraryRefresh');
+  const libraryUploadBtn = $('#libraryUploadBtn');
+  const libraryFileInput = $('#libraryFileInput');
+  const libViewModalEl = $('#libraryViewModal');
+  const libViewTitle = $('#libViewTitle');
+  const libViewMeta = $('#libViewMeta');
+  const libViewBody = $('#libViewBody');
+  const libViewDownload = $('#libViewDownload');
+  const attachBtn = $('#attachBtn');
+  const attachPopover = $('#attachPopover');
+  const attachListEl = $('#attachList');
+  const attachUploadBtn = $('#attachUploadBtn');
+  const attachFileInput = $('#attachFileInput');
+  const attachChipsEl = $('#attachChips');
+
   // ------------------------------------------------------------- markdown
   marked.setOptions({
     breaks: true,
@@ -147,6 +168,7 @@
     files: fileExplorerViewEl,
     skills: skillsViewEl,
     models: modelsViewEl,
+    library: libraryViewEl,
     automations: automationsViewEl,
   };
   const SUBTITLES = {
@@ -154,6 +176,7 @@
     files: 'File Explorer',
     skills: 'Skills',
     models: 'Models',
+    library: 'Library',
     automations: 'Automations',
   };
   const NAV_BTNS = {
@@ -161,6 +184,7 @@
     files: fileExplorerBtn,
     skills: skillsBtn,
     models: modelsBtn,
+    library: libraryBtn,
     automations: automationsBtn,
   };
 
@@ -174,6 +198,7 @@
     if (name === 'files') loadFsDir(state.fsDir);
     if (name === 'skills') loadSkills();
     if (name === 'models') loadModels();
+    if (name === 'library') loadLibrary();
     if (name === 'automations') loadAutomations();
   }
 
@@ -781,6 +806,8 @@
     state.pendingDeleteId = null;
     state.currentId = id;
     state.currentMessages = s.messages || [];
+    state.attachments = [];
+    renderChips();
     renderMessages();
     renderSessionList();
   }
@@ -790,6 +817,8 @@
     state.pendingDeleteId = null;
     state.currentId = null;
     state.currentMessages = [];
+    state.attachments = [];
+    renderChips();
     renderMessages();
     renderSessionList();
     promptInput.focus();
@@ -969,6 +998,7 @@
   function closePopovers() {
     contextPopover.classList.add('hidden');
     settingsPopover.classList.add('hidden');
+    attachPopover.classList.add('hidden');
   }
   contextBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -987,7 +1017,10 @@
   );
   document.addEventListener('click', closePopovers);
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closePopovers();
+    if (e.key === 'Escape') {
+      closePopovers();
+      if (!libViewModalEl.classList.contains('hidden')) closeLibViewModal();
+    }
   });
 
   // ------------------------------------------------------------- settings control
@@ -1068,10 +1101,26 @@
     const text = promptInput.value.trim();
     if (!text || state.streaming) return;
 
+    // Attachments queued via the paperclip: snapshot them for this message,
+    // render them inside the user bubble, then clear the compose row.
+    const sentAttachments = state.attachments.slice();
+
     state.currentMessages.push({ role: 'user', content: text });
     promptInput.value = '';
     autoResize();
-    appendMessage('user', text);
+    if (sentAttachments.length) {
+      const wrap = appendMessage('user', text);
+      const chips = document.createElement('div');
+      chips.className = 'msg-attach-chips';
+      chips.innerHTML = sentAttachments
+        .map((a) => `<span class="attach-chip static">📎 ${escapeHtml(a.name)}</span>`)
+        .join('');
+      wrap.appendChild(chips);
+      state.attachments = [];
+      renderChips();
+    } else {
+      appendMessage('user', text);
+    }
     setStreamingUI(true);
 
     // assistant placeholder: status feed (hidden) + content slot (typing first)
@@ -1115,6 +1164,9 @@
           messages: apiMessages,
           stream: true,
           generation: { ...state.settings },
+          ...(sentAttachments.length
+            ? { attachments: sentAttachments.map((a) => ({ id: a.id })) }
+            : {}),
         },
         ac.signal
       );
@@ -1632,6 +1684,314 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !autoModalEl.classList.contains('hidden')) closeAutoModal();
   });
+
+  // ------------------------------------------------------------- library view
+  const MAX_UPLOAD_BYTES = 50 * 1048576; // mirror of LIBRARY_MAX_UPLOAD_MB (server default)
+
+  function fileIcon(f) {
+    const mime = String((f && f.mime) || '');
+    const name = String((f && f.name) || '').toLowerCase();
+    if (mime.startsWith('image/')) return '🖼';
+    if (mime.startsWith('audio/')) return '🎵';
+    if (mime.startsWith('video/')) return '🎬';
+    if (mime === 'application/pdf' || name.endsWith('.pdf')) return '📕';
+    if (/(zip|gzip|tar|x-tar|rar|7z)/.test(mime)) return '📦';
+    if (/(json|javascript|python|yaml|sql|xml|text)/.test(mime)) return '📄';
+    return '📄';
+  }
+
+  async function loadLibrary() {
+    libraryListEl.innerHTML = '<div class="fe-muted">Loading library…</div>';
+    let data;
+    try {
+      const res = await fetch('/api/library');
+      data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load library');
+    } catch (err) {
+      libraryListEl.innerHTML = `<div class="fe-muted fs-error">⚠️ ${escapeHtml(err.message)}</div>`;
+      return;
+    }
+    renderLibrary(data.files);
+  }
+
+  function renderLibrary(files) {
+    libraryListEl.innerHTML = '';
+    if (!files.length) {
+      libraryListEl.innerHTML =
+        '<div class="fe-muted">Library is empty. Click "Upload" to add documents, code, or assets — then attach them to chats with the paperclip.</div>';
+      return;
+    }
+    for (const f of files) {
+      const card = document.createElement('div');
+      card.className = 'model-card lib-card';
+      card.setAttribute('data-lib', f.id);
+      card.innerHTML = `
+        <div class="lib-row">
+          <span class="lib-icon">${fileIcon(f)}</span>
+          <div class="model-main">
+            <div class="model-name lib-name">${escapeHtml(f.name)}</div>
+            ${f.description ? `<div class="model-desc">${escapeHtml(f.description)}</div>` : ''}
+            <div class="model-grid">
+              <div class="model-cell">
+                <span class="model-cell-label">size</span>
+                <span class="model-cell-value">${formatBytes(f.size)}</span>
+              </div>
+              <div class="model-cell">
+                <span class="model-cell-label">type</span>
+                <span class="model-cell-value" title="${escapeHtml(f.mime)}">${escapeHtml(f.mime || 'unknown')}</span>
+              </div>
+              <div class="model-cell">
+                <span class="model-cell-label">added</span>
+                <span class="model-cell-value">${fmtWhen(f.updatedAt)} ago</span>
+              </div>
+            </div>
+          </div>
+          <div class="lib-actions">
+            <button class="lib-view" data-view="${escapeHtml(f.id)}" title="Preview ${escapeHtml(f.name)}">View</button>
+            <button class="lib-attach" data-attach="${escapeHtml(f.id)}" title="Attach to next chat message">Attach</button>
+            <a class="lib-dl" href="/api/library/${encodeURIComponent(f.id)}/content" download="${escapeHtml(f.name)}" title="Download ${escapeHtml(f.name)}">Download</a>
+            <span class="auto-del-wrap">
+              <button class="auto-del lib-del" data-del="${escapeHtml(f.id)}" title="Delete ${escapeHtml(f.name)}">${TRASH_ICON}</button>
+              <span class="auto-confirm hidden" data-confirm>
+                <button class="skill-danger" data-confirm-del="${escapeHtml(f.id)}">Delete</button>
+                <button class="skill-cancel" data-cancel-del>Cancel</button>
+              </span>
+            </span>
+          </div>
+        </div>`;
+      card.querySelector('[data-view]').addEventListener('click', () => openLibView(f));
+      card.querySelector('[data-attach]').addEventListener('click', () => attachFile(f));
+      const delBtn = card.querySelector('[data-del]');
+      const confirmEl = card.querySelector('[data-confirm]');
+      delBtn.addEventListener('click', () => {
+        const show = confirmEl.classList.contains('hidden');
+        confirmEl.classList.toggle('hidden', !show);
+        delBtn.classList.toggle('danger', show);
+      });
+      card.querySelector('[data-cancel-del]').addEventListener('click', () => {
+        confirmEl.classList.add('hidden');
+        delBtn.classList.remove('danger');
+      });
+      card.querySelector('[data-confirm-del]').addEventListener('click', () => deleteLibraryFile(f.id, card));
+      libraryListEl.appendChild(card);
+    }
+  }
+
+  async function deleteLibraryFile(id, card) {
+    card.classList.add('deleting');
+    try {
+      const res = await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not delete file');
+      removeAttachment(id);
+      card.remove();
+    } catch (err) {
+      card.classList.remove('deleting');
+      libraryToast(err.message);
+    }
+  }
+
+  async function openLibView(f) {
+    libViewTitle.textContent = f.name;
+    libViewMeta.textContent = `${formatBytes(f.size)} · ${f.mime} · added ${new Date(f.updatedAt).toLocaleString()}`;
+    libViewDownload.href = `/api/library/${encodeURIComponent(f.id)}/content`;
+    libViewDownload.setAttribute('download', f.name);
+    libViewBody.innerHTML = '<div class="fe-muted">Loading…</div>';
+    libViewModalEl.classList.remove('hidden');
+
+    const mime = String(f.mime || '');
+    const url = `/api/library/${encodeURIComponent(f.id)}/content`;
+    try {
+      if (mime.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.src = url;
+        img.className = 'lib-preview-img';
+        img.alt = f.name;
+        libViewBody.innerHTML = '';
+        libViewBody.appendChild(img);
+        return;
+      }
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Could not load file content');
+      const text = await res.text();
+      const pre = document.createElement('pre');
+      pre.className = 'fe-fileview';
+      const code = document.createElement('code');
+      code.textContent = text;
+      if (typeof hljs !== 'undefined') { try { hljs.highlightElement(code); } catch { /* plain */ } }
+      pre.appendChild(code);
+      libViewBody.innerHTML = '';
+      libViewBody.appendChild(pre);
+    } catch (err) {
+      libViewBody.innerHTML = `<div class="fe-muted fs-error">⚠️ ${escapeHtml(err.message)} — use Download instead.</div>`;
+    }
+  }
+
+  function closeLibViewModal() {
+    libViewModalEl.classList.add('hidden');
+    libViewBody.innerHTML = '';
+  }
+
+  // Upload File objects to the Library. attach=true also queues them for chat.
+  async function uploadLibraryFiles(fileList, { attach = false } = {}) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const ok = [];
+    const errors = [];
+    for (const file of files) {
+      if (file.size > MAX_UPLOAD_BYTES) {
+        errors.push(`${file.name} (over 50 MB limit)`);
+        continue;
+      }
+      try {
+        const res = await fetch('/api/library/upload?name=' + encodeURIComponent(file.name), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream', 'X-File-Type': file.type || '' },
+          body: file,
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        ok.push(data.file);
+      } catch (err) {
+        errors.push(`${file.name}: ${err.message}`);
+      }
+    }
+    if (ok.length) {
+      if (attach) {
+        for (const f of ok) attachFile(f, { silent: true });
+      }
+      if (state.view === 'library') loadLibrary();
+      libraryToast(ok.length + ' file(s) uploaded to the Library.');
+    }
+    if (errors.length) libraryToast('Some uploads failed: ' + errors.join('; '));
+    return ok;
+  }
+
+  // ------------------------------------------------------- chat attachments
+  function hasAttachment(id) {
+    return state.attachments.some((a) => a.id === id);
+  }
+
+  function attachFile(f, { silent = false } = {}) {
+    if (!f || !f.id) return;
+    if (hasAttachment(f.id)) {
+      if (!silent) libraryToast('Already attached.');
+      return;
+    }
+    state.attachments.push({ id: f.id, name: f.name, size: f.size });
+    renderChips();
+    attachPopover.classList.add('hidden');
+    if (!silent) {
+      libraryToast(`Attached ${f.name} — it will be sent with your next message.`);
+      if (state.view !== 'chat') showView('chat');
+    }
+  }
+
+  function removeAttachment(id) {
+    state.attachments = state.attachments.filter((a) => a.id !== id);
+    renderChips();
+  }
+
+  function renderChips() {
+    const list = state.attachments;
+    attachChipsEl.classList.toggle('hidden', !list.length);
+    attachChipsEl.innerHTML = '';
+    for (const a of list) {
+      const chip = document.createElement('span');
+      chip.className = 'attach-chip';
+      chip.title = `${a.name} · ${formatBytes(a.size)}`;
+      chip.innerHTML = `📎 <span class="chip-name">${escapeHtml(a.name)}</span>`;
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'chip-x';
+      x.textContent = '✕';
+      x.title = 'Remove attachment';
+      x.addEventListener('click', () => removeAttachment(a.id));
+      chip.appendChild(x);
+      attachChipsEl.appendChild(chip);
+    }
+  }
+
+  // Paperclip popover — list library files, click to attach, or upload new.
+  async function openAttachPopover() {
+    attachListEl.innerHTML = '<div class="fe-muted">Loading library…</div>';
+    try {
+      const res = await fetch('/api/library');
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load library');
+      const files = data.files || [];
+      if (!files.length) {
+        attachListEl.innerHTML =
+          '<div class="fe-muted">Library is empty — use "Upload new…" to add a file.</div>';
+        return;
+      }
+      attachListEl.innerHTML = '';
+      for (const f of files) {
+        const row = document.createElement('div');
+        row.className = 'attach-row' + (hasAttachment(f.id) ? ' attached' : '');
+        row.title = hasAttachment(f.id) ? 'Already attached' : `Attach ${f.name}`;
+        row.innerHTML =
+          `<span class="att-ic">${fileIcon(f)}</span>` +
+          `<span class="att-name">${escapeHtml(f.name)}</span>` +
+          `<span class="att-meta">${formatBytes(f.size)}${hasAttachment(f.id) ? ' · ✓' : ''}</span>`;
+        if (!hasAttachment(f.id)) {
+          row.addEventListener('click', () => attachFile(f));
+        } else {
+          row.addEventListener('click', () => { removeAttachment(f.id); renderAttachList(); });
+        }
+        attachListEl.appendChild(row);
+      }
+    } catch (err) {
+      attachListEl.innerHTML = `<div class="fe-muted fs-error">⚠️ ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function renderAttachList() {
+    if (!attachPopover.classList.contains('hidden')) openAttachPopover();
+  }
+
+  function libraryToast(msg) {
+    let toast = document.getElementById('skillToast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'skillToast';
+      toast.className = 'skill-toast';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = '⚠️ ' + msg;
+    toast.classList.add('show');
+    clearTimeout(libraryToast._t);
+    libraryToast._t = setTimeout(() => toast.classList.remove('show'), 3200);
+  }
+
+  // ------------------------------------------------------ library / attach wiring
+  libraryBtn.addEventListener('click', () => { showView('library'); closeSidebar(); });
+  libraryBackChat.addEventListener('click', () => showView('chat'));
+  libraryRefresh.addEventListener('click', () => loadLibrary());
+  libraryUploadBtn.addEventListener('click', () => libraryFileInput.click());
+  libraryFileInput.addEventListener('change', () => {
+    uploadLibraryFiles(libraryFileInput.files, { attach: false });
+    libraryFileInput.value = '';
+  });
+
+  attachBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const willOpen = attachPopover.classList.contains('hidden');
+    closePopovers();
+    if (willOpen) {
+      attachPopover.classList.remove('hidden');
+      openAttachPopover();
+    }
+  });
+  attachUploadBtn.addEventListener('click', () => attachFileInput.click());
+  attachFileInput.addEventListener('change', () => {
+    uploadLibraryFiles(attachFileInput.files, { attach: true });
+    attachFileInput.value = '';
+  });
+  attachPopover.addEventListener('click', (e) => e.stopPropagation());
+  $('#libViewClose').addEventListener('click', closeLibViewModal);
+  $('#libViewCloseBtn').addEventListener('click', closeLibViewModal);
+  libViewModalEl.addEventListener('click', (e) => { if (e.target === libViewModalEl) closeLibViewModal(); });
 
   // ------------------------------------------------------------- init
   $('#newChatBtn').addEventListener('click', newChat);
