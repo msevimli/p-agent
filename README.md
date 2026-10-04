@@ -29,6 +29,14 @@ cp .env-example .env        # add LLAMA_API_KEY for remote models
 npm start                   # → web dashboard at http://localhost:8888
 ```
 
+Prefer the unified lifecycle script instead of managing processes by hand:
+
+```bash
+./pagent.sh --start    # background start + PID file + health wait
+./pagent.sh --status   # PID / uptime / health
+./pagent.sh --stop     # graceful stop (Telegram poller + schedulers shut down with it)
+```
+
 The chat pipeline needs an active model. Two options:
 
 - **Local llama.cpp** — run `llama-server -m <model>.gguf --port 8080` and use
