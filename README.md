@@ -29,14 +29,6 @@ cp .env-example .env        # add LLAMA_API_KEY for remote models
 npm start                   # → web dashboard at http://localhost:8888
 ```
 
-Prefer the unified lifecycle script instead of managing processes by hand:
-
-```bash
-./pagent.sh --start    # background start + PID file + health wait
-./pagent.sh --status   # PID / uptime / health
-./pagent.sh --stop     # graceful stop (Telegram poller + schedulers shut down with it)
-```
-
 The chat pipeline needs an active model. Two options:
 
 - **Local llama.cpp** — run `llama-server -m <model>.gguf --port 8080` and use
@@ -48,6 +40,50 @@ The chat pipeline needs an active model. Two options:
 
 > The frontend loads Tailwind, marked and highlight.js from CDNs — an internet
 > connection is needed for UI styling on first load.
+
+## Daemon lifecycle management (`pagent.sh`)
+
+The root-level `pagent.sh` is the unified management script — instead of
+tracking PIDs or juggling `nohup` by hand, use it for the whole process
+lifecycle. State lives in `data/pagent.pid` (PID file) and
+`data/pagent.log` (boot/run logs) — both gitignored.
+
+```bash
+./pagent.sh --start
+```
+
+Spins up the backend daemon **in the background** (agent loopback, Telegram
+poller, and automations scheduler all boot with `server.js`). Before
+launching it:
+
+- verifies `node` and `node_modules` (hints at `npm install` if missing),
+- creates `.env` from `.env-example` when absent (warned),
+- refuses/warns on double starts — it checks the PID file first, then scans
+  for a `node server.js` process and probes port `8888`,
+- writes the PID to `data/pagent.pid` and waits until `/api/health`
+  responds (up to 30s); on failure it prints the log tail and cleans up.
+
+```bash
+./pagent.sh --status
+```
+
+Reports whether the daemon is running: PID, uptime (`ps etimes`), port, and a
+live `/api/health` check. It also distinguishes tracked processes (started
+via the script) from untracked ones, detects stale PID files, and exits
+non-zero when the service is down.
+
+```bash
+./pagent.sh --stop
+```
+
+Terminates the daemon gracefully: sends SIGTERM (the server stops its
+Telegram poller and schedulers cleanly), waits up to 10s, escalates to
+SIGKILL if needed, removes `data/pagent.pid`, and verifies the port is
+released. Servers started outside the script are detected by process/port
+scan and stopped with a warning.
+
+Notes: `PORT=<other> ./pagent.sh --start` runs on a different port;
+`NO_COLOR=1` (or a pipe) disables colored output.
 
 ## Terminal CLI (`pagent`)
 

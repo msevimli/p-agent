@@ -49,6 +49,7 @@ p-agent/
 │                             #   queue limits, workRoot sandbox, tool-loop knobs,
 │                             #   telegram knobs, library knobs
 ├── package.json              # express dependency; bin: pagent -> bin/pagent.js
+├── pagent.sh                 # unified daemon lifecycle manager (--start/--status/--stop)
 ├── bin/pagent.js             # terminal CLI: REPL chat + management subcommands
 ├── README.md / architecture.md   # this documentation
 │
@@ -102,6 +103,8 @@ p-agent/
 │   ├── skills-state.json     #   skill enabled/disabled state
 │   ├── channels-state.json   #   telegram metadata (enabled, whitelist, lastError)
 │   ├── library-index.json    #   library file metadata
+│   ├── pagent.pid            #   daemon PID file (written by pagent.sh)
+│   ├── pagent.log            #   daemon boot/run logs (written by pagent.sh)
 │   └── library/              #   library blobs (uuid files)
 │
 ├── skills/                   # workspace skills (user-authored, agent-runnable)
@@ -228,6 +231,22 @@ p-agent/
   [set KEY=value]`, with `--json` output. Server-first with offline
   degradation: read-only commands fall back to the local `data/*` files when
   the server is down; secrets are never printed (presence-only).
+
+- **Daemon Orchestration / Process Lifecycle** (`pagent.sh`): root-level bash
+  script that owns the server process — no manual `nohup`/PID juggling.
+  `--start` verifies node/npm deps, creates `.env` from `.env-example` when
+  missing, and refuses double starts (PID file → process scan → port probe),
+  then launches `server.js` in the background (nohup, stdout/stderr →
+  `data/pagent.log`), records the PID in `data/pagent.pid`, and blocks until
+  `/api/health` responds (30s cap; on failure prints the log tail and cleans
+  up). `--status` reports PID, uptime (`ps etimes`), port and live health,
+  distinguishing tracked / untracked / stale-PID states (exit 1 when down).
+  `--stop` sends SIGTERM (the server's handler stops the Telegram poller and
+  automation schedulers), waits up to 10s, escalates to SIGKILL, removes the
+  PID file and verifies the port is released; servers started outside the
+  script are detected by process/port scan and stopped with a warning.
+  `PORT` env overrides the port; `NO_COLOR=1`/pipes disable colors.
+  Logs are plain appends (no rotation) under the gitignored `data/` tree.
 
 - **Session State Persistence** (`services/sessionStore.js` +
   `data/sessions.json`): one shared store for ALL channels.
