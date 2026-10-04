@@ -108,6 +108,13 @@
                 </svg>
                 <span>Automations</span>
               </button>
+              <button id="channelsBtn" class="sidebar-tool-item" title="Connect agent channels (Telegram)">
+                <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6l1.4 1.4m10 10 1.4 1.4m0-12.8-1.4 1.4m-10 10-1.4 1.4M17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0z" />
+                </svg>
+                <span>Channels</span>
+              </button>
             </div>
           </div>
         </div>
@@ -606,6 +613,87 @@
           </form>
         </div>
       </div><!-- /automationModal -->
+
+    <!-- ===== Channels view ===== -->
+      <main id="channelsView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
+        <!-- top bar: back to chat + title + refresh -->
+        <div class="fe-topbar shrink-0">
+          <button id="channelsBackChat" class="fe-btn-back" title="Back to chat">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            <span>Chat</span>
+          </button>
+          <div class="fe-view-title">Channels</div>
+          <button id="channelsRefresh" class="fe-btn-back" title="Refresh channels">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M4 4v6h6M20 20v-6h-6M20 9a8 8 0 0 0-14.5-3M4 15a8 8 0 0 0 14.5 3" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+        <div class="px-4 sm:px-6 py-2.5 max-w-3xl mx-auto shrink-0 w-full">
+          <p class="text-[13px] text-gray-500 dark:text-gray-400">
+            Connect external messaging channels to the agent. The Telegram channel
+            forwards messages from whitelisted chats through the same agentic loop as
+            the dashboard — tools, skills, Library, and automations included.
+          </p>
+        </div>
+        <!-- body: channel cards -->
+        <div id="channelsList" class="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
+
+          <div class="model-card chan-card" data-chan="telegram">
+            <div class="chan-head">
+              <span class="chan-ic">📡</span>
+              <div class="model-main">
+                <div class="model-name">
+                  Telegram
+                  <span class="auto-badge" id="chanStatusBadge">idle</span>
+                </div>
+                <div class="model-desc">Talk to the active agent from Telegram. Long-polling bot, no webhook setup needed.</div>
+              </div>
+              <label class="switch" title="Enable / disable the Telegram channel">
+                <input type="checkbox" id="chanToggle" />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="chan-fields">
+              <div class="chan-field">
+                <label for="chanToken">Bot token <span class="field-hint">(stored in .env, never in state files)</span></label>
+                <div class="chan-field-row">
+                  <input id="chanToken" type="password" placeholder="123456:ABC-… (from @BotFather)" autocomplete="off" />
+                  <button id="chanTokenSave" class="fe-action-btn" title="Save token to .env">Save token</button>
+                </div>
+                <p class="chan-hint">Saving an empty field clears the stored token. The token only takes effect when the channel is enabled.</p>
+              </div>
+
+              <div class="chan-field">
+                <label for="chanIds">Allowed chat IDs <span class="field-hint">(comma-separated whitelist)</span></label>
+                <div class="chan-field-row">
+                  <input id="chanIds" placeholder="e.g. 123456789, -1001234567890" autocomplete="off" />
+                  <button id="chanIdsSave" class="fe-action-btn" title="Save whitelist">Save whitelist</button>
+                </div>
+                <p class="chan-hint">Only these chats can trigger the agent. Open a chat with the bot and send
+                  <code class="sc-code">/id</code> to learn its id. An admin id set as
+                  <code class="sc-code">TELEGRAM_ADMIN_CHAT_ID</code> in .env is always allowed.</p>
+              </div>
+
+              <div class="chan-field">
+                <label>Connection check</label>
+                <div class="chan-field-row">
+                  <button id="chanTest" class="fe-action-btn" title="Validate the configured token via Telegram getMe">Test connection</button>
+                  <span id="chanTestResult" class="chan-test-result"></span>
+                </div>
+              </div>
+            </div>
+
+            <div id="chanMeta" class="chan-meta"></div>
+          </div>
+
+        </div>
+      </main><!-- /channelsView -->
 
     </div><!-- /main column -->
   </div>

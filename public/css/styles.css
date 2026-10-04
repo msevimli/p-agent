@@ -996,3 +996,37 @@ html.dark .attach-chip { color: #e5e7eb; }
   font-size: 0.82rem; font-weight: 500;
 }
 .attach-row .att-meta { font-size: 0.72rem; color: #9ca3af; flex-shrink: 0; white-space: nowrap; }
+
+/* ==================================================================
+   Channels view
+   ================================================================== */
+.chan-card { padding: 1.1rem 1.2rem; }
+.chan-head { display: flex; align-items: flex-start; gap: 0.85rem; }
+.chan-ic { font-size: 1.7rem; line-height: 1.4; flex-shrink: 0; }
+.chan-fields { display: flex; flex-direction: column; gap: 0.9rem; margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #f3f4f6; }
+html.dark .chan-fields { border-top-color: rgba(255,255,255,0.08); }
+.chan-field label {
+  display: block; font-size: 0.78rem; font-weight: 500; color: #4b5563; margin-bottom: 0.3rem;
+}
+html.dark .chan-field label { color: #9ca3af; }
+.chan-field label .field-hint { font-weight: 400; color: #9ca3af; }
+html.dark .chan-field label .field-hint { color: #6b7280; }
+.chan-field-row { display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap; }
+.chan-field-row input {
+  flex: 1; min-width: 14rem; border: 1px solid #d1d5db; border-radius: 0.55rem;
+  padding: 0.5rem 0.7rem; font-size: 0.86rem; color: #111827; background: #fff; outline: none;
+  transition: border-color 0.15s;
+}
+html.dark .chan-field-row input { border-color: rgba(255,255,255,0.15); color: #f3f4f6; background: #131314; }
+.chan-field-row input:focus { border-color: #2563eb; }
+.chan-hint { font-size: 0.74rem; color: #9ca3af; margin-top: 0.35rem; line-height: 1.45; }
+html.dark .chan-hint { color: #6b7280; }
+.chan-test-result { font-size: 0.8rem; color: #4b5563; }
+html.dark .chan-test-result { color: #cbd5e1; }
+.chan-meta {
+  margin-top: 1rem; padding: 0.7rem 0.85rem; border-radius: 0.6rem;
+  background: rgba(128, 128, 128, 0.07); font-size: 0.76rem; line-height: 1.6;
+  color: #6b7280;
+}
+html.dark .chan-meta { color: #9ca3af; background: rgba(255, 255, 255, 0.05); }
+.chan-meta-line { overflow-wrap: anywhere; }

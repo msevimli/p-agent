@@ -116,6 +116,22 @@
   const attachFileInput = $('#attachFileInput');
   const attachChipsEl = $('#attachChips');
 
+  // Channels view refs
+  const channelsViewEl = $('#channelsView');
+  const channelsBtn = $('#channelsBtn');
+  const channelsListEl = $('#channelsList');
+  const channelsBackChat = $('#channelsBackChat');
+  const channelsRefresh = $('#channelsRefresh');
+  const chanToggle = $('#chanToggle');
+  const chanStatusBadge = $('#chanStatusBadge');
+  const chanToken = $('#chanToken');
+  const chanTokenSave = $('#chanTokenSave');
+  const chanIds = $('#chanIds');
+  const chanIdsSave = $('#chanIdsSave');
+  const chanTest = $('#chanTest');
+  const chanTestResult = $('#chanTestResult');
+  const chanMeta = $('#chanMeta');
+
   // ------------------------------------------------------------- markdown
   marked.setOptions({
     breaks: true,
@@ -170,6 +186,7 @@
     models: modelsViewEl,
     library: libraryViewEl,
     automations: automationsViewEl,
+    channels: channelsViewEl,
   };
   const SUBTITLES = {
     chat: 'Local AI Agent',
@@ -178,6 +195,7 @@
     models: 'Models',
     library: 'Library',
     automations: 'Automations',
+    channels: 'Channels',
   };
   const NAV_BTNS = {
     chat: null,
@@ -186,6 +204,7 @@
     models: modelsBtn,
     library: libraryBtn,
     automations: automationsBtn,
+    channels: channelsBtn,
   };
 
   function showView(name) {
@@ -200,6 +219,7 @@
     if (name === 'models') loadModels();
     if (name === 'library') loadLibrary();
     if (name === 'automations') loadAutomations();
+    if (name === 'channels') loadChannels();
   }
 
   // ------------------------------------------------------------- skills view
@@ -1991,6 +2011,146 @@
   $('#libViewCloseBtn').addEventListener('click', closeLibViewModal);
   libViewModalEl.addEventListener('click', (e) => { if (e.target === libViewModalEl) closeLibViewModal(); });
 
+  // ------------------------------------------------------------- channels view
+  async function loadChannels() {
+    chanTestResult.textContent = '';
+    try {
+      const res = await fetch('/api/channels');
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load channels');
+      renderChannels(data.channels || []);
+    } catch (err) {
+      chanMeta.innerHTML = `<div class="fe-muted fs-error">⚠️ ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function renderChannels(channels) {
+    const tg = channels.find((c) => c && c.type === 'telegram');
+    if (!tg) {
+      channelsListEl.innerHTML = '<div class="fe-muted">No channels configured yet.</div>';
+      return;
+    }
+    // status badge
+    let badge = 'idle';
+    let cls = 'off';
+    if (!tg.tokenSet) badge = 'no token';
+    else if (tg.enabled && tg.running) { badge = 'active'; cls = 'on'; }
+    else if (tg.enabled) { badge = 'starting…'; cls = 'on'; }
+    else badge = 'paused';
+    chanStatusBadge.textContent = badge;
+    chanStatusBadge.className = 'auto-badge ' + cls;
+
+    chanToggle.checked = !!tg.enabled;
+    chanToggle.disabled = false;
+    chanIds.value = (tg.allowedChatIds || []).join(', ');
+
+    const meta = [];
+    meta.push(
+      `Polling: ${tg.enabled ? 'on' : 'off'} · Bot running: ${tg.running ? 'yes' : 'no'} · Token: ${tg.tokenSet ? 'set (in .env)' : 'not set'}`
+    );
+    if (tg.activeModel) meta.push(`Active model: ${escapeHtml(tg.activeModel.name)} (${escapeHtml(tg.activeModel.id)})`);
+    if (tg.adminChatId && tg.adminChatId.length) meta.push(`Admin chat id${tg.adminChatId.length > 1 ? 's' : ''} (always allowed): ${escapeHtml(tg.adminChatId.join(', '))}`);
+    if (tg.lastActivityAt) meta.push(`Last activity: ${fmtWhen(tg.lastActivityAt)} ago`);
+    if (tg.lastError) meta.push(`<span class="fs-error">Last error: ${escapeHtml(tg.lastError)}</span>`);
+    chanMeta.innerHTML = meta.map((m) => `<div class="chan-meta-line">${m}</div>`).join('');
+  }
+
+  async function setChanEnabled(enabled) {
+    chanToggle.disabled = true;
+    try {
+      const res = await fetch('/api/channels/telegram/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not update channel');
+      loadChannels();
+    } catch (err) {
+      chanToggle.checked = !enabled; // revert optimistic toggle
+      channelToast(err.message);
+    } finally {
+      chanToggle.disabled = false;
+    }
+  }
+
+  async function saveChanIds() {
+    const ids = chanIds.value.split(',').map((s) => s.trim()).filter(Boolean);
+    const bad = ids.filter((s) => !/^-?\d+$/.test(s));
+    try {
+      if (bad.length) throw new Error('invalid chat id(s): ' + bad.join(', '));
+      const res = await fetch('/api/channels/telegram', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowedChatIds: ids }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not save whitelist');
+      channelToast('Whitelist saved.');
+      loadChannels();
+    } catch (err) {
+      channelToast(err.message);
+    }
+  }
+
+  async function saveChanToken() {
+    const token = chanToken.value.trim();
+    try {
+      const res = await fetch('/api/channels/telegram/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not save token');
+      chanToken.value = '';
+      channelToast(token ? 'Token saved to .env.' : 'Token cleared from .env.');
+      loadChannels();
+    } catch (err) {
+      channelToast(err.message);
+    }
+  }
+
+  async function testChan() {
+    chanTestResult.textContent = 'Testing…';
+    chanTest.disabled = true;
+    try {
+      const res = await fetch('/api/channels/telegram/test', { method: 'POST' });
+      const data = await res.json();
+      if (data.ok) {
+        chanTestResult.textContent = `✓ Connected as @${data.bot.username || String(data.bot.id || '')} — ${data.bot.first_name || 'Telegram bot'}.`;
+      } else {
+        chanTestResult.textContent = `✗ ${data.error || 'connection failed'}`;
+      }
+    } catch (err) {
+      chanTestResult.textContent = '✗ ' + err.message;
+    } finally {
+      chanTest.disabled = false;
+    }
+  }
+
+  function channelToast(msg) {
+    let toast = document.getElementById('skillToast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'skillToast';
+      toast.className = 'skill-toast';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = '⚠️ ' + msg;
+    toast.classList.add('show');
+    clearTimeout(channelToast._t);
+    channelToast._t = setTimeout(() => toast.classList.remove('show'), 3200);
+  }
+
+  channelsBtn.addEventListener('click', () => { showView('channels'); closeSidebar(); });
+  channelsBackChat.addEventListener('click', () => showView('chat'));
+  channelsRefresh.addEventListener('click', () => loadChannels());
+  chanToggle.addEventListener('change', () => setChanEnabled(chanToggle.checked));
+  chanIdsSave.addEventListener('click', saveChanIds);
+  chanTokenSave.addEventListener('click', saveChanToken);
+  chanTest.addEventListener('click', testChan);
+
   // ------------------------------------------------------------- init
   $('#newChatBtn').addEventListener('click', newChat);
 
@@ -2000,9 +2160,10 @@
     else renderMessages();
     checkHealth();
     setInterval(checkHealth, 15000);
-    // Keep the automations list fresh while its view is open (scheduled runs land here).
+    // Keep the automations + channels lists fresh while their views are open.
     setInterval(() => {
       if (state.view === 'automations') loadAutomations();
+      if (state.view === 'channels') loadChannels();
     }, 15000);
   })();
 })();

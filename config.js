@@ -94,6 +94,16 @@ module.exports = {
   // (workspace scripts, skills, and LLM prompt tasks).
   automationTimeoutMs: Number(process.env.AUTOMATION_TIMEOUT_MS || 60000),
 
+  // --- Telegram channel ---------------------------------------------------------
+  // Base URL for the Telegram Bot API (override in tests to a local mock).
+  telegramApiBase: (process.env.TELEGRAM_API_BASE || 'https://api.telegram.org').replace(/\/+$/, ''),
+  // Long-poll seconds per getUpdates call (max 50).
+  telegramPollTimeoutSec: Number(process.env.TELEGRAM_POLL_TIMEOUT || 50),
+  // HTTP request timeout for Telegram API calls (ms).
+  telegramRequestTimeoutMs: Number(process.env.TELEGRAM_REQUEST_TIMEOUT_MS || 60000),
+  // Max characters per outbound Telegram message (API hard cap 4096).
+  telegramMaxReplyChars: Number(process.env.TELEGRAM_MAX_REPLY_CHARS || 4000),
+
   // --- request queue ------------------------------------------------------------
   // Max concurrent upstream LLM/heavy requests (1 = strict serialization, right
   // for a single-slot llama.cpp). Raise for multi-slot servers.

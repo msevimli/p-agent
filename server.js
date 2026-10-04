@@ -9,6 +9,7 @@ const express = require('express');
 const path = require('path');
 const config = require('./config');
 const automationManager = require('./services/automationManager');
+const telegramBot = require('./services/telegramBot');
 
 const app = express();
 
@@ -26,6 +27,7 @@ app.use('/api/skills', require('./routes/skills'));
 app.use('/api/models', require('./routes/models'));
 app.use('/api/automations', require('./routes/automations'));
 app.use('/api/queue', require('./routes/queue'));
+app.use('/api/channels', require('./routes/channels'));
 
 // Optional introspection endpoint so the tool registry is inspectable at runtime.
 app.get('/api/tools', (_req, res) => {
@@ -43,12 +45,16 @@ app.listen(config.port, () => {
   console.log(`llama.cpp endpoint: ${config.llamaBaseUrl} (model ${config.llamaModel})`);
   automationManager.start();
   console.log('automation scheduler started');
+  // Resume the Telegram channel if it was enabled before restart.
+  telegramBot.syncStart();
+  if (telegramBot.status().enabled) console.log('telegram channel: enabled (polling when token is set)');
 });
 
 // Stop the scheduler cleanly on shutdown signals.
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.once(sig, () => {
     automationManager.stop();
+    telegramBot.stop();
     process.exit(0);
   });
 }
