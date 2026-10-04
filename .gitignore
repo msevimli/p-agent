@@ -1,5 +1,8 @@
 node_modules/
-data/
+# data/ is runtime state — everything ignored EXCEPT the model registry,
+# which is deliberately tracked (it holds no secrets; keys live in .env).
+data/*
+!data/models-state.json
 npm-debug.log*
 .env
 .DS_Store
