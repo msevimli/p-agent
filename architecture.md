@@ -16,7 +16,11 @@ OpenAI-style endpoints (OpenRouter etc.) through the same client layer.
 - **Models:** multi-model registry (`data/models-state.json`), all GGUF Q4:
   `gemma-2-2b-it-Q4_K_M.gguf` (default, :8080, active), `qwen2.5-coder-3b-instruct`,
   `mistral-7b-instruct`, `Llama-3.2-3B-Instruct`. Model selection is dynamic —
-  the active model's endpoint/model/apiKey is resolved per request, no restart.
+  the active model's endpoint/model is resolved per request, no restart; the
+  bearer token resolves from .env (`LLAMA_API_KEY_<MODEL_ID>` per-model var,
+  falling back to the global `LLAMA_API_KEY`) — keys are never stored in
+  models-state.json, and keys typed into the dashboard are routed to .env by
+  modelManager.writeDotEnvVar (see `docs` in services/modelManager.js).
 - **Model format caveat (important):** this llama.cpp build reports
   `chat_format: Content-only`, so native OpenAI `tool_calls` never fire.
   Tool calling therefore relies on a structured **JSON-block contract** the

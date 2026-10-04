@@ -8,6 +8,10 @@
  *   PUT    /api/models/:id       update a model
  *   DELETE /api/models/:id       delete a model
  *   POST   /api/models/:id/activate   set a model as the active/default model
+ *
+ * Security: an apiKey sent here is routed by the manager to <root>/.env
+ * (LLAMA_API_KEY_<MODEL_ID>) — it is never persisted in models-state.json,
+ * which stays free of plaintext secrets. Responses carry only hasKey flags.
  */
 const express = require('express');
 const modelManager = require('../services/modelManager');

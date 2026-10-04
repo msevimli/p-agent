@@ -13,7 +13,7 @@ const path = require('path');
 // data/models-state.json (where the Models UI would otherwise store them in
 // plaintext) and out of the repository.
 (function loadDotEnv() {
-  const envFile = path.join(__dirname, '.env');
+  const envFile = process.env.PLIFE_DOTENV_FILE || path.join(__dirname, '.env');
   let raw;
   try { raw = fs.readFileSync(envFile, 'utf8'); } catch { return; }
   for (const line of raw.split('\n')) {
@@ -37,6 +37,9 @@ module.exports = {
   // --- server ---------------------------------------------------------------
   port: Number(process.env.PORT || 8888),
   publicDir: path.join(ROOT_DIR, 'public'),
+  // Secrets live in <root>/.env (gitignored). PLIFE_DOTENV_FILE overrides the
+  // path (tests, containers).
+  dotEnvFile: process.env.PLIFE_DOTENV_FILE || path.join(ROOT_DIR, '.env'),
 
   // --- llama.cpp client -----------------------------------------------------
   llamaBaseUrl: (process.env.LLAMA_BASE_URL || 'http://127.0.0.1:8080').replace(/\/+$/, ''),

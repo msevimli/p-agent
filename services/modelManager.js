@@ -10,8 +10,14 @@
  * Persistence: <dataDir>/models-state.json
  *   {
  *     "activeId": "<id|null>",
- *     "models": [ { id, name, endpoint, model, contextLength, apiKey? }, ... ]
+ *     "models": [ { id, name, endpoint, model, contextLength, provider }, ... ]
  *   }
+ *
+ * API keys are NEVER stored here. They live in <root>/.env (gitignored) as
+ * `LLAMA_API_KEY_<MODEL_ID>` per-model variables (fallback: the global
+ * `LLAMA_API_KEY` from the legacy env config). Keys typed into the dashboard
+ * are routed to .env by writeDotEnvVar(); presence is tracked as the hasKey
+ * flag in API responses.
  *
  * The file is the source of truth and is re-read on every read so external
  * edits are picked up; all clusters are guarded so the active model can never
@@ -24,10 +30,58 @@ const https = require('https');
 const config = require('../config');
 
 const STATE_FILE = path.join(config.dataDir, 'models-state.json');
+const DOTENV_FILE = config.dotEnvFile;
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const URL_RE = /^https?:\/\/[^\s/$.?#].[^\s]*$/i;
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/+-]*$/;
+const ENV_NAME_RE = /^[A-Z0-9_]+$/;
+
+// ---------------------------------------------------------------- secrets
+/** Map a model id to its per-model env variable: LLAMA_API_KEY_<ID_UPPER>. */
+function envVarForModel(id) {
+  return 'LLAMA_API_KEY_' + String(id || '').toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+}
+
+/**
+ * Resolve the bearer token for a model: per-model .env variable first, then
+ * the shared legacy LLAMA_API_KEY fallback. Never reads models-state.json.
+ */
+function resolveApiKey(id) {
+  const perModel = process.env[envVarForModel(id)];
+  if (perModel && String(perModel).trim()) return String(perModel).trim();
+  return config.llamaApiKey || '';
+}
+
+/**
+ * Upsert (value) or remove (null/undefined/'') a variable in .env, then
+ * mirror it into this process's env so the change applies immediately
+ * without a restart. Preserves all other lines and the 0600 file mode.
+ */
+function writeDotEnvVar(name, value) {
+  if (!ENV_NAME_RE.test(name)) return { ok: false, error: `invalid env var name: ${name}` };
+  const keep = value !== null && value !== undefined && String(value).trim() !== '';
+  const line = `${name}=${keep ? String(value).trim() : ''}`;
+  let raw = '';
+  try { raw = fs.readFileSync(DOTENV_FILE, 'utf8'); } catch { /* first write */ }
+  const out = raw
+    .split('\n')
+    .filter((l) => !new RegExp(`^${name}=`).test(l.trim()))
+    .concat(keep ? [line] : [])
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/^\n+|\n+$/g, '') + '\n';
+  try {
+    fs.mkdirSync(path.dirname(DOTENV_FILE), { recursive: true });
+    fs.writeFileSync(DOTENV_FILE, out, { mode: 0o600 });
+    fs.chmodSync(DOTENV_FILE, 0o600);
+  } catch (e) {
+    return { ok: false, error: `could not write ${DOTENV_FILE}: ${e.message}` };
+  }
+  if (keep) process.env[name] = String(value).trim();
+  else delete process.env[name];
+  return { ok: true, var: name, set: keep };
+}
 
 // ---------------------------------------------------------------- storage
 function loadState() {
@@ -54,11 +108,20 @@ function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf8');
 }
 
-/** Strip apiKey from a model before sending it to the client (still has hasKey). */
+/** Local llama.cpp endpoints never need a bearer token. */
+function isLoopback(url) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])([:/]|$)/i.test(String(url || ''));
+}
+
+/** Strip secrets from a model before sending it to the client (still has hasKey). */
 function publicModel(m, opts) {
   if (!m) return null;
   const { includeKey } = opts || {};
-  const hasKey = !!(m.apiKey && String(m.apiKey).length);
+  const key = resolveApiKey(m.id);
+  // hasKey means "a key is configured where one is needed": the global
+  // fallback applies to every model at resolution time, but reporting it on
+  // loopback models would be wrong — they never authenticate.
+  const hasKey = !!key && !isLoopback(m.endpoint);
   const out = {
     id: m.id,
     name: m.name,
@@ -69,7 +132,7 @@ function publicModel(m, opts) {
     hasKey,
     active: false,
   };
-  if (includeKey && hasKey) out.apiKey = m.apiKey;
+  if (includeKey && hasKey) out.apiKey = key;
   return out;
 }
 
@@ -192,7 +255,7 @@ function getActiveModel() {
   return { ...active };
 }
 
-/** Get one model by id (with optional apiKey for internal callers). */
+/** Get one model by id (with optional resolved apiKey for internal callers). */
 function getModel(id, opts) {
   const state = loadState();
   const m = state.models.find((x) => x.id === id);
@@ -228,11 +291,15 @@ function createModel(body) {
     model: v.model,
     contextLength: v.contextLength,
   };
-  if (typeof body.apiKey === 'string' && body.apiKey.trim()) entry.apiKey = body.apiKey.trim();
   // First model becomes active by default.
   if (state.models.length === 0) state.activeId = v.id;
   state.models.push(entry);
   saveState(state);
+  // A key from the dashboard goes to .env (gitignored) — never into the
+  // registry, which stays plaintext-secret-free by construction.
+  if (typeof body.apiKey === 'string' && body.apiKey.trim()) {
+    writeDotEnvVar(envVarForModel(v.id), body.apiKey.trim());
+  }
   return { ok: true, model: publicModel(entry) };
 }
 
@@ -272,13 +339,15 @@ function updateModel(id, body) {
     model: v.model,
     contextLength: v.contextLength,
   };
-  // Preserve apiKey unless a new one (or explicit clear) was supplied.
+  // apiKey semantics: a non-blank value updates the per-model var in .env; an
+  // explicit blank/null clears it. Omitting apiKey leaves the stored var
+  // untouched. The registry NEVER carries the key itself.
   if (body.apiKey !== undefined) {
-    if (typeof body.apiKey === 'string' && body.apiKey.trim()) entry.apiKey = body.apiKey.trim();
-    else if (body.apiKey === '' || body.apiKey === null) { /* explicit clear → omit */ }
-    else entry.apiKey = existing.apiKey; // keep old
-  } else {
-    entry.apiKey = existing.apiKey;
+    if (typeof body.apiKey === 'string' && body.apiKey.trim()) {
+      writeDotEnvVar(envVarForModel(targetId), body.apiKey.trim());
+    } else {
+      writeDotEnvVar(envVarForModel(targetId), null);
+    }
   }
 
   state.models[idx] = entry;
@@ -299,11 +368,15 @@ function deleteModel(id) {
     state.activeId = state.models.length ? state.models[0].id : null;
   }
   saveState(state);
+  // Drop the model's dedicated .env variable so deleting a model cleans up
+  // its secret too.
+  writeDotEnvVar(envVarForModel(id), null);
   return { ok: true, deleted: true, active: state.activeId };
 }
 
 module.exports = {
   STATE_FILE,
+  DOTENV_FILE,
   listModels,
   getActiveModel,
   getModel,
@@ -311,4 +384,7 @@ module.exports = {
   createModel,
   updateModel,
   deleteModel,
+  resolveApiKey,
+  writeDotEnvVar,
+  envVarForModel,
 };

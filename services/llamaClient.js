@@ -58,7 +58,7 @@ function activeTarget() {
   return {
     baseUrl: stripSlash((m && m.endpoint) ? String(m.endpoint) : config.llamaBaseUrl),
     model: (m && m.model) ? m.model : config.llamaModel,
-    apiKey: m && m.apiKey ? m.apiKey : (config.llamaApiKey || ''),
+    apiKey: modelManager.resolveApiKey((m && m.id) || '') || '',
   };
 }
 
