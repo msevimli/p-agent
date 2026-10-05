@@ -1,5 +1,5 @@
 {
-  "activeId": "deepseek",
+  "activeId": "qwen-coder",
   "models": [
     {
       "id": "gemma",
@@ -12,19 +12,10 @@
     },
     {
       "id": "qwen-coder",
-      "name": "Qwen2.5 Coder 3B",
+      "name": "Qwen2.5 Coder 14B",
       "provider": "local",
       "endpoint": "http://127.0.0.1:8081",
-      "model": "qwen2.5-coder-3b-instruct-q4_0.gguf",
-      "contextLength": 32768,
-      "hasKey": false
-    },
-    {
-      "id": "mistral",
-      "name": "Mistral 7B Instruct",
-      "provider": "local",
-      "endpoint": "http://127.0.0.1:8082",
-      "model": "mistral-7b-instruct-v0.3.Q4_K_M.gguf",
+      "model": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
       "contextLength": 32768,
       "hasKey": false
     },
@@ -53,7 +44,7 @@
       "endpoint": "https://openrouter.ai/api/v1",
       "model": "inclusionai/ling-3.0-flash-sante:free",
       "contextLength": 8192,
-      "hasKey": true
+      "hasKey": false
     },
     {
       "id": "deepseek",
@@ -62,7 +53,7 @@
       "endpoint": "https://openrouter.ai/api/v1",
       "model": "deepseek/deepseek-v3.2",
       "contextLength": 250000,
-      "hasKey": true
+      "hasKey": false
     }
   ]
 }
