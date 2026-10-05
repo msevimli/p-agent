@@ -63,7 +63,8 @@ p-agent/
 │   ├── library.js            #   /api/library CRUD + upload (raw body)
 │   ├── channels.js           #   /api/channels — Telegram config/status/toggle
 │   ├── fs.js                 #   /api/fs/list, /api/fs/read (file explorer)
-│   └── queue.js              #   GET /api/queue — LLM queue stats
+│   ├── queue.js              #   GET /api/queue — LLM queue stats
+│   └── system.js             #   GET /api/system/metrics — RAM/CPU (os module)
 │
 ├── services/                 # business logic (no HTTP)
 │   ├── llamaClient.js        # payload build, streaming client, SSE parse,
@@ -320,9 +321,11 @@ p-agent/
   generation settings + context-budget popovers, stop-generation via
   AbortController, per-message ⚡ duration/token badges, library grid tiles
   with inline delete-confirm state machine, a channels panel (token,
-  whitelist, toggle, test-connection, live status meta), and the header model
+  whitelist, toggle, test-connection, live status meta), the header model
   lifecycle badge (color-coded dot, amber spinner while loading, warm-up /
-  eject dropdown with memory footprint). No build pipeline.
+  eject dropdown with memory footprint), and a system resource monitor
+  (RAM/CPU circular gauges, 5s poll, delta-based CPU percentage). No build
+  pipeline.
 
 ## 5. Data Flow
 

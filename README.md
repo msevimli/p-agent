@@ -67,6 +67,22 @@ warm-ups and ejects.
 - Memory reporting is approximate: weights ≈ GGUF file size on disk plus the
   KV context capacity reported by `/slots`.
 
+## System resource monitor (header)
+
+Two compact circular gauges in the header (left of the model status badge)
+show live **RAM** (blue) and **CPU** (violet) usage with the percentage
+inside the ring: `GET /api/system/metrics` (Node `os` module, no
+dependencies). Warnings at ≥85% and critical at ≥95% tint the ring amber/red.
+Tooltips carry the raw numbers (GB used / total, core count, load average,
+uptime). The widget polls every 5s and sweeps smoothly between samples.
+
+- **RAM** = total − free from `os.totalmem()`/`os.freemem()` (matches `free`'s
+  used column on Linux).
+- **CPU** = true usage percentage via delta of per-core tick counters
+  (`os.cpus().times`), the same technique as top/htop. The very first sample
+  after a restart has no baseline and falls back to a loadavg-based estimate
+  (one tick, then deltas take over).
+
 ## Daemon lifecycle management (`pagent.sh`)
 
 The root-level `pagent.sh` is the unified management script — instead of
@@ -217,7 +233,8 @@ p-agent/
 │   ├── channels.js        #   /api/channels — Telegram config/status
 │   ├── fs.js              #   /api/fs/list, /api/fs/read (file explorer)
 │   ├── health.js          #   GET /api/health
-│   └── queue.js           #   GET /api/queue — request-queue stats
+│   ├── queue.js           #   GET /api/queue — request-queue stats
+│   └── system.js          #   GET /api/system/metrics — RAM + CPU (os module)
 ├── services/              # business logic (no HTTP)
 │   ├── llamaClient.js     #   upstream client: payload, SSE parse, probes
 │   ├── requestQueue.js    #   strict FIFO + transient retries/backoff
@@ -257,6 +274,7 @@ p-agent/
 | POST | `/api/channels/telegram/test` | getMe connection test |
 | GET | `/api/fs/list`, `/api/fs/read` | File explorer |
 | GET | `/api/queue` | Queue stats |
+| GET | `/api/system/metrics` | Host RAM + CPU usage (os module) |
 
 ## Key environment variables
 

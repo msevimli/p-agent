@@ -37,6 +37,12 @@
   const msmWarmupBtn = $('#msmWarmupBtn');
   const msmEjectBtn = $('#msmEjectBtn');
   const msmManageBtn = $('#msmManageBtn');
+  const ramRing = $('#ramRing');
+  const ramPct = $('#ramPct');
+  const ramMetric = $('#ramMetric');
+  const cpuRing = $('#cpuRing');
+  const cpuPct = $('#cpuPct');
+  const cpuMetric = $('#cpuMetric');
   const contextBtn = $('#contextBtn');
   const contextRing = $('#contextRing');
   const contextSummary = $('#contextSummary');
@@ -1556,6 +1562,69 @@
     closeSidebar();
   });
 
+  // ------------------------------------------- system resource monitor
+  // Header RAM + CPU rings driven by GET /api/system/metrics (os-module
+  // host stats, 5s poll). Rings sweep smoothly via CSS stroke-dashoffset
+  // transition; tooltips carry the raw numbers (GB used, cores, loadavg).
+  const RING_C = 97.39; // circumference of the 36-viewBox r=15.5 rings
+  const RAM_BASE = ['text-blue-500', 'dark:text-blue-400'];
+  const RAM_WARN = ['text-amber-500', 'dark:text-amber-400'];
+  const RAM_CRIT = ['text-red-500', 'dark:text-red-400'];
+  const CPU_BASE = ['text-violet-500', 'dark:text-violet-400'];
+  const CPU_WARN = ['text-amber-500', 'dark:text-amber-400'];
+  const CPU_CRIT = ['text-red-500', 'dark:text-red-400'];
+
+  function ringOffset(pct) {
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    return Math.round(RING_C * (1 - p / 100) * 100) / 100;
+  }
+
+  function applyRingColor(ring, pct, base, warn, crit) {
+    const p = Number(pct) || 0;
+    const chosen = p >= 95 ? crit : p >= 85 ? warn : base;
+    for (const set of [base, warn, crit]) {
+      for (const cls of set) ring.classList.remove(cls);
+    }
+    ring.classList.add(...chosen);
+  }
+
+  async function refreshSysMetrics() {
+    try {
+      const res = await fetch('/api/system/metrics');
+      const d = await res.json();
+      if (!res.ok || !d.ok) throw new Error(d.error || 'could not load system metrics');
+      const ram = d.ram || {};
+      const cpu = d.cpu || {};
+      const ramP = Math.round(Number(ram.percent) || 0);
+      const cpuP = Math.round(Number(cpu.percent) || 0);
+      ramPct.textContent = `${ramP}%`;
+      cpuPct.textContent = `${cpuP}%`;
+      ramRing.style.strokeDashoffset = ringOffset(ramP);
+      cpuRing.style.strokeDashoffset = ringOffset(cpuP);
+      applyRingColor(ramRing, ramP, RAM_BASE, RAM_WARN, RAM_CRIT);
+      applyRingColor(cpuRing, cpuP, CPU_BASE, CPU_WARN, CPU_CRIT);
+      const gb = (b) => (Number(b) / 1073741824).toFixed(1);
+      ramMetric.title = `RAM ${gb(ram.usedBytes)} / ${gb(ram.totalBytes)} GB used (${ramP}%)`;
+      let cpuTitle = `CPU ${cpuP}% on ${Number(cpu.cores) || '?'} cores`;
+      if (cpu.estimate) cpuTitle += ' (estimate)';
+      if (Array.isArray(cpu.loadavg)) {
+        cpuTitle += ` · load ${cpu.loadavg.map((n) => Number(n).toFixed(2)).join(' / ')}`;
+      }
+      if (Number.isFinite(Number(d.uptimeSec))) {
+        const up = Math.max(0, Math.round(Number(d.uptimeSec) / 60));
+        cpuTitle += ` · up ${up >= 60 ? `${Math.floor(up / 60)}h ${up % 60}m` : `${up}m`}`;
+      }
+      cpuMetric.title = cpuTitle;
+    } catch {
+      ramPct.textContent = '—';
+      cpuPct.textContent = '—';
+      ramRing.style.strokeDashoffset = RING_C;
+      cpuRing.style.strokeDashoffset = RING_C;
+      ramMetric.title = 'system metrics unavailable';
+      cpuMetric.title = 'system metrics unavailable';
+    }
+  }
+
   // ------------------------------------------------------------- automations view
   const AUTO_ICON = `<svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
       <circle cx="12" cy="12" r="9" />
@@ -2353,7 +2422,9 @@
     else renderMessages();
     checkHealth();
     refreshModelStatus();
+    refreshSysMetrics();
     setInterval(checkHealth, 15000);
+    setInterval(refreshSysMetrics, 5000);
     // Keep the model lifecycle badge + the automations/channels lists fresh.
     setInterval(() => {
       refreshModelStatus();

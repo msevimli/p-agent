@@ -28,6 +28,7 @@ app.use('/api/models', require('./routes/models'));
 app.use('/api/automations', require('./routes/automations'));
 app.use('/api/queue', require('./routes/queue'));
 app.use('/api/channels', require('./routes/channels'));
+app.use('/api/system', require('./routes/system'));
 
 // Optional introspection endpoint so the tool registry is inspectable at runtime.
 app.get('/api/tools', (_req, res) => {
