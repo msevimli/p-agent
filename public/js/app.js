@@ -1605,6 +1605,7 @@
       applyRingColor(cpuRing, cpuP, CPU_BASE, CPU_WARN, CPU_CRIT);
       const gb = (b) => (Number(b) / 1073741824).toFixed(1);
       let ramTitle = `RAM ${gb(ram.usedBytes)} / ${gb(ram.totalBytes)} GB used (${ramP}%)`;
+      if (ram.scope === 'container') ramTitle += ` · container (cgroup ${ram.cgroup || '?'}${ram.limitSet ? '' : ', no limit'})`;
       if (Number.isFinite(ram.buffCacheBytes) && ram.buffCacheBytes > 0) {
         ramTitle += ` · cache ${gb(ram.buffCacheBytes)} GB`;
         if (Number.isFinite(ram.percentAvail)) ramTitle += ` · w/o cache ${Math.round(ram.percentAvail)}%`;

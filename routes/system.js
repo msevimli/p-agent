@@ -1,28 +1,27 @@
 /**
  * /api/system — host system resource metrics for the header widgets.
  *
- * Pure Node core (os module + /proc/meminfo read on Linux), no dependencies,
- * no child processes. The CPU percentage is a DELTA measurement between two
- * consecutive samples of per-core tick counters (user/nice/sys/idle/irq) —
- * the same technique as top/htop. The first call has no baseline, so it
- * falls back to a loadavg-based estimate until the next sample arrives
- * (the frontend polls every 5s, so the estimate lasts one tick at most).
+ * Pure Node core (os module + /proc and /sys reads on Linux), no
+ * dependencies, no child processes. The CPU percentage is a DELTA
+ * measurement between two consecutive samples of per-core tick counters
+ * (user/nice/sys/idle/irq) — the same technique as top/htop. The first
+ * call has no baseline, so it falls back to a loadavg-based estimate until
+ * the next sample arrives (the frontend polls every 5s, so the estimate
+ * lasts one tick at most).
  *
- * RAM accounting (Linux): reads /proc/meminfo directly — the same kernel
- * counters `free` uses — and reports TWO distinct views so the numbers are
- * never ambiguous:
- *   percent            = used / total with used = total − MemFree − Buffers
- *                        − Cached − SReclaimable + Shmem (procps' classic
- *                        kb_main_used: page cache counts as used). This is
- *                        the naive "used vs total" ratio.
- *   percentAvail       = (total − MemAvailable) / total — what MODERN
- *                        `free` prints as its "used" column (MemAvailable
- *                        includes reclaimable cache). Older code computed
- *                        used = totalmem − os.freemem(), which on Linux
- *                        equals ~MemAvailable and thus UNDERSTATES the
- *                        naive ratio whenever page cache is large.
- * The header ring uses `percent` (cache counts). Non-Linux platforms fall
- * back to os.totalmem/freemem and report both views as equal.
+ * RAM accounting — CONTAINER-AWARE. When the process runs inside a Docker
+ * container (/.dockerenv or cgroup markers), memory usage and limit are
+ * read from the container's cgroup so the dashboard matches `docker stats`
+ * instead of the host's /proc/meminfo:
+ *   - cgroup v2: memory.current + memory.max ("max" = unlimited)
+ *   - cgroup v1: memory.usage_in_bytes + memory.limit_in_bytes
+ *                (2^63−4096 sentinel = unlimited)
+ * An unlimited cgroup falls back to host MemTotal as the effective budget
+ * (exactly what `docker stats` shows as LIMIT in that case). Bare metal
+ * (no cgroup mount or files) uses host-level /proc/meminfo accounting:
+ *   percent      = procps kb_main_used (buffers + page cache count as used)
+ *   percentAvail = (MemTotal − MemAvailable) / MemTotal (modern free's
+ *                  "used" column)
  */
 const os = require('os');
 const fs = require('fs');
@@ -30,13 +29,59 @@ const express = require('express');
 const router = express.Router();
 
 // ---------------------------------------------------------------- RAM
+/** Values above 2^60 are cgroup "no limit" sentinels (v1: 2^63−4096, v2: "max"). */
+const UNLIMITED_THRESHOLD = 2 ** 60;
+
+const CGROUP_V2 = {
+  usage: '/sys/fs/cgroup/memory.current',
+  limit: '/sys/fs/cgroup/memory.max',
+};
+const CGROUP_V1 = {
+  usage: '/sys/fs/cgroup/memory/memory.usage_in_bytes',
+  limit: '/sys/fs/cgroup/memory/memory.limit_in_bytes',
+};
+
+/** Read a small text file, trimmed; null when missing/unreadable. */
+function readTextFile(p) {
+  try { return fs.readFileSync(p, 'utf8').trim(); } catch { return null; }
+}
+
+/** Is this process inside a container? (Docker marker + cgroup controller paths) */
+function inContainer() {
+  try {
+    if (fs.existsSync('/.dockerenv')) return true;
+    const c1 = readTextFile('/proc/1/cgroup');
+    if (c1 && /docker|kubepods|containerd|libpod/i.test(c1)) return true;
+  } catch { /* probe failures -> treated as bare metal */ }
+  return false;
+}
+
+/**
+ * Read usage + limit from a cgroup tree. `paths` overridable for tests.
+ * Returns null when the tree is absent/unreadable. A sentinel/unset limit
+ * resolves to { limitBytes: null } (caller decides the fallback budget).
+ */
+function readCgroupRam(paths) {
+  const usageRaw = readTextFile(paths.usage);
+  const limitRaw = readTextFile(paths.limit);
+  if (usageRaw === null || limitRaw === null) return null;
+  const usage = Number.parseInt(usageRaw, 10);
+  if (!Number.isFinite(usage) || usage <= 0) return null;
+  let limitBytes = null;
+  const lv = String(limitRaw).toLowerCase();
+  if (lv !== 'max') {
+    const n = Number.parseInt(lv, 10);
+    if (Number.isFinite(n) && n > 0 && n < UNLIMITED_THRESHOLD) limitBytes = n;
+  }
+  return { usageBytes: usage, limitBytes };
+}
+
 /**
  * Parse /proc/meminfo (Linux) into a { key: kibibytes } map.
- * Returns null when the file is unavailable (non-Linux, containers…).
+ * Returns null when the file is unavailable.
  */
 function readMemInfo() {
-  let raw = null;
-  try { raw = fs.readFileSync('/proc/meminfo', 'utf8'); } catch { return null; }
+  const raw = readTextFile('/proc/meminfo');
   if (!raw) return null;
   const m = {};
   for (const line of raw.split('\n')) {
@@ -50,18 +95,13 @@ function readMemInfo() {
 }
 
 /** 0–100 capped percentage (1 decimal), so counter noise never exceeds the bar. */
-function pct(usedKiB, totalKiB) {
-  if (!(totalKiB > 0)) return 0;
-  return Math.max(0, Math.min(100, Math.round((usedKiB / totalKiB) * 1000) / 10));
+function pct(usedBytes, totalBytes) {
+  if (!(totalBytes > 0)) return 0;
+  return Math.max(0, Math.min(100, Math.round((usedBytes / totalBytes) * 1000) / 10));
 }
 
-/**
- * RAM snapshot with kernel-counter accounting:
- *   used      = MemTotal − MemFree − Buffers − Cached − SReclaimable + Shmem
- *               (procps' kb_main_used — buffers/cache count as used)
- *   available = MemAvailable (what modern free's "used" column is based on)
- */
-function readRam() {
+/** Host-level RAM snapshot (bare-metal or fallback): kernel-counter accounting. */
+function readHostRam() {
   const info = readMemInfo();
   const totalBytes = os.totalmem();
   if (info && Number.isFinite(info.MemTotal) && info.MemTotal > 0) {
@@ -81,10 +121,13 @@ function readRam() {
       availableBytes: availableKiB * 1024,
       percent: pct(usedKiB, totalKiB),                       // cache counts as used
       percentAvail: pct(totalKiB - availableKiB, totalKiB),  // modern free's used column
+      scope: 'host',
+      cgroup: null,
+      limitSet: true,
       source: 'proc_meminfo',
     };
   }
-  // Fallback (macOS/Windows/containers without /proc/meminfo): os module.
+  // Last-resort fallback (non-Linux): os module.
   const freeBytes = os.freemem();
   const usedBytes = Math.max(0, totalBytes - freeBytes);
   return {
@@ -95,8 +138,46 @@ function readRam() {
     availableBytes: totalBytes - usedBytes,
     percent: pct(usedBytes, totalBytes),
     percentAvail: pct(usedBytes, totalBytes),
+    scope: 'host',
+    cgroup: null,
+    limitSet: true,
     source: 'os',
   };
+}
+
+/**
+ * Container-aware RAM snapshot. Prefers the process cgroup (v2 then v1);
+ * the effective budget is the cgroup limit, or host MemTotal when the
+ * cgroup is unlimited (docker-stats behavior). Falls back to host-level
+ * accounting when no cgroup is readable.
+ */
+function readRam() {
+  const container = inContainer();
+  const cgroupRam = readCgroupRam(CGROUP_V2) || readCgroupRam(CGROUP_V1);
+  const v2 = readTextFile(CGROUP_V2.usage) !== null;
+
+  if (container && cgroupRam) {
+    const usedBytes = cgroupRam.usageBytes;
+    // Effective budget: cgroup limit, else host total (matches `docker
+    // stats` LIMIT for unlimited containers).
+    const totalBytes = cgroupRam.limitBytes || os.totalmem();
+    const limitSet = cgroupRam.limitBytes !== null;
+    const usedPct = pct(usedBytes, totalBytes);
+    return {
+      totalBytes,
+      usedBytes,
+      freeBytes: limitSet ? Math.max(0, totalBytes - usedBytes) : null,
+      buffCacheBytes: null,    // not exposed by cgroup controllers
+      availableBytes: null,    // MemAvailable equivalents are cgroup-v1-absent
+      percent: usedPct,
+      percentAvail: null,
+      scope: 'container',
+      cgroup: v2 ? 'v2' : 'v1',
+      limitSet,
+      source: 'cgroup',
+    };
+  }
+  return readHostRam();
 }
 
 // ---------------------------------------------------------------- CPU
@@ -174,3 +255,5 @@ router.get('/metrics', (_req, res) => {
 });
 
 module.exports = router;
+// Test hooks (harness only): pure helpers with overridable paths.
+module.exports._test = { readCgroupRam, readHostRam, readRam, inContainer, CGROUP_V1, CGROUP_V2, pct };

@@ -76,15 +76,19 @@ dependencies). Warnings at ≥85% and critical at ≥95% tint the ring amber/red
 Tooltips carry the raw numbers (GB used / total, core count, load average,
 uptime). The widget polls every 5s and sweeps smoothly between samples.
 
-- **RAM** is kernel-accurate: on Linux `/proc/meminfo` is parsed directly
-  (the same counters `free` uses). The ring percent counts buffers + page
-  cache as used (`total − MemFree − Buffers − Cached − SReclaimable + Shmem`,
-  procps' `kb_main_used`), matching the naive "used vs total" ratio;
-  `percentAvail` (total − MemAvailable) mirrors modern `free`'s used column.
-  Beware `os.freemem()` on Linux ≈ MemAvailable (reclaimable cache
-  included), so the old total − freemem formula understated usage whenever
-  cache was large — and on WSL2 it can disagree with Windows Task Manager's
-  vmmem accounting, which counts the VM's held cache too.
+- **RAM** is kernel-accurate and **container-aware**: inside a Docker
+  container (`/.dockerenv` / cgroup markers) usage and limit come from the
+  process cgroup — cgroup v2 `memory.current`/`memory.max` or cgroup v1
+  `memory.usage_in_bytes`/`memory.limit_in_bytes` — so the header matches
+  `docker stats` (used = cgroup usage; total = the container's limit, or
+  host memory when the cgroup is unlimited, mirroring docker-stats LIMIT).
+  Bare metal falls back to `/proc/meminfo` with the procps `kb_main_used`
+  formula (buffers + page cache count as used) plus `percentAvail`
+  (`MemTotal − MemAvailable`, modern `free`'s used column). Beware
+  `os.freemem()` on Linux ≈ MemAvailable (reclaimable cache included), so a
+  plain `totalmem − freemem` understates the naive ratio whenever cache is
+  large — and on WSL2 it can disagree with Windows Task Manager's vmmem
+  accounting, which counts the VM's held cache too.
 - **CPU** = true usage percentage via delta of per-core tick counters
   (`os.cpus().times`), the same technique as top/htop. The very first sample
   after a restart has no baseline and falls back to a loadavg-based estimate
