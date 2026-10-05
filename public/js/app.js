@@ -1612,6 +1612,8 @@
       }
       ramMetric.title = ramTitle;
       let cpuTitle = `CPU ${cpuP}% on ${Number(cpu.cores) || '?'} cores`;
+      if (cpu.quotaCores) cpuTitle += ` (quota ${Number(cpu.quotaCores)})`;
+      if (cpu.scope === 'container') cpuTitle += ` · container (cgroup ${cpu.cgroup || '?'})`;
       if (cpu.estimate) cpuTitle += ' (estimate)';
       if (Array.isArray(cpu.loadavg)) {
         cpuTitle += ` · load ${cpu.loadavg.map((n) => Number(n).toFixed(2)).join(' / ')}`;

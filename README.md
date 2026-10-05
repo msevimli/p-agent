@@ -89,10 +89,13 @@ uptime). The widget polls every 5s and sweeps smoothly between samples.
   plain `totalmem − freemem` understates the naive ratio whenever cache is
   large — and on WSL2 it can disagree with Windows Task Manager's vmmem
   accounting, which counts the VM's held cache too.
-- **CPU** = true usage percentage via delta of per-core tick counters
-  (`os.cpus().times`), the same technique as top/htop. The very first sample
-  after a restart has no baseline and falls back to a loadavg-based estimate
-  (one tick, then deltas take over).
+- **CPU** is container-aware like RAM: inside a container the delta comes
+  from the cgroup's own counters — `cpuacct.usage` (cgroup v1, ns) or
+  `cpu.stat usage_usec` (cgroup v2) — with the percentage expressed against
+  the allocated quota (`cpu.max` / `cpu.cfs_quota_us`), or the host core
+  count when the quota is unlimited. Bare metal keeps the `os.cpus().times`
+  tick-delta method. In both cases the very first sample has no baseline
+  and falls back to a loadavg-based estimate for one tick.
 
 ## Daemon lifecycle management (`pagent.sh`)
 
