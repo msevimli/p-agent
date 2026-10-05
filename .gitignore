@@ -5,4 +5,20 @@ data/*
 !data/models-state.json
 npm-debug.log*
 .env
+# .env.* files EXCEPT the tracked, placeholder-only .env-example
+.env.*
+!.env-example
+# logs
+*.log
+nohup.out
+# model weights
+models/
+*.gguf
+# temp files and backups
+*.tmp
+*.temp
+*.swp
+*~
+*.bak
+*.orig
 .DS_Store

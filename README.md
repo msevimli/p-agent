@@ -57,8 +57,55 @@ warm-ups and ejects.
   llama.cpp's task "tombstones" (a finished task leaves `id_task` set, which
   would otherwise pin the badge on "busy" forever).
 - **Warm-up** (`POST /api/models/warmup`) runs a `max_tokens=1` completion
-  through the same FIFO request queue as chat — never two concurrent
-  connections into a single-slot llama.cpp. Local endpoints only.
+  containing ONLY the static prompt prefix (short system prompt + ALL tools,
+  `cache_prompt: true`) through the same FIFO request queue as chat — never
+  two concurrent connections into a single-slot llama.cpp. Local endpoints
+  only. The agent also warms up on startup (`AUTO_WARMUP=false` to disable).
+  After a warm-up, the first real message starts from a KV-cache hit (the
+  usage badge shows it: "6.1k tok (5.9k cached) · 12.1/2.6 tok/s").
+- **Prompt caching:** the system prompt and the full 16-tool array are
+  byte-stable (static text, tools sorted by name, identical serialization),
+  `cache_prompt: true` is set on every request, and dynamic content is never
+  injected before the history — so llama.cpp re-evaluates only the new user
+  message + last reply on subsequent turns of a conversation. Every `[llm]`
+  log line carries `prefix=<hash>` of the serialized prefix; a runtime
+  change logs a warning.
+- **Tool output limits & history compaction:** one tool result is capped at
+  `TOOL_OUTPUT_MAX_CHARS` (4000, head+tail with a truncation marker applied
+  once at insertion — run_shell keeps mostly the tail); read_file supports
+  line offset/limit and caps at READ_FILE_MAX_CHARS; list_files caps entries
+  and reports the omitted count. Compaction is a deterministic REPLAY of the
+  conversation with the fixed chars/3.4 estimator (never the per-request
+  usage.prompt_tokens calibration, which only feeds logs/UI): a compaction
+  event fires only when the running estimate crosses 75% of the context
+  budget (n_ctx − prefix − 1024 reserve − 5% margin) and brings the state to
+  50% — oldest tool results stubbed, then oldest complete turns dropped,
+  always keeping the last 3 user turns. The cut is sticky, so between
+  events every request reproduces the byte-identical compacted prefix and
+  only the new messages re-evaluate; `scripts/compaction-stability-sim.js`
+  proves this (prompt tokens, common prefix, re-evaluated tokens per turn,
+  ±10% calibration-invariance). Compaction events and estimated re-prefill
+  time (tokens after the first changed position ÷ measured prompt speed)
+  are logged (`[ctx] compact(...)`). A context-exceeded error triggers one
+  compact-and-retry, then a clear error.
+- **Misformatted tool calls (tolerant fallback + guard retry):** some llama.cpp
+  builds leave a correctly-shaped call wrapped in a tag (`<tool_call>`,
+  `<tool_calls>`, `<function_call>`, `<function-calls>`) or a fenced JSON block
+  in the raw assistant content with `tool_calls` empty. A strict parser
+  (`services/toolCallParser.js`) converts exactly this shape — only the
+  assistant's own content, tool name must exactly match a registered tool,
+  arguments must be valid JSON; anything ambiguous/invalid stays plain text
+  (never executes). The tag text never reaches the stored history or the UI,
+  and each use is logged (`[tool-fallback] variant=…`). If a reply still has
+  no call but contains a shell block / curl / wget on a live-data request,
+  the agent retries ONCE with the stable instruction and
+  `tool_choice:"required"` for that single completion (config
+  `GUARD_RETRY_TOOL_CHOICE`, default on). Genuine plain-text replies log the
+  finish reason and content head (`[llm-no-call]`). Every executed tool call
+  logs one line with real exit code, duration and the first 200 chars of
+  command / stdout / stderr, JSON-escaped
+  (`[tool] name=run_shell exit=0 dur=1.2s cmd="…" out="…" err="…"`). Tests:
+  `scripts/tool-call-fallback-tests.js` (mocked, no server).
 - **Eject** (`POST /api/models/eject`) is capability-tiered: true weight
   unload via llama.cpp's model-router API (`POST /models/unload`), a degraded
   KV-cache erase where supported, and otherwise an honest response explaining

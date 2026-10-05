@@ -333,16 +333,53 @@ p-agent/
    (after whitelist auth) and the CLI loop through `chatLoopback`/`streamChat`
    into the same endpoint, each replaying its persisted session history.
 2. **Payload build** (`routes/chat.js` → `services/llamaClient.js`): the
-   system prompt (`toolLoop.buildSystemPrompt` = base + tool instructions +
-   embedded schema of all 16 tools + automations + library guidance) is
-   prepended; the OpenAI `tools` array is attached; attachments are inlined
-   into the last user message.
-3. **Queue:** the completion enters the strict FIFO request queue (limit 1);
-   position surfaced via `X-Queue-Position` + a status event.
-4. **Upstream generation:** `complete()` POSTs to the active model's
+   system prompt (`toolLoop.buildSystemPrompt` = short base + compact tool-call
+   instructions; NO embedded tool schema — that duplicated ~3,400 tokens and
+   is dropped) is prepended; the FULL 16-tool array (name-sorted, identical
+   serialization on every request — stable, warm-up-compatible prefix) is
+   attached; `cache_prompt: true` tells llama.cpp to reuse its KV cache for
+   the stable prefix; attachments are inlined into the last user message.
+   Dynamic content (dates, request ids, session ids) is NEVER part of the
+   prefix — only the per-turn tail is new, so the second message of a
+   conversation re-evaluates just the new message + last reply. Every
+   completion logs `[llm] … prefix=<sha>`; a mid-process prefix change logs
+   a warning. (`LAZY_TOOLS=true` re-enables an experimental topic-based
+   subset, kept for experiments — it breaks prefix stability when a tool
+   group appears mid-conversation.)
+3. **Output limits & history compaction** (`services/historyManager.js`):
+   tool results are serialized and truncated ONCE at insertion into the
+   history (head+tail with a clear `[truncated N chars. …]` marker;
+   run_shell keeps mostly the tail); read_file gained 1-based offset/limit
+   and a per-call char cap; list_files caps listed entries and reports the
+   omitted count. The history budget = server n_ctx (/props, read-only)
+   − prefix − 1024 reserve − 5% margin. Compaction is a deterministic
+   REPLAY (pure function of the raw message list, fixed chars/3.4
+   estimator — NEVER the per-request usage.prompt_tokens calibration,
+   which only feeds logs/UI): turns are walked from the start and an event
+   fires only when the running estimate crosses the 75% high watermark,
+   bringing the state to the 50% low watermark — oldest tool results
+   stubbed first, then oldest complete turns dropped, never touching the
+   last 3 user turns or the system prompt. The state carries forward, so
+   the cut is sticky: between events every request reproduces the
+   byte-identical compacted prefix (llama.cpp cache stays valid; only the
+   new messages re-evaluate). Compactions are logged with tokens
+   before/after and estRePrefill = tokens AFTER THE FIRST CHANGED POSITION
+   ÷ last measured prompt speed (not removed tokens), and announced to the
+   UI ("Context trimmed, next reply may take longer (est. re-prefill
+   ~Ns)"). A context-exceeded error compacts and retries once, then
+   errors clearly.
+4. **Queue:** the completion enters the strict FIFO request queue (limit 1);
+   position surfaced via `X-Queue-Position` + a status event. A
+   "Processing prompt (cold start…)" status event appears after ~2.5s of
+   silence and is cancelled on the first byte; the lifecycle badge shows
+   prefill % from `/slots`.
+5. **Upstream generation:** `complete()` POSTs to the active model's
    `/v1/chat/completions`, consumes the SSE stream, resolves
-   `{content, toolCalls, usage, finishReason}`. Slot supervisor + heartbeats
-   keep the stream alive.
+   `{content, toolCalls, usage, timings, finishReason, firstTokenMs}`. Slot
+   supervisor + heartbeats keep the stream alive. Every completion logs
+   `[llm] prompt/eval/cached · pp/gen tok/s · ttft · wall · prefix`; the usage
+   SSE chunk carries `timings` for the message badge ("6.1k tok (5.9k cached) ·
+   12.1/2.6 tok/s").
 5. **Tool detection & execution:** native `tool_calls` or an extracted JSON
    block → `toolLoop.executeTool` (dedup guards + validation first) → the call
    is recorded as an assistant message, the result fed back as a user message;
