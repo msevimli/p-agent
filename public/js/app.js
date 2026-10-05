@@ -1604,7 +1604,12 @@
       applyRingColor(ramRing, ramP, RAM_BASE, RAM_WARN, RAM_CRIT);
       applyRingColor(cpuRing, cpuP, CPU_BASE, CPU_WARN, CPU_CRIT);
       const gb = (b) => (Number(b) / 1073741824).toFixed(1);
-      ramMetric.title = `RAM ${gb(ram.usedBytes)} / ${gb(ram.totalBytes)} GB used (${ramP}%)`;
+      let ramTitle = `RAM ${gb(ram.usedBytes)} / ${gb(ram.totalBytes)} GB used (${ramP}%)`;
+      if (Number.isFinite(ram.buffCacheBytes) && ram.buffCacheBytes > 0) {
+        ramTitle += ` · cache ${gb(ram.buffCacheBytes)} GB`;
+        if (Number.isFinite(ram.percentAvail)) ramTitle += ` · w/o cache ${Math.round(ram.percentAvail)}%`;
+      }
+      ramMetric.title = ramTitle;
       let cpuTitle = `CPU ${cpuP}% on ${Number(cpu.cores) || '?'} cores`;
       if (cpu.estimate) cpuTitle += ' (estimate)';
       if (Array.isArray(cpu.loadavg)) {
