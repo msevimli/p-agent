@@ -421,71 +421,133 @@ function extractToolCall(text) {
 }
 
 /**
- * Guidance injected into every chat system prompt (tool and non-tool paths):
- * automations live in the plife dashboard, not in the OS crontab.
+ * Guidance injected into non-tool chat paths (TOOL_CALLING=false): automations
+ * live in the plife dashboard, not in the OS crontab. Kept compact — it is an
+ * edge path; the tool-enabled system prompt carries the short rule inline.
  */
 const AUTOMATIONS_GUIDANCE =
-  'Built-in automations: this server has an Automations engine with dedicated ' +
-  'tools: create_automation, list_automations, run_automation, delete_automation. ' +
-  'When the user asks to create an automation, schedule a task, or run something ' +
-  'periodically, CALL create_automation yourself with the schedule and action the ' +
-  'user wants — you execute the creation; do not just explain how. Include ALL ' +
-  'required fields: name, schedule_type, interval_minutes or cron, action_type, ' +
-  'and the matching script/skill/prompt value. After creating, ' +
-  'call list_automations to confirm. If the automation already exists, do NOT ' +
-  'create it again — confirm the existing one instead. Fallback: if the dedicated tools are missing, ' +
-  'use run_shell with curl POST http://127.0.0.1:8888/api/automations (same JSON ' +
-  'body as create_automation). NEVER suggest system-level Unix cron jobs or ' +
-  'external OS crontabs — use the built-in Automations engine.\n';
-
-const LIBRARY_GUIDANCE =
-  'File Library: the server keeps a persistent Library of user files (documents, code, assets). ' +
-  'When the user refers to an attached file, asks what is in their Library, or wants you to store ' +
-  'a document, use the library tools (list_library_files, read_library_file, upload_library_file). ' +
-  'Attached files are usually inlined in the user message; read_library_file can fetch more of them.\n';
+  'Automations: this server has a built-in Automations engine with tools ' +
+  'create_automation, list_automations, run_automation, delete_automation. ' +
+  'When the user asks to create an automation or schedule something recurring, ' +
+  'use them yourself — never suggest OS cron jobs. ' +
+  'Include all required fields: name, schedule_type (interval|cron), ' +
+  'interval_minutes or cron, action_type (script|skill|prompt), and the matching ' +
+  'script/skill/prompt value. Confirm with list_automations after creating. ' +
+  'Fallback without tools: run_shell with curl -X POST http://127.0.0.1:8888/api/automations ' +
+  '(same JSON body as create_automation).\n';
 
 /**
  * Build the system prompt that teaches the model how/when to emit a tool call.
- * Appended to the base system prompt. Kept schema-driven so adding a tool
- * later needs no edits here.
+ * Appended to the base system prompt.
+ *
+ * PROMPT-CACHE CONTRACT: this text is part of the stable prompt prefix and is
+ * therefore 100% static — no dates, no request ids, no session ids, no
+ * per-request content. Dynamic content (retrieved memory, session info, the
+ * current date) must NEVER be injected here; it belongs after the prefix
+ * (near/inside the current user message). The tool descriptions are NOT
+ * embedded here any more (they live in the payload `tools` array, which the
+ * OpenAI-compatible server renders into the context) — that alone removed
+ * ~3,400 tokens of duplicated schema from the prefix.
  */
 function buildSystemPrompt(base) {
-  const schema = registry.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-  }));
   return (
     `${base}\n\n` +
-    'You have access to tools that let you inspect and modify files and run shell ' +
-    'commands when helpful.\n' +
-    'To list directory contents or see what files exist in the project, call list_files ' +
-    '(never read_file on a directory). To read a specific file, use read_file.\n' +
-    AUTOMATIONS_GUIDANCE +
-    LIBRARY_GUIDANCE +
-    'When you decide a tool is needed, respond with EXACTLY one JSON object on its ' +
-    'own (no code fences, no other text), in this shape:\n' +
-    '{"tool": "<tool_name>", "args": { ...arg names and values for that tool }}\n' +
-    'The JSON object must be the FIRST thing you output — no introductory sentences ' +
-    'before it, no explanations around it. If you output any text before the JSON ' +
-    'object, the call is not executed. You may explain only AFTER the tool results ' +
-    'come back.\n' +
-    'Every required argument MUST be a complete, real value — a full string literal ' +
-    'or a real number. Never leave arguments empty, and never use placeholders like ' +
-    '?, ..., <path>, N/A, TODO or your_file_name. Calls with missing or placeholder ' +
-    'arguments are rejected without executing; if a call is rejected, re-issue it ' +
-    'with the complete values.\n' +
-    'After the tool result comes back, continue working until the task is done, ' +
-    'then reply with a normal final answer (plain text). If a tool call fails, try ' +
-    'to recover and finish anyway. Do not repeat a tool call that already succeeded ' +
-    'with the same arguments — the result is already in your history; move on.\n' +
-    'Tool-first policy: when a tool fits the request, you MUST call it — never ' +
-    'answer with instructions, steps, links, or raw JSON examples for the user to ' +
-    'run manually. Explanatory text is allowed only AFTER the tools have done the ' +
-    'work. If you intend to call a tool, the JSON object MUST appear in your output.\n' +
-    'Tools:\n' +
-    JSON.stringify(schema, null, 2)
+    'You are the plife dashboard agent. Use the provided tools to inspect and modify files, ' +
+    'run shell commands, and manage automations, skills and the file Library.\n' +
+    'To call a tool, output exactly ONE JSON object as the very first thing, nothing before it:\n' +
+    '{"tool": "<tool_name>", "args": {...}}\n' +
+    'Complete, real values only — no placeholders (?, ..., <path>, N/A, TODO). Calls with ' +
+    'missing or placeholder arguments are rejected. Never repeat a tool call that already succeeded.\n' +
+    'If a call fails, fix it and retry once, then keep going. After the tool results, work until ' +
+    'the task is done, then reply with a short plain-text final answer.\n' +
+    'You execute shell commands yourself with the run_shell tool and have internet access through curl. ' +
+    'When the user needs live data or system information, call the tool and answer from its output — ' +
+    'never ask the user to run commands.\n' +
+    'Automations: creating/scheduling/running/removing automations is done with the automation ' +
+    'tools — never suggest OS crontab entries.\n' +
+    'Library: attached files are usually inlined in your input; use the library tools to list, ' +
+    'read or save documents.\n'
   );
+}
+
+// ---------------------------------------------------------------------------
+// Lazy tool selection  (EXPERIMENTAL — off by default, LAZY_TOOLS=true)
+// ---------------------------------------------------------------------------
+//
+// The production default (routes/chat.js) sends ALL tools on every request:
+// the full 16-tool array is only ~1,900 tokens, it is cached after warm-up,
+// and — crucially — it never changes mid-conversation, so the llama.cpp KV
+// cache stays valid for the whole conversation. Lazy selection was tried
+// first (round 1 of the prompt-cache work) and its flaw is structural: a
+// topic tool group added mid-conversation sits in the middle of the prefix
+// and forces llama-server to re-process the ENTIRE conversation, which costs
+// minutes on this CPU. Kept behind the flag for experiments.
+//
+// If enabled: sends a small CORE set plus the tools relevant to the
+// conversation. The chosen set is a UNION over ALL user messages, so:
+//  - it can only grow, never shrink → once a topic appears, its tools stay
+//    (stable within a conversation, cache stays valid),
+//  - a brand-new topic mid-conversation grows the set exactly once (one
+//    one-time cache invalidation, then stable again),
+//  - the result is sorted by name → deterministic serialization.
+const CORE_TOOL_NAMES = ['edit_file', 'list_files', 'read_file', 'run_shell', 'write_file'];
+
+const TOPIC_TOOLS = [
+  {
+    topic: 'skills',
+    re: /skill/i,
+    tools: ['delete_skill', 'list_skills', 'run_skill', 'write_skill'],
+  },
+  {
+    topic: 'automations',
+    re: /automation|schedul|recurr|remind|cron|every\s+\d+\s*(min|hour|day|week)|daily|hourly|weekly|monthly|periodic/i,
+    tools: ['create_automation', 'delete_automation', 'list_automations', 'run_automation'],
+  },
+  {
+    topic: 'library',
+    re: /library|attach|upload|stored file/i,
+    tools: ['list_library_files', 'read_library_file', 'upload_library_file'],
+  },
+];
+
+/**
+ * Deterministically select the OpenAI `tools` array for a request.
+ * `messages` is the full conversation (all rounds of the tool loop included).
+ * opts.force: tool names that must be present (e.g. automation enforcement).
+ * opts.attachments: true when the request carries library attachments →
+ * library tools are needed (attachment truncation notes point at
+ * read_library_file).
+ */
+function selectTools(messages, opts = {}) {
+  const { force = [], attachments = false } = opts;
+  const set = new Set(CORE_TOOL_NAMES);
+  const text = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && m.role === 'user' && typeof m.content === 'string')
+    .map((m) => m.content)
+    .join('\n');
+  for (const topic of TOPIC_TOOLS) {
+    if (topic.re.test(text)) for (const t of topic.tools) set.add(t);
+  }
+  // Explicit tool-name mention in any user message (e.g. "use run_skill X").
+  for (const t of registry) {
+    if (text.includes(t.name)) set.add(t.name);
+  }
+  for (const name of force) if (hasTool(name)) set.add(name);
+  if (attachments) {
+    for (const t of TOPIC_TOOLS.find((x) => x.topic === 'library').tools) set.add(t);
+  }
+  return [...set].sort().map((name) => {
+    const t = getTool(name);
+    return {
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    };
+  });
+}
+
+/** Tool names in the default (core) set — used by warm-up. */
+function coreToolNames() {
+  return [...CORE_TOOL_NAMES];
 }
 
 // =====================================================================
@@ -654,6 +716,8 @@ module.exports = {
   safeParseArgs,
   extractToolCall,
   buildSystemPrompt,
+  selectTools,
+  coreToolNames,
   AUTOMATIONS_GUIDANCE,
   AUTOMATION_INTENT_RE,
   isAutomationCreationRequest,

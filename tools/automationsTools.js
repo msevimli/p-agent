@@ -29,19 +29,11 @@ function summarize(a) {
 const createAutomation = {
   name: 'create_automation',
   description:
-    'Create a scheduled automation in the dashboard Automations engine (NOT Unix cron). ' +
-    'Call this tool whenever the user asks to create an automation, schedule a recurring task, ' +
-    'or run something periodically — you perform the creation yourself; never just explain how. ' +
-    'Action types: "script" (workspace-relative .js file), "skill" (existing dashboard skill name), ' +
-    'or "prompt" (text run by the local LLM). Schedule: "interval" with interval_minutes ' +
-    '(every N minutes, wall-clock aligned) or "cron" with a 5-field expression ' +
-    '(minute hour dom month dow; also @daily/@hourly/@weekly/@monthly/@yearly). ' +
-    'After creating, confirm with list_automations. ' +
-    'IMPORTANT — pass ALL required fields in one call: name, schedule_type, ' +
-    'interval_minutes (when interval) or cron (when cron), action_type, and the ' +
-    'matching action field (script/skill/prompt); a partial call fails validation. ' +
-    'Example: schedule_type="interval", interval_minutes=30, action_type="script", ' +
-    'script="scripts/backup.js" creates a backup script run every 30 minutes.',
+    'Create a scheduled automation in the dashboard Automations engine (NOT OS cron). ' +
+    'schedule_type: "interval" with interval_minutes, or "cron" with a 5-field expression. ' +
+    'action_type: "script" (workspace-relative .js path), "skill" (existing skill name) or ' +
+    '"prompt" (text run by the local LLM). Send ALL required fields in one call; ' +
+    'confirm with list_automations afterwards.',
   parameters: {
     type: 'object',
     properties: {
@@ -102,9 +94,7 @@ const createAutomation = {
 const listAutomations = {
   name: 'list_automations',
   description:
-    'List existing scheduled automations (id, name, schedule, action, enabled, next run). ' +
-    'Call this after creating an automation to confirm it registered, or when the user asks ' +
-    'what automations exist or wants to manage/remove one.',
+    'List existing automations (id, name, schedule, action, enabled, next run). Use after creating one, or when the user asks what automations exist.',
   parameters: {
     type: 'object',
     properties: {
@@ -129,8 +119,7 @@ const listAutomations = {
 const runAutomation = {
   name: 'run_automation',
   description:
-    'Manually trigger an existing automation by id right now (runs in the background; works even while paused). ' +
-    'The outcome lands in the automation log. Use with ids from list_automations.',
+    'Trigger an existing automation by id now (runs in the background). Use ids from list_automations.',
   parameters: {
     type: 'object',
     properties: {
@@ -155,8 +144,7 @@ const runAutomation = {
 const deleteAutomation = {
   name: 'delete_automation',
   description:
-    'Delete an existing automation by id (e.g. when the user asks to remove/cancel one). ' +
-    'Use ids from list_automations. Confirm the user asked for deletion before calling.',
+    'Delete an existing automation by id (confirm the user asked for removal first). Use ids from list_automations.',
   parameters: {
     type: 'object',
     properties: {

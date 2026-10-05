@@ -69,12 +69,12 @@ function execute(command, timeout) {
 const shellTool = {
   name: 'run_shell',
   description:
-    'Execute a shell command inside the project workspace with a hard timeout and safety denylist. Returns stdout, stderr and exit code.',
+    'Run a shell command in the workspace (sandboxed, 60 s default timeout, safety denylist). Returns stdout, stderr and exit code.',
   parameters: {
     type: 'object',
     properties: {
       command: { type: 'string', description: 'The shell command to run' },
-      timeout_ms: { type: 'number', description: 'Optional timeout in milliseconds (default 60000, max 300000)' },
+      timeout_ms: { type: 'number', description: 'Optional timeout in ms (default 60000, max 300000)' },
     },
     required: ['command'],
   },
