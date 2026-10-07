@@ -187,10 +187,13 @@ p-agent/
   tools, each `{ name, description, parameters, execute }` — file tools
   (sandboxed to `workRoot`, traversal-blocked), shell (timeout-clamped,
   destructive-command denylist), skills, automations, and library tools. The
-  extractor recognizes fenced ` ```json ` blocks, `<tool_call>` blocks, bare
-  `{"tool":…}` objects, and whole-output JSON — always validated against the
-  registry. Fragmented native `tool_calls.arguments` are re-joined on JSON
-  token boundaries (`joinToolCallArgs`).
+  The extractor recognizes fenced ```json blocks, XML tool tags
+    (`<tools>` — Qwen2.5-Coder —, `<tool_call>`, `<function-calls>`), bare
+    `{"tool":…}` / `{"name":…,"arguments":…}` objects, and whole-output JSON —
+    always validated against the registry (exact registered name; `name`/`tool`
+    and `arguments`/`args` key aliases; several calls per completion execute in
+    emission order). Fragmented native `tool_calls.arguments` are re-joined on
+    JSON token boundaries (`joinToolCallArgs`).
   **Deduplication (per chat request):**
   - *Exact-args ledger* — writable/side-effectful tools (file writes,
     automations CRUD) execute once per request; exact repeats are refused with

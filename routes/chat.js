@@ -615,10 +615,12 @@ router.post('/', async (req, res) => {
           }
         }
         if (!calls.length) {
-          const c = toolLoop.extractToolCall(acc.content);
-          // The extractor returns { tool, args }; normalize to { name, args } so
-          // the loop below can treat fenced/JSON calls uniformly with native ones.
-          if (c) calls.push({ name: c.tool, args: c.args });
+          // Each embedded call (Qwen2.5-Coder <tools>…</tools> blocks, JSON
+          // contract objects) becomes its own call in this round, in the
+          // order the model emitted them.
+          for (const c of toolLoop.extractToolCalls(acc.content)) {
+            calls.push({ name: c.tool, args: c.args });
+          }
         }
 
         if (!calls.length) {

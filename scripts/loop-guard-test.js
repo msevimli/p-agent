@@ -5,7 +5,10 @@
  *  1. Dedup guard (services/toolLoop.js): an exact repeat of a tool call
  *     (same name + canonical args) within one chat request is refused and the
  *     model gets a "duplicate tool call skipped" result instead of a second
- *     physical execution.
+ *     physical execution. run_shell is exempt from that ledger but has its
+ *     own CONSECUTIVE guard: a back-to-back repeat of the identical command
+ *     that just succeeded is skipped; repeats after other steps and retries
+ *     of failed commands still execute.
  *  2. joinToolCallArgs (services/llamaClient.js): re-joins fragmented
  *     streaming tool-call arguments on JSON token boundaries.
  *  3. Automation enforcement settle (routes/chat.js): a model that creates
@@ -100,11 +103,25 @@ function restoreState() {
     const rd2 = await toolLoop.executeTool('read_file', { path: 'scripts/__dedup_probe.txt' });
     t('dedup: read repeat skipped', rd1.ok && !rd2.ok && rd2.skippedDuplicate, JSON.stringify(rd2));
 
-    // Exempt tools execute repeatedly:
+    // run_shell is exempt from the exact-args ledger (intentional repeats
+    // stay possible), but the CONSECUTIVE guard (added later) refuses a
+    // back-to-back repeat of the identical command that JUST succeeded —
+    // re-quoted with the same tokens counts as identical. A repeat after an
+    // intervening different command executes (intentional double run), and a
+    // retry of a FAILED command executes (recovery).
     toolLoop.resetSeenCalls();
     const sh1 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(1)"' });
     const sh2 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(1)"' });
-    t('dedup: run_shell exempt (repeat allowed)', sh1.ok && sh2.ok && !sh2.skippedDuplicate, JSON.stringify(sh2));
+    t('dedup: run_shell back-to-back identical repeat skipped (consecutive guard)', sh1.ok && !sh2.ok && sh2.skippedDuplicate === true, JSON.stringify(sh2));
+    const sh2b = await toolLoop.executeTool('run_shell', { command: "node -e 'console.log(1)'" });
+    t('dedup: re-quoted identical command still skipped back-to-back', !sh2b.ok && sh2b.skippedDuplicate === true, JSON.stringify(sh2b));
+    const sh3 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(2)"' });
+    const sh4 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(1)"' });
+    t('dedup: repeat after another step executes (intentional double run)', sh3.ok && sh4.ok && !sh4.skippedDuplicate, JSON.stringify(sh4));
+    toolLoop.resetSeenCalls();
+    const sf1 = await toolLoop.executeTool('run_shell', { command: 'node -e "process.exit(3)"' });
+    const sf2 = await toolLoop.executeTool('run_shell', { command: 'node -e "process.exit(3)"' });
+    t('dedup: retry of a FAILED command executes (recovery)', !sf1.ok && !sf2.ok && !sf2.skippedDuplicate, JSON.stringify(sf2));
 
     // create_automation dedup (execute stubbed — no real state writes here):
     toolLoop.resetSeenCalls();

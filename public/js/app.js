@@ -37,12 +37,12 @@
   const msmWarmupBtn = $('#msmWarmupBtn');
   const msmEjectBtn = $('#msmEjectBtn');
   const msmManageBtn = $('#msmManageBtn');
-  const ramRing = $('#ramRing');
-  const ramPct = $('#ramPct');
-  const ramMetric = $('#ramMetric');
-  const cpuRing = $('#cpuRing');
-  const cpuPct = $('#cpuPct');
-  const cpuMetric = $('#cpuMetric');
+  const ramRings = document.querySelectorAll('.metric-ring.ram');
+  const ramPcts = document.querySelectorAll('.metric-pct.ram');
+  const ramPills = document.querySelectorAll('.metric-pill.ram');
+  const cpuRings = document.querySelectorAll('.metric-ring.cpu');
+  const cpuPcts = document.querySelectorAll('.metric-pct.cpu');
+  const cpuPills = document.querySelectorAll('.metric-pill.cpu');
   const contextBtn = $('#contextBtn');
   const contextRing = $('#contextRing');
   const contextSummary = $('#contextSummary');
@@ -1606,6 +1606,12 @@
     return Math.round(RING_C * (1 - p / 100) * 100) / 100;
   }
 
+  // Apply a callback to every element of a NodeList (metrics pills exist in
+  // both the header and the mobile compose toolbar).
+  function forEachEl(list, fn) {
+    if (list) list.forEach(fn);
+  }
+
   function applyRingColor(ring, pct, base, warn, crit) {
     const p = Number(pct) || 0;
     const chosen = p >= 95 ? crit : p >= 85 ? warn : base;
@@ -1624,12 +1630,16 @@
       const cpu = d.cpu || {};
       const ramP = Math.round(Number(ram.percent) || 0);
       const cpuP = Math.round(Number(cpu.percent) || 0);
-      ramPct.textContent = `${ramP}%`;
-      cpuPct.textContent = `${cpuP}%`;
-      ramRing.style.strokeDashoffset = ringOffset(ramP);
-      cpuRing.style.strokeDashoffset = ringOffset(cpuP);
-      applyRingColor(ramRing, ramP, RAM_BASE, RAM_WARN, RAM_CRIT);
-      applyRingColor(cpuRing, cpuP, CPU_BASE, CPU_WARN, CPU_CRIT);
+      forEachEl(ramPcts, (el) => { el.textContent = `${ramP}%`; });
+      forEachEl(cpuPcts, (el) => { el.textContent = `${cpuP}%`; });
+      forEachEl(ramRings, (el) => {
+        el.style.strokeDashoffset = ringOffset(ramP);
+        applyRingColor(el, ramP, RAM_BASE, RAM_WARN, RAM_CRIT);
+      });
+      forEachEl(cpuRings, (el) => {
+        el.style.strokeDashoffset = ringOffset(cpuP);
+        applyRingColor(el, cpuP, CPU_BASE, CPU_WARN, CPU_CRIT);
+      });
       const gb = (b) => (Number(b) / 1073741824).toFixed(1);
       let ramTitle = `RAM ${gb(ram.usedBytes)} / ${gb(ram.totalBytes)} GB used (${ramP}%)`;
       if (ram.scope === 'container') ramTitle += ` · container (cgroup ${ram.cgroup || '?'}${ram.limitSet ? '' : ', no limit'})`;
@@ -1637,7 +1647,7 @@
         ramTitle += ` · cache ${gb(ram.buffCacheBytes)} GB`;
         if (Number.isFinite(ram.percentAvail)) ramTitle += ` · w/o cache ${Math.round(ram.percentAvail)}%`;
       }
-      ramMetric.title = ramTitle;
+      forEachEl(ramPills, (el) => { el.title = ramTitle; });
       let cpuTitle = `CPU ${cpuP}% on ${Number(cpu.cores) || '?'} cores`;
       if (cpu.quotaCores) cpuTitle += ` (quota ${Number(cpu.quotaCores)})`;
       if (cpu.scope === 'container') cpuTitle += ` · container (cgroup ${cpu.cgroup || '?'})`;
@@ -1649,14 +1659,14 @@
         const up = Math.max(0, Math.round(Number(d.uptimeSec) / 60));
         cpuTitle += ` · up ${up >= 60 ? `${Math.floor(up / 60)}h ${up % 60}m` : `${up}m`}`;
       }
-      cpuMetric.title = cpuTitle;
+      forEachEl(cpuPills, (el) => { el.title = cpuTitle; });
     } catch {
-      ramPct.textContent = '—';
-      cpuPct.textContent = '—';
-      ramRing.style.strokeDashoffset = RING_C;
-      cpuRing.style.strokeDashoffset = RING_C;
-      ramMetric.title = 'system metrics unavailable';
-      cpuMetric.title = 'system metrics unavailable';
+      forEachEl(ramPcts, (el) => { el.textContent = '—'; });
+      forEachEl(cpuPcts, (el) => { el.textContent = '—'; });
+      forEachEl(ramRings, (el) => { el.style.strokeDashoffset = RING_C; });
+      forEachEl(cpuRings, (el) => { el.style.strokeDashoffset = RING_C; });
+      forEachEl(ramPills, (el) => { el.title = 'system metrics unavailable'; });
+      forEachEl(cpuPills, (el) => { el.title = 'system metrics unavailable'; });
     }
   }
 

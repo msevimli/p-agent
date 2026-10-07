@@ -290,6 +290,44 @@ function probeStatus(endpoint, apiKey) {
   });
 }
 
+/**
+ * Best-effort live context window for local llama.cpp servers.
+ * GET <endpoint>/props and read default_generation_settings.n_ctx so the
+ * panel reflects the server's actual runtime context instead of the static
+ * state-file value (which goes stale whenever llama-server flags change).
+ * Remote endpoints keep their configured contextLength — /props is a
+ * llama.cpp-only endpoint. Resolves to null on any failure so callers
+ * fall back to the stored value.
+ */
+function probeContextLength(endpoint) {
+  return new Promise((resolve) => {
+    if (!isLoopback(endpoint)) return resolve(null);
+    const client = /^https:/i.test(endpoint) ? https : http;
+    const url = `${endpoint.replace(/\/+$/, '')}/props`;
+    const opts = { timeout: 1500 };
+    let req;
+    try {
+      req = client.get(url, opts, (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) return resolve(null);
+          try {
+            const n = JSON.parse(body).default_generation_settings?.n_ctx;
+            resolve(Number.isFinite(n) && n > 0 ? n : null);
+          } catch {
+            resolve(null);
+          }
+        });
+      });
+    } catch {
+      return resolve(null);
+    }
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+
 // ---------------------------------------------------------------- public API
 /** All models with active flag and live status. */
 async function listModels() {
@@ -298,7 +336,13 @@ async function listModels() {
     state.models.map(async (m) => {
       const pub = publicModel(m);
       pub.active = m.id === state.activeId;
-      pub.status = await probeStatus(m.endpoint, resolveApiKey(m.id));
+      const [liveStatus, liveCtx] = await Promise.all([
+        probeStatus(m.endpoint, resolveApiKey(m.id)),
+        probeContextLength(m.endpoint),
+      ]);
+      pub.status = liveStatus;
+      // Live context wins for local llama.cpp servers; static value is the fallback.
+      if (liveCtx) pub.contextLength = liveCtx;
       return pub;
     })
   );

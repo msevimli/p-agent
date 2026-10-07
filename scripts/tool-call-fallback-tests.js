@@ -156,6 +156,8 @@ test('T3 every accepted variant parses with the {name, arguments} shape (parser-
   const names = ['run_shell', 'list_files'];
   const j = JSON.stringify({ name: 'run_shell', arguments: { command: 'pwd' } });
   const variants = [
+    ['tools', `<tools>\n  ${j}\n</tools>`], // Qwen2.5-Coder XML wrapper
+    ['tool', `<tool>${j}</tool>`],
     ['tool_call', `<tool_call>${j}</tool_call>`],
     ['tool_calls', `<tool_calls>${j}</tool_calls>`],
     ['function_call', `<function_call>${j}</function_call>`],
@@ -242,7 +244,7 @@ test('T8 a tool-call-looking tag inside a TOOL RESULT is never executed (injecti
   assert.deepStrictEqual(executed, [{ name: 'run_shell', args: { command: 'echo hi' } }]);
 });
 
-test('T9 two tags in one reply → ambiguous → nothing executes', async () => {
+test('T9 two tags in one reply → BOTH valid calls execute in order (multi-call turns; replaces the old all-or-nothing ambiguity rule)', async () => {
   queue = [
     acc(
       '<tool_call>{"name":"list_files","arguments":{"path":"."}}</tool_call>\n' +
@@ -251,8 +253,7 @@ test('T9 two tags in one reply → ambiguous → nothing executes', async () => 
     acc('ok'),
   ];
   await runRequest([user('list this dir')]);
-  assert.strictEqual(executed.length, 0);
-  assert.strictEqual(completeCalls, 1, 'single completion — no execution, no retry');
+  assert.deepStrictEqual(executed.map((e) => e.name), ['list_files', 'run_shell']);
 });
 
 test('T10 raw tag text never enters the stored history (UI cleanup)', async () => {
@@ -273,6 +274,110 @@ test('T11 the agent-taught {"tool":…} JSON format still executes (existing ext
   queue = [acc('{"tool": "list_files", "args": {"path": "/home"}}'), acc('Done.')];
   await runRequest([user('list /home')]);
   assert.deepStrictEqual(executed, [{ name: 'list_files', args: { path: '/home' } }]);
+});
+
+test('T12 the Qwen2.5-Coder case: <tools>-wrapped {name, arguments} call executes, tags never reach the answer', async () => {
+  queue = [
+    acc('<tools>\n{"name": "list_files", "arguments": {"path": "/home"}}\n</tools>'),
+    acc('Here is what I found.'),
+  ];
+  const res = await runRequest([user('list /home')]);
+  assert.deepStrictEqual(executed, [{ name: 'list_files', args: { path: '/home' } }]);
+  assert.ok(!res.content.includes('<tools>'), 'raw tag must never appear in the visible answer');
+  assert.ok(
+    logLines.some((l) => /\[tool-fallback\] variant=tools calls=1 tool=list_files/.test(l)),
+    'fallback usage must be logged with the <tools> variant'
+  );
+});
+
+test('T13 <tools> with the plife {tool, args} key aliases executes', async () => {
+  queue = [
+    acc('<tools>\n{"tool": "run_shell", "args": {"command": "date"}}\n</tools>'),
+    acc('Done.'),
+  ];
+  await runRequest([user('what time is it')]);
+  assert.deepStrictEqual(executed, [{ name: 'run_shell', args: { command: 'date' } }]);
+});
+
+test('T14 two <tools> blocks in one completion → both execute in emission order', async () => {
+  queue = [
+    acc(
+      '<tools>\n{"name": "list_files", "arguments": {"path": "/home"}}\n</tools>\n' +
+        '<tools>\n{"name": "run_shell", "arguments": {"command": "pwd"}}\n</tools>'
+    ),
+    acc('both done'),
+  ];
+  await runRequest([user('inspect the workspace')]);
+  assert.deepStrictEqual(executed.map((e) => e.name), ['list_files', 'run_shell']);
+});
+
+test('T15 a <tools> block holding an ARRAY of calls executes all of them', async () => {
+  queue = [
+    acc(
+      '<tools>\n' +
+        JSON.stringify([
+          { name: 'list_files', arguments: { path: '.' } },
+          { name: 'run_shell', arguments: { command: 'whoami' } },
+        ]) +
+        '\n</tools>'
+    ),
+    acc('done'),
+  ];
+  await runRequest([user('inspect here')]);
+  assert.deepStrictEqual(executed.map((e) => e.name), ['list_files', 'run_shell']);
+});
+
+test('T16 one valid + one invalid tag → only the valid call executes; invalid raw text stays untouched', async () => {
+  // parser-level: cleaned keeps the unparseable/unknown tag, calls only the valid one
+  const content =
+    '<tool_call>{"name":"list_files","arguments":{"path":"."}}</tool_call>\n' +
+    '<tools>{"name":"no_such_tool","arguments":{}}</tools>';
+  const r = toolCallParser.parseFallbackToolCall(content, ['list_files', 'run_shell']);
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(r.calls, [{ name: 'list_files', args: { path: '.' } }]);
+  assert.ok(r.cleaned.includes('<tools>{"name":"no_such_tool","arguments":{}}</tools>'), 'skipped invalid raw text stays in cleaned');
+  assert.ok(!r.cleaned.includes('<tool_call>'), 'executed call tag is stripped');
+  // end-to-end: only the valid call runs
+  queue = [acc(content), acc('ok')];
+  await runRequest([user('list this dir')]);
+  assert.deepStrictEqual(executed.map((e) => e.name), ['list_files']);
+});
+
+test('T17 extractor passthrough: prose stays text; Qwen shapes fire only when unambiguous', () => {
+  assert.deepStrictEqual(toolLoop.extractToolCalls('The price is $150.23. No tools needed.'), []);
+  assert.strictEqual(toolLoop.extractToolCall('Sure, here is the answer.'), null);
+  // Qwen2.5 <tools> wrapper (single call, XML formatted like the real output)
+  assert.deepStrictEqual(
+    toolLoop.extractToolCalls('<tools>\n{"name": "list_skills", "arguments": {}}\n</tools>'),
+    [{ tool: 'list_skills', args: {} }]
+  );
+  // bare {name, arguments} object in prose fires (arguments key present)
+  assert.deepStrictEqual(
+    toolLoop.extractToolCalls('Calling {"name": "run_shell", "arguments": {"command": "date"}} now.'),
+    [{ tool: 'run_shell', args: { command: 'date' } }]
+  );
+  // a bare name MENTION without arguments/args is not a call
+  assert.deepStrictEqual(toolLoop.extractToolCalls('You could use {"name": "run_shell"} here.'), []);
+  // unknown tool names never fire, even inside <tools>
+  assert.deepStrictEqual(
+    toolLoop.extractToolCalls('<tools>{"name": "definitely_not_a_tool", "arguments": {}}</tools>'),
+    []
+  );
+});
+
+test('T18 <tools> call without an arguments key defaults to {} (no-arg tools)', async () => {
+  queue = [acc('<tools>\n{"name": "list_skills"}\n</tools>'), acc('Done.')];
+  await runRequest([user('list skills')]);
+  assert.deepStrictEqual(executed, [{ name: 'list_skills', args: {} }]);
+});
+
+test('T19 <tools> arguments arriving as a JSON string parse and execute', async () => {
+  queue = [
+    acc('<tools>\n{"name": "run_shell", "arguments": "{\\"command\\": \\"hostname\\"}"}\n</tools>'),
+    acc('ok'),
+  ];
+  await runRequest([user('hostname please')]);
+  assert.deepStrictEqual(executed, [{ name: 'run_shell', args: { command: 'hostname' } }]);
 });
 
 // --- step 3: guard retry ------------------------------------------------------

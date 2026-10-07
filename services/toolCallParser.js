@@ -2,9 +2,10 @@
  * services/toolCallParser.js — tolerant fallback for MISFORMATTED tool calls
  * + the no-tool guard retry.
  *
- * Background: on some llama.cpp builds the model answers "what is the
- * current Solana price? use curl" by printing the call wrapped in a tag
- * (<function-calls>…</function-calls>) that the server does NOT parse into
+ * Background: on some llama.cpp builds (e.g. local Qwen2.5-Coder) the model
+ * answers "what is the current Solana price? use curl" by printing the call
+ * wrapped in an XML tag — <tools>…</tools> (Qwen2.5) or
+ * <function-calls>…</function-calls> — that the server does NOT parse into
  * message.tool_calls. These helpers detect that shape in the ASSISTANT's own
  * content and convert it into the same native tool-call the loop executes —
  * with strict rules so injected text can never trigger a call.
@@ -14,13 +15,18 @@
  *    results, user messages and retrieved text are NEVER parsed (they can
  *    contain injected tags) — the route guarantees this by only calling
  *    parseFallbackToolCall(acc.content, …).
- *  - The tool name must EXACTLY match a registered tool.
- *  - The arguments must be valid JSON (object, or string that parses to an
- *    object); the call then goes through the exact same execution path as a
- *    native call (toolLoop.executeTool → validateArgs), so schema checks,
+ *  - The tool name must EXACTLY match a registered tool. Both key shapes are
+ *    accepted: OpenAI/Qwen { name, arguments } and the plife contract
+ *    { tool, args } (arguments/args interchangeable; arguments may be an
+ *    object or a JSON string; missing args → {}).
+ *  - The call then goes through the exact same execution path as a native
+ *    call (toolLoop.executeTool → validateArgs), so schema checks,
  *    placeholder rejection, dedup and side-effect guards all apply.
- *  - Ambiguity/invalidity ⇒ no execution, message stays plain text.
- *  - The matched tag/fence text is removed from the stored/visible message.
+ *  - Invalid candidates are NEVER executed and their raw text stays in the
+ *    message. Valid candidates are executed — one completion may carry
+ *    several <tools> blocks or an array of calls (multi-call turns).
+ *  - The tag/fence text of executed calls is removed from the stored/visible
+ *    message.
  *
  * Everything here is a pure function — unit-testable without a server.
  */
@@ -33,9 +39,12 @@
 const GUARD_RETRY_MSG =
   'Call the appropriate tool now instead of describing the command. Do not ask the user to run anything — only the tool result matters.';
 
-// Accepted tag variants — inner text must be a JSON object (or array of
-// objects) with "name" and "arguments".
+// Accepted tag variants — inner text must be one JSON object, an array of
+// objects, or several bare objects; each call carries "name"+"arguments"
+// (OpenAI/Qwen2.5 shape) or "tool"+"args" (plife contract).
 const TAG_PATTERNS = [
+  { variant: 'tools', re: /<tools>([\s\S]*?)<\/tools>/g },
+  { variant: 'tool', re: /<tool>([\s\S]*?)<\/tool>/g },
   { variant: 'tool_call', re: /<tool_call>([\s\S]*?)<\/tool_call>/g },
   { variant: 'tool_calls', re: /<tool_calls>([\s\S]*?)<\/tool_calls>/g },
   { variant: 'function_call', re: /<function_call>([\s\S]*?)<\/function_call>/g },
@@ -59,12 +68,53 @@ function findCandidates(content) {
   return candidates;
 }
 
-/** One call object: { name, arguments }. Null when invalid. */
+/**
+ * Balanced {...} JSON candidates inside a payload, in document order — used
+ * for tags holding several bare objects (no enclosing array). String-aware
+ * brace matching; fragments capped at 2000 chars, scan bounded to 8000.
+ */
+function findJsonFragments(text) {
+  const out = [];
+  const s = String(text || '').slice(0, 8000);
+  let i = 0;
+  while ((i = s.indexOf('{', i)) !== -1) {
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    let end = -1;
+    for (let j = i; j < s.length; j++) {
+      const ch = s[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { end = j; break; }
+      }
+    }
+    if (end > i && end - i <= 2000) out.push(s.slice(i, end + 1));
+    i = end > i ? end + 1 : i + 1; // step past a found fragment, else advance
+  }
+  return out;
+}
+
+/**
+ * One call object. Accepts the OpenAI/Qwen2.5 shape { name, arguments } and
+ * the plife contract { tool, args }, keys interchangeable; `arguments` may
+ * be an object or a JSON string; a missing args key defaults to {}. Null
+ * when invalid (no exact registered name, or unparseable args).
+ */
 function validateCallObject(o, allowedNames) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
-  const { name, arguments: argsRaw } = o;
-  if (typeof name !== 'string' || !allowedNames.has(name)) return null; // exact registered name
-  let args = argsRaw;
+  const name = (typeof o.name === 'string' && o.name) || (typeof o.tool === 'string' && o.tool) || '';
+  if (!name || !allowedNames.has(name)) return null; // exact registered name
+  let args = o.arguments !== undefined ? o.arguments : o.args;
+  if (args === undefined) args = {};
   if (typeof args === 'string') {
     try {
       args = JSON.parse(args);
@@ -76,43 +126,80 @@ function validateCallObject(o, allowedNames) {
   return { name, args };
 }
 
+/** Parse a tag payload: one JSON doc (object|array) or several bare objects.
+ *  Returns { calls, parsed } — parsed=false means the payload was NOT a
+ *  single JSON document (the bare-object scan may still yield calls). */
+function parsePayloadObjects(payload, names) {
+  const calls = [];
+  if (!payload) return { calls, parsed: false };
+  try {
+    const whole = JSON.parse(payload);
+    const arr = Array.isArray(whole) ? whole : [whole];
+    for (const o of arr) {
+      const v = validateCallObject(o, names);
+      if (v) calls.push(v);
+    }
+    return { calls, parsed: true };
+  } catch { /* not one doc — try bare objects below */ }
+  for (const frag of findJsonFragments(payload)) {
+    try {
+      const v = validateCallObject(JSON.parse(frag), names);
+      if (v) calls.push(v);
+    } catch { /* fragment is not a call */ }
+  }
+  return { calls, parsed: false };
+}
+
 /**
- * Parse a misformatted tool call from the assistant's content.
+ * Parse misformatted tool calls from the assistant's content.
+ *
+ * The content may carry several tags (local Qwen2.5-Coder can emit multiple
+ * <tools> blocks in one completion) and a tag may hold one object, an array,
+ * or several bare objects. Every VALID candidate is returned in document
+ * order; invalid candidates (unparseable JSON, unregistered tool name) are
+ * skipped — nothing invalid is ever executed, and skipped raw text stays in
+ * `cleaned`.
  *
  * @param {string} content raw assistant completion content
  * @param {string[]} allowedNames registered tool names (exact match required)
  * @returns {{ok:boolean, reason?:string, variant?:string, calls?:Array<{name:string,args:object}>, cleaned?:string}}
  *   ok=true ⇒ calls are ready for the normal execution path; `cleaned` is the
- *   content with the matched tag/fence removed (safe to store/display).
- *   ok=false ⇒ treat the message as plain text, execute nothing.
+ *   content with the tags/fences of the executed calls removed (safe to
+ *   store/display). ok=false ⇒ nothing valid found; treat as plain text.
  */
 function parseFallbackToolCall(content, allowedNames) {
   const names = new Set(Array.isArray(allowedNames) ? allowedNames : []);
-  const candidates = findCandidates(content);
+  const candidates = findCandidates(content).sort((a, b) => a.index - b.index);
   if (!candidates.length) return { ok: false, reason: 'no-tag' };
-  // Strictness: more than one tag/fence ⇒ ambiguous ⇒ execute nothing.
-  if (candidates.length > 1) return { ok: false, reason: 'ambiguous', cleaned: String(content || '') };
 
-  const c = candidates[0];
-  let json = null;
-  try {
-    json = JSON.parse(c.payload.trim());
-  } catch {
-    return { ok: false, reason: 'invalid-json', variant: c.variant, cleaned: String(content || '') };
+  const calls = [];
+  const matched = []; // [start, end) ranges of candidates that produced calls
+  let variant = null;
+  let parsedAny = false;
+  for (const c of candidates) {
+    const found = parsePayloadObjects(String(c.payload || '').trim(), names);
+    parsedAny = parsedAny || found.parsed;
+    if (found.calls.length) {
+      if (!variant) variant = c.variant;
+      calls.push(...found.calls);
+      matched.push([c.index, c.index + c.raw.length]);
+    }
   }
-
-  const cleaned = (String(content || '').slice(0, c.index) + String(content || '').slice(c.index + c.raw.length)).trim();
-
-  if (Array.isArray(json)) {
-    if (!json.length) return { ok: false, reason: 'empty-array', variant: c.variant, cleaned };
-    const calls = json.map((o) => validateCallObject(o, names));
-    if (calls.some((x) => !x)) return { ok: false, reason: 'invalid-call', variant: c.variant, cleaned };
-    return { ok: true, variant: c.variant, calls, cleaned };
+  if (!calls.length) {
+    return {
+      ok: false,
+      reason: parsedAny ? 'invalid-call' : 'invalid-json',
+      variant: variant || candidates[0].variant,
+      cleaned: String(content || ''),
+    };
   }
-
-  const call = validateCallObject(json, names);
-  if (!call) return { ok: false, reason: 'invalid-call', variant: c.variant, cleaned };
-  return { ok: true, variant: c.variant, calls: [call], cleaned };
+  // Remove the raw tag/fence text of the executed calls (descending order
+  // keeps the remaining indices valid); skipped candidates stay untouched.
+  let cleaned = String(content || '');
+  for (const [s, e] of matched.slice().reverse()) {
+    cleaned = cleaned.slice(0, s) + cleaned.slice(e);
+  }
+  return { ok: true, variant, calls, cleaned: cleaned.trim() };
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +246,7 @@ function shouldGuardRetry({ content, userText, guardRetried }) {
 module.exports = {
   parseFallbackToolCall,
   findCandidates,
+  findJsonFragments,
   shouldGuardRetry,
   hasShellCommandText,
   needsLiveData,

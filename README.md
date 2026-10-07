@@ -89,16 +89,19 @@ warm-ups and ejects.
   are logged (`[ctx] compact(...)`). A context-exceeded error triggers one
   compact-and-retry, then a clear error.
 - **Misformatted tool calls (tolerant fallback + guard retry):** some llama.cpp
-  builds leave a correctly-shaped call wrapped in a tag (`<tool_call>`,
-  `<tool_calls>`, `<function_call>`, `<function-calls>`) or a fenced JSON block
-  in the raw assistant content with `tool_calls` empty. A strict parser
-  (`services/toolCallParser.js`) converts exactly this shape — only the
-  assistant's own content, tool name must exactly match a registered tool,
-  arguments must be valid JSON; anything ambiguous/invalid stays plain text
-  (never executes). The tag text never reaches the stored history or the UI,
-  and each use is logged (`[tool-fallback] variant=…`). If a reply still has
-  no call but contains a shell block / curl / wget on a live-data request,
-  the agent retries ONCE with the stable instruction and
+  builds leave a correctly-shaped call wrapped in an XML/JSON tag (`<tools>`
+  — Qwen2.5-Coder —, `<tool_call>`, `<tool_calls>`, `<function_call>`,
+  `<function-calls>`) or a fenced JSON block in the raw assistant content with
+  `tool_calls` empty. A strict parser (`services/toolCallParser.js`) converts
+  exactly this shape — only the assistant's own content, tool name must exactly
+  match a registered tool, and both `{name, arguments}` (OpenAI/Qwen) and
+  `{tool, args}` (plife contract) key shapes are accepted; arguments must be
+  valid JSON, missing → `{}`. Several `<tools>` blocks (or one block holding an
+  array) in a single completion all execute in emission order; anything invalid
+  stays plain text (never executes). The tag text never reaches the stored
+  history or the UI, and each use is logged (`[tool-fallback] variant=…`). If a
+  reply still has no call but contains a shell block / curl / wget on a
+  live-data request, the agent retries ONCE with the stable instruction and
   `tool_choice:"required"` for that single completion (config
   `GUARD_RETRY_TOOL_CHOICE`, default on). Genuine plain-text replies log the
   finish reason and content head (`[llm-no-call]`). Every executed tool call
