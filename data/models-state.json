@@ -1,5 +1,5 @@
 {
-  "activeId": "deepseek",
+  "activeId": "qwen-2-5-7b-q5",
   "models": [
     {
       "id": "gemma",
@@ -12,28 +12,19 @@
     },
     {
       "id": "qwen-coder",
-      "name": "Qwen2.5 Coder 3B",
+      "name": "Qwen2.5 Coder 7B",
       "provider": "local",
       "endpoint": "http://127.0.0.1:8081",
-      "model": "qwen2.5-coder-3b-instruct-q4_0.gguf",
-      "contextLength": 32768,
-      "hasKey": false
-    },
-    {
-      "id": "mistral",
-      "name": "Mistral 7B Instruct",
-      "provider": "local",
-      "endpoint": "http://127.0.0.1:8082",
-      "model": "mistral-7b-instruct-v0.3.Q4_K_M.gguf",
-      "contextLength": 32768,
+      "model": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+      "contextLength": 131072,
       "hasKey": false
     },
     {
       "id": "llama",
-      "name": "Llama 3.2 3B Instruct",
+      "name": "qwen2.5-14b",
       "provider": "local",
-      "endpoint": "http://127.0.0.1:8083",
-      "model": "llama-3.2-3b-instruct.Q4_K_M.gguf",
+      "endpoint": "http://127.0.0.1:8082",
+      "model": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
       "contextLength": 8192,
       "hasKey": false
     },
@@ -53,7 +44,7 @@
       "endpoint": "https://openrouter.ai/api/v1",
       "model": "inclusionai/ling-3.0-flash-sante:free",
       "contextLength": 8192,
-      "hasKey": true
+      "hasKey": false
     },
     {
       "id": "deepseek",
@@ -62,7 +53,34 @@
       "endpoint": "https://openrouter.ai/api/v1",
       "model": "deepseek/deepseek-v3.2",
       "contextLength": 250000,
-      "hasKey": true
+      "hasKey": false
+    },
+    {
+      "id": "qwen-coder-3",
+      "name": "Qwen3-coder-30b",
+      "provider": "local",
+      "endpoint": "http://127.0.0.1:8082",
+      "model": "qwen3-coder-30b-a3b",
+      "contextLength": 8192,
+      "hasKey": false
+    },
+    {
+      "id": "deepseek-r1",
+      "name": "DeepSeek-R1",
+      "provider": "local",
+      "endpoint": "http://127.0.0.1:8081",
+      "model": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+      "contextLength": 16334,
+      "hasKey": false
+    },
+    {
+      "id": "qwen-2-5-7b-q5",
+      "name": "Qwen2.5-7B-Q5-K-M",
+      "provider": "local",
+      "endpoint": "http://127.0.0.1:8083",
+      "model": "qwen2.5-coder-7b-instruct-q5_k_m.gguf",
+      "contextLength": 131072,
+      "hasKey": false
     }
   ]
 }

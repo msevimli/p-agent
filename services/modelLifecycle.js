@@ -42,6 +42,8 @@ const os = require('os');
 const config = require('../config');
 const modelManager = require('./modelManager');
 const requestQueue = require('./requestQueue');
+const toolLoop = require('./toolLoop');
+const historyManager = require('./historyManager');
 
 // ---------------------------------------------------------------- state
 /** id -> { lifecycle, since, phase, detail, online, busy, memory, op, opError } */
@@ -178,6 +180,39 @@ function resolveModelMiB(modelStr) {
 
 // ---------------------------------------------------------------- probing
 /**
+ * Light /slots read for the warm-up progress line: prefill percentage
+ * (n_prompt_tokens_processed / n_prompt_tokens), real context size (n_ctx)
+ * and slot count — all read-only values from the server.
+ */
+async function readSlotProgress(m) {
+  const apiKey = modelManager.resolveApiKey(m.id);
+  const slots = await httpGetJson(`${rootUrl(m.endpoint)}/slots`, { apiKey });
+  let pct = null;
+  let ctxTokens = 0;
+  let slotCount = 0;
+  let lastPromptTokens = 0;
+  try {
+    const list = JSON.parse(slots.body);
+    if (Array.isArray(list)) {
+      slotCount = list.length;
+      for (const s of list) {
+        if (!s) continue;
+        if (Number(s.n_ctx)) ctxTokens += Number(s.n_ctx);
+        const total = Number(s.n_prompt_tokens) || 0;
+        const done = Number(s.n_prompt_tokens_processed) || 0;
+        if (total > 0) {
+          lastPromptTokens = Math.max(lastPromptTokens, total);
+          if (s.is_processing === true && done < total) {
+            pct = Math.min(99, Math.round((done / total) * 100));
+          }
+        }
+      }
+    }
+  } catch { /* no /slots — progress stays null */ }
+  return { pct, ctxTokens: ctxTokens || null, slots: slotCount || null, lastPromptTokens: lastPromptTokens || null };
+}
+
+/**
  * Probe one model entry and derive its lifecycle from live signals.
  * Resolves to the public status object fed to /api/models/status.
  * `isActive` tells the probe whether this model owns the request queue
@@ -190,15 +225,23 @@ async function probeModel(m, isActive) {
 
   // Explicit operation in flight (warm-up) — it owns the lifecycle until it settles.
   if (e.op && e.op.kind === 'warmup') {
+    const prog = await readSlotProgress(m);
+    const memory = {
+      modelMiB: resolveModelMiB(m.model || m.modelId),
+      ctxTokens: prog.ctxTokens,
+      slots: prog.slots,
+      lastPromptTokens: prog.lastPromptTokens,
+    };
     return {
       ...publicStatus(m),
       lifecycle: 'loading',
       phase: e.op.phase,
       since: e.op.since,
-      detail: e.op.detail,
+      detail: `${e.op.detail}${prog.pct !== null ? ` (${prog.pct}%)` : ''}`,
       online: true,
       busy: false,
-      memory: e.memory || null,
+      memory,
+      prefillPct: prog.pct,
     };
   }
   // A failed op pins the 'error' state until the server proves healthy again.
@@ -236,12 +279,19 @@ async function probeModel(m, isActive) {
   }
 
   // Server up: is a model actually loaded? (model-router servers may serve
-  // HTTP with zero models loaded.)
+  // HTTP with zero models loaded.) Also capture the REAL loaded model name
+  // from /v1/models (read-only) so the status panel can show what the server
+  // actually serves, not just the registry label.
   const models = await httpGetJson(modelManager.probeUrlFor(m.endpoint), { apiKey });
   let loaded = true;
+  let serverModel = null;
   try {
     const parsed = JSON.parse(models.body);
-    if (Array.isArray(parsed.data) && parsed.data.length === 0) loaded = false;
+    if (Array.isArray(parsed.data)) {
+      if (parsed.data.length === 0) loaded = false;
+      const first = parsed.data[0];
+      if (first && typeof first.id === 'string') serverModel = first.id;
+    }
   } catch { /* unparseable — trust /health */ }
 
   // Slots: working/prefill detection + context capacity. Two signals are
@@ -301,7 +351,7 @@ async function probeModel(m, isActive) {
 
   if (!loaded) {
     setLifecycle(id, 'unloaded', { detail: 'server is up but no model is loaded (model-router mode)' });
-    return { ...publicStatus(m), lifecycle: 'unloaded', phase: null, since: e.since, detail: e.detail, online: true, busy: false, memory };
+    return { ...publicStatus(m), lifecycle: 'unloaded', phase: null, since: e.since, detail: e.detail, online: true, busy: false, memory, serverModel };
   }
 
   const queueActive = !!isActive && !!requestQueue.stats().active;
@@ -310,14 +360,14 @@ async function probeModel(m, isActive) {
   if (prefilling) {
     const pct = promptTotal ? Math.min(99, Math.round((promptDone / promptTotal) * 100)) : null;
     setLifecycle(id, 'loading', { phase: 'prefill', detail: `cold start — processing prompt${pct !== null ? ` (${pct}%)` : ''}` });
-    return { ...publicStatus(m), lifecycle: 'loading', phase: 'prefill', since: e.since, detail: e.detail, online: true, busy: true, memory, prefillPct: pct };
+    return { ...publicStatus(m), lifecycle: 'loading', phase: 'prefill', since: e.since, detail: e.detail, online: true, busy: true, memory, prefillPct: pct, serverModel };
   }
   if (working) {
     setLifecycle(id, 'loading', { phase: 'processing', detail: 'model is working — completion in progress' });
-    return { ...publicStatus(m), lifecycle: 'loading', phase: 'processing', since: e.since, detail: e.detail, online: true, busy: true, memory };
+    return { ...publicStatus(m), lifecycle: 'loading', phase: 'processing', since: e.since, detail: e.detail, online: true, busy: true, memory, serverModel };
   }
   setLifecycle(id, 'ready', { detail: 'model loaded and responsive' });
-  return { ...publicStatus(m), lifecycle: 'ready', phase: null, since: e.since, detail: e.detail, online: true, busy: false, memory };
+  return { ...publicStatus(m), lifecycle: 'ready', phase: null, since: e.since, detail: e.detail, online: true, busy: false, memory, serverModel };
 }
 
 function publicStatus(m) {
@@ -389,17 +439,31 @@ async function warmup(id) {
   }
 }
 
-/** One tiny non-streaming completion against a SPECIFIC model endpoint. */
+/** One tiny non-streaming completion against a SPECIFIC model endpoint.
+ * PROMPT-CACHE WARM-UP: the payload is EXACTLY the agent's static prefix
+ * (short system prompt + ALL tools in name-sorted order, max_tokens=1), so
+ * after this completes llama.cpp already holds the agent prefix in its KV
+ * cache and the first real user message starts from a cache hit instead of a
+ * minutes-long cold prefill. cache_prompt:true mirrors the chat path. The
+ * full tool set keeps the warm-up prefix byte-identical to every real
+ * request (lazy subsets would invalidate the warm-up cache). */
 function warmComplete(m) {
   return new Promise((resolve) => {
-    const timeoutMs = Number(config.warmupTimeoutMs) || 120000;
+    const timeoutMs = Number(config.warmupTimeoutMs) || 300000;
+    const systemPrompt = toolLoop.buildSystemPrompt(config.llamaSystemPrompt);
+    // ALL tools, always — exactly what every real request sends (sorted by
+    // name, serialized identically), so the warm-up cache always matches.
+    const tools = toolLoop.toOpenAITools();
     const payload = {
       model: m.model,
-      messages: [{ role: 'user', content: 'Reply with the single word: ok' }],
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: 'ping' }],
+      tools,
       max_tokens: 1,
       temperature: 0,
+      cache_prompt: true,
       stream: false,
     };
+    const prefixHash = historyManager.prefixHashFor(systemPrompt, JSON.stringify(tools));
     const url = chatCompletionsUrl(m.endpoint);
     const apiKey = modelManager.resolveApiKey(m.id);
     httpPostJson(url, payload, { timeout: timeoutMs, apiKey }).then(({ code, body }) => {
@@ -411,9 +475,13 @@ function warmComplete(m) {
             ? parsed.usage.prompt_tokens
             : null;
         } catch { /* usage optional */ }
-        resolve({ ok: true, tokens });
+        console.log(`[warm] prefix pre-filled: ${tokens !== null ? tokens + ' tokens' : 'token count unknown'} prefix=${prefixHash}`);
+        resolve({ ok: true, tokens, prefixHash });
       } else {
         const msg = (() => {
+          if (code === 0) {
+            return `${m.endpoint} is not reachable — is llama-server running? (connection refused)`;
+          }
           try {
             const parsed = JSON.parse(body);
             return (parsed.error && (parsed.error.message || parsed.error.code)) || body.slice(0, 200);

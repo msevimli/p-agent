@@ -356,136 +356,300 @@ function safeParseArgs(str) {
 }
 
 /**
- * Detect a tool call inside model text: a fenced ```json block, a
- * <tool_call>…</tool_call> block, a bare JSON object {"tool":<name>,"args":{}},
- * or an embedded JSON object anywhere in the text. Requires a valid, guarded
- * object (well-formed JSON with a registered tool name), so plain prose is
- * never mistaken for a call. Returns { tool, args } or null.
+ * Normalize a parsed call object. Accepts BOTH the plife JSON contract
+ * ({tool, args}) and the OpenAI/Qwen2.5 shape ({name, arguments}), with the
+ * args keys interchangeable (args | arguments). A missing args key inside an
+ * explicit tool tag/fence (or for the {tool,…} contract) defaults to {};
+ * `outsideTags` (bare JSON in prose / whole-output) additionally requires an
+ * explicit arguments/args key for name-shaped objects, so stray JSON that
+ * merely mentions a registered tool name never fires. The registered tool
+ * name must match exactly in every case. Returns { tool, args } or null.
  */
-function tryParseTool(t) {
+function normalizeCallObject(o, outsideTags) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  const name =
+    (typeof o.tool === 'string' && o.tool) ||
+    (typeof o.name === 'string' && o.name) ||
+    '';
+  if (!name || !hasTool(name)) return null;
+  const hasToolKey = typeof o.tool === 'string';
+  const hasArgsKey = o.args !== undefined || o.arguments !== undefined;
+  if (outsideTags && !hasToolKey && !hasArgsKey) return null; // mere name mention
+  const raw = hasArgsKey ? (o.args !== undefined ? o.args : o.arguments) : {};
+  if (typeof raw === 'string') {
+    // arguments may arrive double-encoded as a JSON string
+    try {
+      const p = JSON.parse(raw);
+      if (p && typeof p === 'object' && !Array.isArray(p)) return { tool: name, args: p };
+    } catch { /* not JSON — not a call */ }
+    return null;
+  }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return { tool: name, args: raw };
+  return null;
+}
+
+/**
+ * Detect a tool call inside model text: a fenced ```json block, an explicit
+ * XML-style tool tag (<tools>, <tool>, <tool_call>, <tool_calls>,
+ * <function_call>, <function-calls> — Qwen2.5-Coder wraps calls in
+ * <tools>…</tools>), a bare JSON object ({"tool":<name>,"args":{}} or
+ * {"name":<name>,"arguments":{}}), or an embedded JSON object anywhere in
+ * the text. Requires a valid, guarded object (well-formed JSON with a
+ * registered tool name), so plain prose is never mistaken for a call.
+ * Returns { tool, args } or null.
+ */
+function tryParseTool(t, outsideTags) {
   try {
     const o = JSON.parse(t);
-    if (o && typeof o.tool === 'string' && hasTool(o.tool)) {
-      return { tool: o.tool, args: safeParseArgs(o.args) };
-    }
+    const c = normalizeCallObject(o, outsideTags);
+    if (c) return c;
   } catch { /* not JSON */ }
   return null;
 }
 
+// XML-style tool tags (Qwen2.5-Coder's <tools>…</tools> wrapper plus the
+// legacy <tool_call>/<function-calls> family). Each capture group holds one
+// tag's inner payload.
+const TOOL_TAG_RE =
+  /<tools>([\s\S]*?)<\/tools>|<tool>([\s\S]*?)<\/tool>|<tool_call>([\s\S]*?)<\/tool_call>|<tool_calls>([\s\S]*?)<\/tool_calls>|<function_call>([\s\S]*?)<\/function_call>|<function-calls>([\s\S]*?)<\/function-calls>/gi;
+
+/**
+ * Parse the payload of one tool tag/fence into call objects: a single JSON
+ * object, an ARRAY of objects, or several bare objects separated by
+ * whitespace/newlines. Every candidate is validated against the registry;
+ * invalid ones are skipped (never executed). Never throws.
+ */
+function parseCallPayloads(payload) {
+  const out = [];
+  const t = String(payload || '').trim();
+  if (!t) return out;
+  // Whole payload first: object or array of objects.
+  try {
+    const whole = JSON.parse(t);
+    const arr = Array.isArray(whole) ? whole : [whole];
+    let any = false;
+    for (const o of arr) {
+      const c = normalizeCallObject(o, false);
+      if (c) { out.push(c); any = true; }
+    }
+    if (any) return out; // at least one valid call — the payload was one doc
+  } catch { /* not a single JSON doc — try bare objects below */ }
+  // Multiple bare JSON objects inside one tag (whitespace/newline separated).
+  for (const frag of findJsonObjects(t)) {
+    try {
+      const c = normalizeCallObject(JSON.parse(frag), false);
+      if (c) out.push(c);
+    } catch { /* fragment is not a call */ }
+  }
+  return out;
+}
+
+/**
+ * Every tool call embedded in model text, in document order ([] when none).
+ * Priority mirrors the legacy single-call extractor: fenced JSON blocks,
+ * then XML-style tool tags, then a bare JSON object, then whole-output JSON.
+ */
+function extractToolCalls(text) {
+  const out = [];
+  const s = String(text || '');
+  const t = s.trim();
+  if (!t) return out;
+
+  // 1) fenced ```json (or bare ```) block anywhere in the output
+  const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
+  for (const m of t.matchAll(fenceRe)) {
+    for (const c of parseCallPayloads(m[1])) out.push(c);
+  }
+  if (out.length) return out;
+
+  // 2) explicit XML-style tool tags (Qwen2.5-Coder <tools>…</tools>, …)
+  for (const m of t.matchAll(TOOL_TAG_RE)) {
+    const payload = m.slice(1).find((g) => g !== undefined);
+    for (const c of parseCallPayloads(payload)) out.push(c);
+  }
+  if (out.length) return out;
+
+  // 3) bare JSON object anywhere (covers "`{\"tool\":...}` + trailing prose"
+  //    and Qwen's {"name":…,"arguments":…} object without the wrapper)
+  const bare = findBareToolObject(t);
+  if (bare) return [bare];
+
+  // 4) whole-output pure JSON
+  if (t.startsWith('{')) {
+    const hit = tryParseTool(t, true);
+    if (hit) return [hit];
+  }
+  return out;
+}
+
+/** First tool call embedded in model text ({ tool, args } or null). */
+function extractToolCall(text) {
+  return extractToolCalls(text)[0] || null;
+}
+
 function findBareToolObject(text) {
-  const idx = text.indexOf('"tool"');
-  if (idx === -1) return null;
-  const start = text.lastIndexOf('{', idx);
-  if (start === -1) return null;
-  let depth = 0;
-  for (let k = start; k < text.length; k++) {
-    const ch = text[k];
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) return tryParseTool(text.slice(start, k + 1));
+  // Object-start candidates: any of the key markers that can open a call
+  // object — "tool" for the plife contract, "name"+"arguments"/"args" for
+  // the OpenAI/Qwen shape (name-shaped objects require an args key, so a
+  // prose mention of a tool name alone never fires).
+  const keys = ['"tool"', '"name"', '"arguments"', '"args"'];
+  const hits = [];
+  for (const key of keys) {
+    let i = text.indexOf(key);
+    while (i !== -1) { hits.push({ i, key }); i = text.indexOf(key, i + 1); }
+  }
+  hits.sort((a, b) => a.i - b.i);
+  let lastEnd = -1;
+  for (const { i, key } of hits) {
+    if (i <= lastEnd) continue; // already inside a scanned candidate
+    const start = text.lastIndexOf('{', i);
+    if (start === -1) continue;
+    let depth = 0;
+    for (let k = start; k < text.length; k++) {
+      const ch = text[k];
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          lastEnd = k;
+          const hit = tryParseTool(text.slice(start, k + 1), key !== '"tool"');
+          if (hit) return hit;
+          break;
+        }
+      }
     }
   }
   return null;
 }
 
-function extractToolCall(text) {
-  if (!text) return null;
-  let t = text.trim();
-  if (!t) return null;
-
-  // 1) fenced ```json (or bare ```) block anywhere in the output
-  const fenceRe = /```(?:json)?\s*([\s\S]*?)```/gi;
-  for (const m of t.matchAll(fenceRe)) {
-    const hit = tryParseTool(m[1].trim());
-    if (hit) return hit;
-  }
-
-  // 2) <tool_call>…</tool_call> block
-  const block = t.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
-  if (block) {
-    const hit = tryParseTool(block[1].trim());
-    if (hit) return hit;
-  }
-
-  // 3) bare JSON object anywhere (covers "`{\"tool\":...}` + trailing prose")
-  const bare = findBareToolObject(t);
-  if (bare) return bare;
-
-  // 4) whole-output pure JSON
-  if (t.startsWith('{')) {
-    const hit = tryParseTool(t);
-    if (hit) return hit;
-  }
-  return null;
-}
-
 /**
- * Guidance injected into every chat system prompt (tool and non-tool paths):
- * automations live in the plife dashboard, not in the OS crontab.
+ * Guidance injected into non-tool chat paths (TOOL_CALLING=false): automations
+ * live in the plife dashboard, not in the OS crontab. Kept compact — it is an
+ * edge path; the tool-enabled system prompt carries the short rule inline.
  */
 const AUTOMATIONS_GUIDANCE =
-  'Built-in automations: this server has an Automations engine with dedicated ' +
-  'tools: create_automation, list_automations, run_automation, delete_automation. ' +
-  'When the user asks to create an automation, schedule a task, or run something ' +
-  'periodically, CALL create_automation yourself with the schedule and action the ' +
-  'user wants — you execute the creation; do not just explain how. Include ALL ' +
-  'required fields: name, schedule_type, interval_minutes or cron, action_type, ' +
-  'and the matching script/skill/prompt value. After creating, ' +
-  'call list_automations to confirm. If the automation already exists, do NOT ' +
-  'create it again — confirm the existing one instead. Fallback: if the dedicated tools are missing, ' +
-  'use run_shell with curl POST http://127.0.0.1:8888/api/automations (same JSON ' +
-  'body as create_automation). NEVER suggest system-level Unix cron jobs or ' +
-  'external OS crontabs — use the built-in Automations engine.\n';
-
-const LIBRARY_GUIDANCE =
-  'File Library: the server keeps a persistent Library of user files (documents, code, assets). ' +
-  'When the user refers to an attached file, asks what is in their Library, or wants you to store ' +
-  'a document, use the library tools (list_library_files, read_library_file, upload_library_file). ' +
-  'Attached files are usually inlined in the user message; read_library_file can fetch more of them.\n';
+  'Automations: this server has a built-in Automations engine with tools ' +
+  'create_automation, list_automations, run_automation, delete_automation. ' +
+  'When the user asks to create an automation or schedule something recurring, ' +
+  'use them yourself — never suggest OS cron jobs. ' +
+  'Include all required fields: name, schedule_type (interval|cron), ' +
+  'interval_minutes or cron, action_type (script|skill|prompt), and the matching ' +
+  'script/skill/prompt value. Confirm with list_automations after creating. ' +
+  'Fallback without tools: run_shell with curl -X POST http://127.0.0.1:8888/api/automations ' +
+  '(same JSON body as create_automation).\n';
 
 /**
  * Build the system prompt that teaches the model how/when to emit a tool call.
- * Appended to the base system prompt. Kept schema-driven so adding a tool
- * later needs no edits here.
+ * Appended to the base system prompt.
+ *
+ * PROMPT-CACHE CONTRACT: this text is part of the stable prompt prefix and is
+ * therefore 100% static — no dates, no request ids, no session ids, no
+ * per-request content. Dynamic content (retrieved memory, session info, the
+ * current date) must NEVER be injected here; it belongs after the prefix
+ * (near/inside the current user message). The tool descriptions are NOT
+ * embedded here any more (they live in the payload `tools` array, which the
+ * OpenAI-compatible server renders into the context) — that alone removed
+ * ~3,400 tokens of duplicated schema from the prefix.
  */
 function buildSystemPrompt(base) {
-  const schema = registry.map((t) => ({
-    name: t.name,
-    description: t.description,
-    parameters: t.parameters,
-  }));
   return (
     `${base}\n\n` +
-    'You have access to tools that let you inspect and modify files and run shell ' +
-    'commands when helpful.\n' +
-    'To list directory contents or see what files exist in the project, call list_files ' +
-    '(never read_file on a directory). To read a specific file, use read_file.\n' +
-    AUTOMATIONS_GUIDANCE +
-    LIBRARY_GUIDANCE +
-    'When you decide a tool is needed, respond with EXACTLY one JSON object on its ' +
-    'own (no code fences, no other text), in this shape:\n' +
-    '{"tool": "<tool_name>", "args": { ...arg names and values for that tool }}\n' +
-    'The JSON object must be the FIRST thing you output — no introductory sentences ' +
-    'before it, no explanations around it. If you output any text before the JSON ' +
-    'object, the call is not executed. You may explain only AFTER the tool results ' +
-    'come back.\n' +
-    'Every required argument MUST be a complete, real value — a full string literal ' +
-    'or a real number. Never leave arguments empty, and never use placeholders like ' +
-    '?, ..., <path>, N/A, TODO or your_file_name. Calls with missing or placeholder ' +
-    'arguments are rejected without executing; if a call is rejected, re-issue it ' +
-    'with the complete values.\n' +
-    'After the tool result comes back, continue working until the task is done, ' +
-    'then reply with a normal final answer (plain text). If a tool call fails, try ' +
-    'to recover and finish anyway. Do not repeat a tool call that already succeeded ' +
-    'with the same arguments — the result is already in your history; move on.\n' +
-    'Tool-first policy: when a tool fits the request, you MUST call it — never ' +
-    'answer with instructions, steps, links, or raw JSON examples for the user to ' +
-    'run manually. Explanatory text is allowed only AFTER the tools have done the ' +
-    'work. If you intend to call a tool, the JSON object MUST appear in your output.\n' +
-    'Tools:\n' +
-    JSON.stringify(schema, null, 2)
+    'You are the plife dashboard agent. Use the provided tools to inspect and modify files, ' +
+    'run shell commands, and manage automations, skills and the file Library.\n' +
+    'To call a tool, output exactly ONE JSON object as the very first thing, nothing before it:\n' +
+    '{"tool": "<tool_name>", "args": {...}}\n' +
+    'Complete, real values only — no placeholders (?, ..., <path>, N/A, TODO). Calls with ' +
+    'missing or placeholder arguments are rejected. Never repeat a tool call that already succeeded.\n' +
+    'If a call fails, fix it and retry once, then keep going. After the tool results, work until ' +
+    'the task is done, then reply with a short plain-text final answer.\n' +
+    'You execute shell commands yourself with the run_shell tool and have internet access through curl. ' +
+    'When the user needs live data or system information, call the tool and answer from its output — ' +
+    'never ask the user to run commands.\n' +
+    'Automations: creating/scheduling/running/removing automations is done with the automation ' +
+    'tools — never suggest OS crontab entries.\n' +
+    'Library: attached files are usually inlined in your input; use the library tools to list, ' +
+    'read or save documents.\n'
   );
+}
+
+// ---------------------------------------------------------------------------
+// Lazy tool selection  (EXPERIMENTAL — off by default, LAZY_TOOLS=true)
+// ---------------------------------------------------------------------------
+//
+// The production default (routes/chat.js) sends ALL tools on every request:
+// the full 16-tool array is only ~1,900 tokens, it is cached after warm-up,
+// and — crucially — it never changes mid-conversation, so the llama.cpp KV
+// cache stays valid for the whole conversation. Lazy selection was tried
+// first (round 1 of the prompt-cache work) and its flaw is structural: a
+// topic tool group added mid-conversation sits in the middle of the prefix
+// and forces llama-server to re-process the ENTIRE conversation, which costs
+// minutes on this CPU. Kept behind the flag for experiments.
+//
+// If enabled: sends a small CORE set plus the tools relevant to the
+// conversation. The chosen set is a UNION over ALL user messages, so:
+//  - it can only grow, never shrink → once a topic appears, its tools stay
+//    (stable within a conversation, cache stays valid),
+//  - a brand-new topic mid-conversation grows the set exactly once (one
+//    one-time cache invalidation, then stable again),
+//  - the result is sorted by name → deterministic serialization.
+const CORE_TOOL_NAMES = ['edit_file', 'list_files', 'read_file', 'run_shell', 'write_file'];
+
+const TOPIC_TOOLS = [
+  {
+    topic: 'skills',
+    re: /skill/i,
+    tools: ['delete_skill', 'list_skills', 'run_skill', 'write_skill'],
+  },
+  {
+    topic: 'automations',
+    re: /automation|schedul|recurr|remind|cron|every\s+\d+\s*(min|hour|day|week)|daily|hourly|weekly|monthly|periodic/i,
+    tools: ['create_automation', 'delete_automation', 'list_automations', 'run_automation'],
+  },
+  {
+    topic: 'library',
+    re: /library|attach|upload|stored file/i,
+    tools: ['list_library_files', 'read_library_file', 'upload_library_file'],
+  },
+];
+
+/**
+ * Deterministically select the OpenAI `tools` array for a request.
+ * `messages` is the full conversation (all rounds of the tool loop included).
+ * opts.force: tool names that must be present (e.g. automation enforcement).
+ * opts.attachments: true when the request carries library attachments →
+ * library tools are needed (attachment truncation notes point at
+ * read_library_file).
+ */
+function selectTools(messages, opts = {}) {
+  const { force = [], attachments = false } = opts;
+  const set = new Set(CORE_TOOL_NAMES);
+  const text = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m && m.role === 'user' && typeof m.content === 'string')
+    .map((m) => m.content)
+    .join('\n');
+  for (const topic of TOPIC_TOOLS) {
+    if (topic.re.test(text)) for (const t of topic.tools) set.add(t);
+  }
+  // Explicit tool-name mention in any user message (e.g. "use run_skill X").
+  for (const t of registry) {
+    if (text.includes(t.name)) set.add(t.name);
+  }
+  for (const name of force) if (hasTool(name)) set.add(name);
+  if (attachments) {
+    for (const t of TOPIC_TOOLS.find((x) => x.topic === 'library').tools) set.add(t);
+  }
+  return [...set].sort().map((name) => {
+    const t = getTool(name);
+    return {
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    };
+  });
+}
+
+/** Tool names in the default (core) set — used by warm-up. */
+function coreToolNames() {
+  return [...CORE_TOOL_NAMES];
 }
 
 // =====================================================================
@@ -653,7 +817,11 @@ module.exports = {
   hasTool,
   safeParseArgs,
   extractToolCall,
+  extractToolCalls,
+  normalizeCallObject,
   buildSystemPrompt,
+  selectTools,
+  coreToolNames,
   AUTOMATIONS_GUIDANCE,
   AUTOMATION_INTENT_RE,
   isAutomationCreationRequest,

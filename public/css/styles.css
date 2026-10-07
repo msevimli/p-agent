@@ -1,5 +1,18 @@
 /* plife — custom styles layered on top of Tailwind */
 
+/* Mobile: dynamic viewport height. 100vh on phones includes the part of the
+   screen covered by the browser URL bar, so the app (and the compose box in
+   particular) renders taller than the visible area and overflows downward.
+   100dvh tracks the actual visible viewport and reflows when the chrome
+   collapses/expands (or the keyboard opens). */
+html, body { height: 100%; }
+/* body.h-screen outranks Tailwind's .h-screen (element+class beats class),
+   so this override reliably wins regardless of injection order. */
+body.h-screen { height: 100vh; }
+@supports (height: 100dvh) {
+  body.h-screen { height: 100dvh; }
+}
+
 /* Smooth scrolling for chat container */
 #chatContainer { scroll-behavior: smooth; }
 
@@ -239,8 +252,8 @@ html.dark .status-spinner {
   animation: msmPulse 1.1s ease-in-out infinite;
 }
 
-/* Header system-metrics rings: smooth sweep between 5s polls. */
-#ramRing, #cpuRing {
+/* System-metrics rings (header + mobile toolbar): smooth sweep between 5s polls. */
+.metric-ring {
   transition: stroke-dashoffset 0.6s ease;
 }
 

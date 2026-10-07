@@ -36,18 +36,45 @@ function fail(err) {
 const readFileTool = {
   name: 'read_file',
   description:
-    'Read the content of a text file. Path is relative to the project workspace (default /home/openclaw/plife) and must stay inside it.',
+    'Read a text file (workspace path; 1-based line offset/limit for large files, output capped)',
   parameters: {
     type: 'object',
-    properties: { path: { type: 'string', description: 'Workspace-relative file path' } },
+    properties: {
+      path: { type: 'string', description: 'Workspace-relative file path' },
+      offset: { type: 'number', description: 'First line to read (1-based, default 1)' },
+      limit: { type: 'number', description: 'Max lines to read (default: to EOF, capped by size)' },
+    },
     required: ['path'],
   },
   execute(args) {
     const abs = resolveWithin(args && args.path);
     if (!abs) return { ok: false, error: 'path escapes the allowed workspace' };
     try {
-      const content = fs.readFileSync(abs, 'utf8');
-      return { ok: true, path: relOf(abs), bytes: Buffer.byteLength(content), content };
+      const raw = fs.readFileSync(abs, 'utf8');
+      const lines = raw.split('\n');
+      const offset = Math.max(1, Number(args && args.offset) || 1);
+      const limit = args && args.limit !== undefined && args.limit !== null ? Math.max(1, Number(args.limit) || 1) : null;
+      const from = Math.min(lines.length, offset - 1);
+      const to = limit ? Math.min(lines.length, from + limit) : lines.length;
+      let content = lines.slice(from, to).join('\n');
+      const cap = Number.isFinite(config.readFileMaxChars) ? config.readFileMaxChars : 6000;
+      let truncated = content.length > cap;
+      if (truncated) {
+        // Deterministic cut at the cap with a clear tail marker; the model
+        // can page with offset/limit to read the rest.
+        content = content.slice(0, cap) + '\n…[truncated: file continues — use read_file with offset/limit to read the next range]…';
+      }
+      return {
+        ok: true,
+        path: relOf(abs),
+        bytes: Buffer.byteLength(raw),
+        chars: content.length,
+        lines: to - from,
+        offset: from + 1,
+        limit: to - from,
+        truncated,
+        content,
+      };
     } catch (e) {
       return fail(e);
     }
@@ -57,14 +84,14 @@ const readFileTool = {
 const writeFileTool = {
   name: 'write_file',
   description:
-    'Create or fully overwrite a text file. Path is workspace-relative and must stay inside it; parent directories are created automatically.',
+    'Create or fully overwrite a text file (parent directories are created automatically).',
   parameters: {
     type: 'object',
     properties: {
       path: { type: 'string', description: 'Workspace-relative file path' },
       content: {
         type: ['string', 'array'],
-        description: 'File content, or an array of lines to join with newlines',
+        description: 'File content, or an array of lines joined with newlines',
       },
     },
     required: ['path', 'content'],
@@ -86,7 +113,7 @@ const writeFileTool = {
 const editFileTool = {
   name: 'edit_file',
   description:
-    'Make a targeted replacement inside an existing file (find old_text, replace with new_text). Refuses if old_text is not found.',
+    'Replace old_text with new_text in an existing file (fails if old_text is not found).',
   parameters: {
     type: 'object',
     properties: {
@@ -124,9 +151,7 @@ const editFileTool = {
 const listFilesTool = {
   name: 'list_files',
   description:
-    'List files and folders inside a workspace directory (relative to the project workspace). ' +
-    'Use this — not read_file — whenever asked to list directory contents, see what files exist, ' +
-    'or explore the project structure.',
+    'List a workspace directory (or the workspace root). Use this instead of read_file for directories.',
   parameters: {
     type: 'object',
     properties: {
@@ -146,7 +171,8 @@ const listFilesTool = {
     const target = hasPath ? resolveWithin(args.path) : ROOT;
     if (!target) return { ok: false, error: 'path escapes the allowed workspace' };
     const recursive = !!(args && args.recursive);
-    const MAX_ENTRIES = 2000;
+    const MAX_ENTRIES = 2000; // hard walk bound (count only beyond this)
+    const LIST_LIMIT = Number.isFinite(config.listFilesMaxEntries) ? config.listFilesMaxEntries : 200;
 
     try {
       const entries = [];
@@ -165,14 +191,28 @@ const listFilesTool = {
           if (count >= MAX_ENTRIES) { truncated = true; return; }
           const abs = path.join(dir, d.name);
           const isDir = d.isDirectory();
-          entries.push({ name: d.name, path: relOf(abs), type: isDir ? 'directory' : 'file' });
+          // Keep listing at most LIST_LIMIT entries (the prompt is precious);
+          // the total count is still reported so the model can tell it is
+          // missing entries and narrow the path instead.
+          if (entries.length < LIST_LIMIT) {
+            entries.push({ name: d.name, path: relOf(abs), type: isDir ? 'directory' : 'file' });
+          }
           count++;
           if (isDir && recursive) walk(abs);
         }
       };
 
       walk(target);
-      return { ok: true, path: relOf(target), count: entries.length, truncated, entries };
+      const omitted = count - entries.length;
+      return {
+        ok: true,
+        path: relOf(target),
+        count,
+        shown: entries.length,
+        omitted: omitted > 0 ? omitted : 0,
+        truncated: truncated || omitted > 0,
+        entries,
+      };
     } catch (e) {
       return fail(e);
     }

@@ -58,15 +58,59 @@ module.exports = {
   // No-data grace period (ms) for upstream streams, PRE-first-byte and as the
   // backstop when /slots is unavailable: a silent llama.cpp (no SSE bytes at
   // all, incl. time-to-first-token) is aborted after this instead of hanging
-  // the SSE forever. After the first byte, liveness is decided dynamically by
-  // polling GET /slots (see llamaSlotPollMs / llamaSlotCheckSilenceMs): while
-  // any slot reports processing, generation is allowed to run indefinitely;
-  // a slot confirmed idle without a result aborts the stream.
-  llamaStallTimeoutMs: Number(process.env.LLAMA_STALL_TIMEOUT_MS || 120000),
+  // the SSE forever. Default 5 min so a cold-start prefill on a slow CPU
+  // (~10 tok/s × ~2,000-token prefix ≈ 3+ min) is never cut off by the clock;
+  // while /slots is available the slot supervisor self-extends anyway. After
+  // the first byte, liveness is decided dynamically by polling GET /slots
+  // (see llamaSlotPollMs / llamaSlotCheckSilenceMs): while any slot reports
+  // processing, generation is allowed to run indefinitely; a slot confirmed
+  // idle without a result aborts the stream.
+  llamaStallTimeoutMs: Number(process.env.LLAMA_STALL_TIMEOUT_MS || 1200000),
   // Timeout (ms) for a single model warm-up completion (POST /api/models/warmup).
   // The warm-up shares the request queue with chat, so queue wait is not part
-  // of this budget — it bounds the upstream HTTP call itself.
-  warmupTimeoutMs: Number(process.env.WARMUP_TIMEOUT_MS || 120000),
+  // of this budget — it bounds the upstream HTTP call itself. Long enough for
+  // a full cold prefill of the static prefix on a CPU server.
+  warmupTimeoutMs: Number(process.env.WARMUP_TIMEOUT_MS || 1200000),
+  // Pre-warm the active model on agent startup (one max_tokens=1 completion
+  // containing only the static system prompt + all tools, so the prefix is
+  // already in the llama.cpp KV cache before the first real message).
+  autoWarmup: process.env.AUTO_WARMUP !== 'false',
+  // Tool selection: default = ALL tools, always, in a fixed (name-sorted)
+  // order, so the tools block is byte-identical across requests and the
+  // warm-up cache always matches real requests. LAZY_TOOLS=true re-enables
+  // the topic-based subset (kept for experiments; breaks the prefix cache
+  // when a tool group appears mid-conversation).
+  lazyTools: process.env.LAZY_TOOLS === 'true',
+
+  // --- context budget & history compaction (see services/historyManager.js)
+  // Reserve (tokens) kept for the reply, safety margin (% of context), and
+  // the high/low watermarks (% of the budget) at which history is compacted.
+  contextReserveTokens: Number(process.env.CONTEXT_RESERVE_TOKENS || 1024),
+  contextSafetyPct: Number(process.env.CONTEXT_SAFETY_PCT || 5),
+  contextCompactHighPct: Number(process.env.CONTEXT_COMPACT_HIGH_PCT || 75),
+  contextCompactLowPct: Number(process.env.CONTEXT_COMPACT_LOW_PCT || 50),
+  // Number of most recent user turns never touched by compaction.
+  contextKeepLastTurns: Number(process.env.CONTEXT_KEEP_LAST_TURNS || 3),
+  // Estimate of the static prefix (system prompt + tools rendering) used for
+  // the budget math until the server reports the real cached prefix. The
+  // real server-rendered value measures ~2,390 with all 16 tools (warm-up
+  // prompt_tokens minus the 44-token "ping" message + template; +44 tokens
+  // since the run_shell/curl sentence was added to the system prompt);
+  // llama.cpp's tool template renders ~400 tokens more than the bare JSON sim
+  // (1,922 tokens).
+  promptPrefixTokens: Number(process.env.PROMPT_PREFIX_TOKENS || 2450),
+  // Fallback context window when /slots is unreachable (server value wins).
+  contextWindowFallback: Number(process.env.CONTEXT_WINDOW_FALLBACK || 16384),
+
+  // --- tool output limits (applied once, at history insertion)
+  // Max characters of a serialized tool result stored in the conversation.
+  toolOutputMaxChars: Number(process.env.TOOL_OUTPUT_MAX_CHARS || 4000),
+  // Default max characters read_file returns in one call (offset/limit allow
+  // reading large files in pieces).
+  readFileMaxChars: Number(process.env.READ_FILE_MAX_CHARS || 6000),
+  // Max entries list_files returns in one call (the rest is counted, not
+  // listed, to keep the prompt small).
+  listFilesMaxEntries: Number(process.env.LIST_FILES_MAX_ENTRIES || 200),
   // How often the slot-liveness supervisor polls GET /slots during stream
   // silence (ms).
   llamaSlotPollMs: Number(process.env.LLAMA_SLOT_POLL_MS || 4000),
@@ -88,6 +132,11 @@ module.exports = {
   // runaway model can't loop forever.
   toolCallingEnabled: process.env.TOOL_CALLING !== 'false',
   toolMaxIterations: Number(process.env.TOOL_MAX_ITERATIONS || 10),
+  // Guard retry (step 3): when the model answers with a shell/curl description
+  // instead of a tool call, retry once with tool_choice:"required". Requires a
+  // llama.cpp build that accepts the field on the OpenAI-compat API; set
+  // GUARD_RETRY_TOOL_CHOICE=false for servers that reject it.
+  guardRetryToolChoice: process.env.GUARD_RETRY_TOOL_CHOICE !== 'false',
   // Diagnostic: when true, llamaClient appends the exact upstream payload and
   // raw SSE chunks to /tmp/plife-dump.log (was unconditional while debugging
   // tool-call formatting; off by default — it writes a lot).

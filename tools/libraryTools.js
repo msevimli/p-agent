@@ -15,7 +15,7 @@ const MAX_TEXT = 100000; // chars returned per read_library_file call
 const listTool = {
   name: 'list_library_files',
   description:
-    'List every file in the persistent user Library (id, name, size, type). Call this whenever the user refers to their documents, uploads, or library files, or asks what is stored — never guess file ids or names before listing.',
+    'List files in the persistent user Library (id, name, size, type). Call this when the user refers to their documents or asks what is stored.',
   parameters: { type: 'object', properties: {} },
   execute() {
     const files = library.list().map((f) => ({
@@ -33,7 +33,7 @@ const listTool = {
 const readTool = {
   name: 'read_library_file',
   description:
-    'Read the TEXT content of a file from the persistent user Library, by its exact id (preferred) or by its exact stored name. Use this for attached files and library documents. Binary files return metadata instead of content.',
+    'Read the TEXT content of a Library file by exact file_id (preferred) or exact stored name. Binary files return metadata instead of content.',
   parameters: {
     type: 'object',
     properties: {
@@ -74,7 +74,7 @@ const readTool = {
 const uploadTool = {
   name: 'upload_library_file',
   description:
-    'Save a new text file (document, code snippet, notes) into the persistent user Library. Provide the filename with extension and the full content; a short description is optional. Existing files are never overwritten — each call creates a new Library entry.',
+    'Save a new text file (document, code snippet, notes) into the persistent user Library. Never overwrites — each call creates a new entry.',
   parameters: {
     type: 'object',
     properties: {

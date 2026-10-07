@@ -37,12 +37,12 @@
   const msmWarmupBtn = $('#msmWarmupBtn');
   const msmEjectBtn = $('#msmEjectBtn');
   const msmManageBtn = $('#msmManageBtn');
-  const ramRing = $('#ramRing');
-  const ramPct = $('#ramPct');
-  const ramMetric = $('#ramMetric');
-  const cpuRing = $('#cpuRing');
-  const cpuPct = $('#cpuPct');
-  const cpuMetric = $('#cpuMetric');
+  const ramRings = document.querySelectorAll('.metric-ring.ram');
+  const ramPcts = document.querySelectorAll('.metric-pct.ram');
+  const ramPills = document.querySelectorAll('.metric-pill.ram');
+  const cpuRings = document.querySelectorAll('.metric-ring.cpu');
+  const cpuPcts = document.querySelectorAll('.metric-pct.cpu');
+  const cpuPills = document.querySelectorAll('.metric-pill.cpu');
   const contextBtn = $('#contextBtn');
   const contextRing = $('#contextRing');
   const contextSummary = $('#contextSummary');
@@ -971,13 +971,29 @@
   }
 
   // Badge text for a completed assistant message; null when there is nothing
-  // to show (no usage reported — e.g. interrupted requests).
-  function genMetaText(u) {
+  // to show (no usage reported — e.g. interrupted requests). `tg` is the
+  // llama.cpp `timings` object from the final chunk: prompt_n = tokens
+  // actually evaluated this request, so cached = prompt_tokens - prompt_n.
+  // The badge makes the KV cache verifiable: on the second message of a
+  // conversation the "(N cached)" number should be large and the "prompt
+  // speed" number small.
+  function genMetaText(u, tg) {
     if (!u) return null;
     const totalTokens = (Number(u.prompt_tokens) || 0) + (Number(u.completion_tokens) || 0);
     const parts = [];
     if (Number(u.elapsedMs) > 0) parts.push(`⚡ ${fmtDuration(u.elapsedMs)}`);
-    if (totalTokens > 0) parts.push(`${totalTokens.toLocaleString('en-US')} tokens`);
+    if (totalTokens > 0) {
+      const cached = tg && Number.isFinite(tg.prompt_n)
+        ? Math.max(0, (Number(u.prompt_tokens) || 0) - Number(tg.prompt_n))
+        : null;
+      const tokPart = `${formatTok(totalTokens)} tok`;
+      parts.push(cached > 0 ? `${tokPart} (${formatTok(cached)} cached)` : tokPart);
+      const pp = tg && Number(tg.prompt_per_second);
+      const gen = tg && Number(tg.predicted_per_second);
+      if (Number.isFinite(pp) && pp > 0 && Number.isFinite(gen) && gen > 0) {
+        parts.push(`${pp.toFixed(1)}/${gen.toFixed(1)} tok/s`); // prompt/gen speed
+      }
+    }
     return parts.length ? parts.join(' · ') : null;
   }
 
@@ -1182,6 +1198,7 @@
       scrollToBottom();
     };
     let reqUsage = null; // usage from THIS request only (tokens + elapsedMs)
+    let reqTimings = null; // llama.cpp timings from this request (cache + speeds)
     const captureUsage = (u) => {
       reqUsage = u;
       state.lastUsage = {
@@ -1190,6 +1207,7 @@
         completion_tokens: u.completion_tokens,
       };
     };
+    const captureTimings = (t) => { reqTimings = t; };
 
     const apiMessages = state.currentMessages.map((m) => ({ role: m.role, content: m.content }));
 
@@ -1234,6 +1252,7 @@
         const delta = json.choices?.[0]?.delta?.content || '';
         if (delta) full += delta;
         if (json.usage) captureUsage(json.usage);
+        if (json.timings) captureTimings(json.timings);
       };
 
       const reader = res.body.getReader();
@@ -1282,7 +1301,7 @@
         throw new Error('Empty response from llama.cpp');
       }
 
-      const metaText = genMetaText(reqUsage);
+      const metaText = genMetaText(reqUsage, reqTimings);
       state.currentMessages.push({ role: 'assistant', content: full, meta: metaText });
       contentEl.innerHTML = marked.parse(full);
       attachCopyButtons(contentEl);
@@ -1290,6 +1309,10 @@
         const metaEl = document.createElement('div');
         metaEl.className = 'msg-meta';
         metaEl.textContent = metaText;
+        // "12.1/2.8 tok/s" = prompt processing / generation speed (llama.cpp timings).
+        if (reqTimings) {
+          metaEl.title = 'Prompt/generation speed from llama.cpp timings; "cached" = prompt tokens reused from the KV cache.';
+        }
         assistantEl.appendChild(metaEl);
       }
       scrollToBottom();
@@ -1300,7 +1323,7 @@
       if (aborted) {
         // User pressed Stop: freeze whatever partial response arrived.
         if (full) {
-          state.currentMessages.push({ role: 'assistant', content: full, meta: genMetaText(reqUsage) });
+          state.currentMessages.push({ role: 'assistant', content: full, meta: genMetaText(reqUsage, reqTimings) });
           contentEl.innerHTML = marked.parse(full);
           attachCopyButtons(contentEl);
           const note = document.createElement('div');
@@ -1462,7 +1485,11 @@
       : `w-2.5 h-2.5 rounded-full ${spec.dot}${spec.pulse ? ' status-pulse' : ''}`;
     msmName.textContent = s.name;
     msmPhase.textContent = spec.label;
-    msmDetail.textContent = [s.detail, s.since ? `updated ${fmtSince(s.since)}` : ''].filter(Boolean).join(' · ');
+    msmDetail.textContent = [
+      s.detail,
+      s.serverModel ? `loaded: ${s.serverModel}` : '',
+      s.since ? `updated ${fmtSince(s.since)}` : '',
+    ].filter(Boolean).join(' · ');
     msmMemory.textContent = s.provider === 'local' ? memoryLine(s) : 'remote endpoint — memory managed provider-side';
     const remote = s.provider !== 'local';
     const busyOp = !!state.modelOp;
@@ -1579,6 +1606,12 @@
     return Math.round(RING_C * (1 - p / 100) * 100) / 100;
   }
 
+  // Apply a callback to every element of a NodeList (metrics pills exist in
+  // both the header and the mobile compose toolbar).
+  function forEachEl(list, fn) {
+    if (list) list.forEach(fn);
+  }
+
   function applyRingColor(ring, pct, base, warn, crit) {
     const p = Number(pct) || 0;
     const chosen = p >= 95 ? crit : p >= 85 ? warn : base;
@@ -1597,12 +1630,16 @@
       const cpu = d.cpu || {};
       const ramP = Math.round(Number(ram.percent) || 0);
       const cpuP = Math.round(Number(cpu.percent) || 0);
-      ramPct.textContent = `${ramP}%`;
-      cpuPct.textContent = `${cpuP}%`;
-      ramRing.style.strokeDashoffset = ringOffset(ramP);
-      cpuRing.style.strokeDashoffset = ringOffset(cpuP);
-      applyRingColor(ramRing, ramP, RAM_BASE, RAM_WARN, RAM_CRIT);
-      applyRingColor(cpuRing, cpuP, CPU_BASE, CPU_WARN, CPU_CRIT);
+      forEachEl(ramPcts, (el) => { el.textContent = `${ramP}%`; });
+      forEachEl(cpuPcts, (el) => { el.textContent = `${cpuP}%`; });
+      forEachEl(ramRings, (el) => {
+        el.style.strokeDashoffset = ringOffset(ramP);
+        applyRingColor(el, ramP, RAM_BASE, RAM_WARN, RAM_CRIT);
+      });
+      forEachEl(cpuRings, (el) => {
+        el.style.strokeDashoffset = ringOffset(cpuP);
+        applyRingColor(el, cpuP, CPU_BASE, CPU_WARN, CPU_CRIT);
+      });
       const gb = (b) => (Number(b) / 1073741824).toFixed(1);
       let ramTitle = `RAM ${gb(ram.usedBytes)} / ${gb(ram.totalBytes)} GB used (${ramP}%)`;
       if (ram.scope === 'container') ramTitle += ` · container (cgroup ${ram.cgroup || '?'}${ram.limitSet ? '' : ', no limit'})`;
@@ -1610,7 +1647,7 @@
         ramTitle += ` · cache ${gb(ram.buffCacheBytes)} GB`;
         if (Number.isFinite(ram.percentAvail)) ramTitle += ` · w/o cache ${Math.round(ram.percentAvail)}%`;
       }
-      ramMetric.title = ramTitle;
+      forEachEl(ramPills, (el) => { el.title = ramTitle; });
       let cpuTitle = `CPU ${cpuP}% on ${Number(cpu.cores) || '?'} cores`;
       if (cpu.quotaCores) cpuTitle += ` (quota ${Number(cpu.quotaCores)})`;
       if (cpu.scope === 'container') cpuTitle += ` · container (cgroup ${cpu.cgroup || '?'})`;
@@ -1622,14 +1659,14 @@
         const up = Math.max(0, Math.round(Number(d.uptimeSec) / 60));
         cpuTitle += ` · up ${up >= 60 ? `${Math.floor(up / 60)}h ${up % 60}m` : `${up}m`}`;
       }
-      cpuMetric.title = cpuTitle;
+      forEachEl(cpuPills, (el) => { el.title = cpuTitle; });
     } catch {
-      ramPct.textContent = '—';
-      cpuPct.textContent = '—';
-      ramRing.style.strokeDashoffset = RING_C;
-      cpuRing.style.strokeDashoffset = RING_C;
-      ramMetric.title = 'system metrics unavailable';
-      cpuMetric.title = 'system metrics unavailable';
+      forEachEl(ramPcts, (el) => { el.textContent = '—'; });
+      forEachEl(cpuPcts, (el) => { el.textContent = '—'; });
+      forEachEl(ramRings, (el) => { el.style.strokeDashoffset = RING_C; });
+      forEachEl(cpuRings, (el) => { el.style.strokeDashoffset = RING_C; });
+      forEachEl(ramPills, (el) => { el.title = 'system metrics unavailable'; });
+      forEachEl(cpuPills, (el) => { el.title = 'system metrics unavailable'; });
     }
   }
 

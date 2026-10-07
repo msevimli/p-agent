@@ -4,7 +4,3 @@ version: 1.0
 description: A skill that greets the user.
 entry: run.js
 ---
-
-# Instructions
-
-A skill that greets the user.

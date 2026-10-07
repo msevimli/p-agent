@@ -14,6 +14,7 @@ const fs = require('fs');
 const config = require('../config');
 const modelManager = require('./modelManager');
 const requestQueue = require('./requestQueue');
+const historyManager = require('./historyManager');
 
 // ===== DIAGNOSTIC (opt-in: PLIFE_DEBUG_DUMP=1) — dumps (1) the EXACT payload
 // (system prompt + tool definitions) written to the model endpoint, and (2)
@@ -156,9 +157,18 @@ function buildChatPayload(rawMessages, generation, opts) {
     max_tokens: num(gen.max_tokens, config.llamaMaxTokens), // bound so SSE ends at [DONE]
     // Ask llama.cpp to report real prompt/output token counts on the last chunk.
     stream_options: { include_usage: true },
+    // Reuse the KV cache for the stable prompt prefix (system + tools +
+    // history). MUST be true on every request or llama.cpp skips cache lookup.
+    cache_prompt: true,
     stream: true,
   };
   if (Array.isArray(o.tools) && o.tools.length) payload.tools = o.tools;
+  // Guard retry: force a tool call for exactly one request (only set when the
+  // retry path asks for it; the field is absent otherwise so the server's
+  // default tool_choice behavior is untouched).
+  if (o.toolChoice === 'required' || o.toolChoice === 'auto' || o.toolChoice === 'none') {
+    payload.tool_choice = o.toolChoice;
+  }
   return payload;
 }
 
@@ -351,20 +361,76 @@ function joinToolCallArgs(a, b) {
 }
 
 /**
+ * Per-request LLM timing log (requirement: every request logs prompt tokens,
+ * cache hits, prompt/generation speed, total time). llama.cpp reports:
+ *   usage.prompt_tokens            — total prompt length
+ *   timings.prompt_n               — tokens EVALUATED this request
+ *   → cached                      = prompt_tokens - prompt_n
+ *   timings.prompt_per_second      — prefill speed
+ *   timings.predicted_per_second   — generation speed
+ *   timings.prompt_ms+predicted_ms — model-side total
+ * Falls back gracefully when the server omits usage/timings.
+ */
+function logTimings(acc, firstTokenMs, wallMs, prefixHash) {
+  const u = acc.usage || {};
+  const t = acc.timings || {};
+  const promptTotal = Number.isFinite(u.prompt_tokens) ? u.prompt_tokens : null;
+  const evalN = Number.isFinite(t.prompt_n) ? t.prompt_n : null;
+  const cached =
+    promptTotal !== null && evalN !== null ? Math.max(0, promptTotal - evalN) : null;
+  const pp = Number.isFinite(t.prompt_per_second) ? t.prompt_per_second : null;
+  const gen = Number.isFinite(t.predicted_per_second) ? t.predicted_per_second : null;
+  const llmMs =
+    Number.isFinite(t.prompt_ms) && Number.isFinite(t.predicted_ms)
+      ? t.prompt_ms + t.predicted_ms
+      : null;
+  const bits = [];
+  if (promptTotal !== null) bits.push(`prompt=${promptTotal}`);
+  if (evalN !== null) bits.push(`eval=${evalN}`);
+  if (cached !== null) bits.push(`cached=${cached}`);
+  if (pp !== null) bits.push(`pp=${pp.toFixed(1)}t/s`);
+  if (gen !== null) bits.push(`gen=${gen.toFixed(1)}t/s`);
+  if (llmMs !== null) bits.push(`llm=${(llmMs / 1000).toFixed(1)}s`);
+  if (firstTokenMs !== null) bits.push(`ttft=${(firstTokenMs / 1000).toFixed(1)}s`);
+  bits.push(`wall=${(wallMs / 1000).toFixed(1)}s`);
+  if (prefixHash) bits.push(`prefix=${prefixHash}`);
+  console.log(`[llm] model=${activeTarget().model} ${bits.join(' ')}`);
+}
+
+/** Hash of the serialized static prefix (system prompt + tools) of a chat
+ *  payload — the part llama.cpp must re-process when it changes. Computed
+ *  from the payload actually sent, so warm-up and real requests are
+ *  comparable; logs a warning if the hash changes mid-process.
+ */
+function payloadHash(payload) {
+  const sys = payload && payload.messages && payload.messages[0] ? String(payload.messages[0].content || '') : '';
+  const toolsJson = payload && Array.isArray(payload.tools) ? JSON.stringify(payload.tools) : '[]';
+  return historyManager.prefixHashFor(sys, toolsJson);
+}
+
+/**
  * Perform ONE completion: consume the full SSE stream server-side and resolve
- * with { content, toolCalls, usage }.
+ * with { content, toolCalls, usage, timings }.
  *  - content:      accumulated text deltas
  *  - toolCalls:    native tool_calls accumulated across chunks, as
  *                  [{ index, id, name, arguments }] (arguments possibly partial)
  *                  — quoted fragments are de-tokenized via joinToolCallArgs
  *  - usage:        the usage object from the final chunk (may be null)
- * Optional onDelta/onUsage callbacks stream tokens/usage as they arrive.
+ *  - timings:      the llama.cpp timings object from the final chunk (may be null)
+ *  - firstTokenMs: ms from request write to first content/tool-call delta (may be null)
+ * Optional onDelta/onUsage/onTimings/onFirstChunk callbacks stream tokens,
+ * usage, timings and first-byte as they arrive.
  * Rejects with an Error on non-200 upstream responses or network failure.
  */
 function doComplete(opts) {
   return new Promise((resolve, reject) => {
-    const { payload, onDelta, onUsage } = opts || {};
-    const acc = { content: '', toolCalls: new Map(), usage: null, finishReason: null };
+    const { payload, onDelta, onUsage, onFirstChunk, onTimings } = opts || {};
+    const acc = { content: '', toolCalls: new Map(), usage: null, timings: null, finishReason: null };
+    // Wall clock for the timing log; measured from inside the queue slot, so
+    // it excludes FIFO wait (that is surfaced separately as queue position).
+    const t0 = Date.now();
+    let firstChunkMs = null; // first upstream byte (prefill finished server-side)
+    let firstTokenMs = null; // first content/tool-call delta = time to first token
 
     // Slot-aware liveness supervisor: replaces a fixed silent-timeout with
     // dynamic waiting driven by llama-server's own /slots state (see
@@ -389,6 +455,10 @@ function doComplete(opts) {
       let buffer = '';
       upRes.on('data', (chunk) => {
         supervisor.noteActivity(); // any byte is life — reset the liveness window
+        if (firstChunkMs === null) {
+          firstChunkMs = Date.now() - t0;
+          if (onFirstChunk) onFirstChunk(firstChunkMs);
+        }
         // TEMP DIAGNOSTIC: raw upstream bytes verbatim, before SSE split / JSON
         // parse / tool-call extraction. Concatenating all RAW_CHUNKs in order
         // yields the exact response string the model sent.
@@ -406,6 +476,9 @@ function doComplete(opts) {
             try {
               const j = JSON.parse(d);
               const delta = j.choices && j.choices[0] ? j.choices[0].delta || {} : {};
+              if (firstTokenMs === null && (typeof delta.content === 'string' && delta.content || Array.isArray(delta.tool_calls) && delta.tool_calls.length)) {
+                firstTokenMs = Date.now() - t0;
+              }
               if (typeof delta.content === 'string' && delta.content) {
                 acc.content += delta.content;
                 if (onDelta) onDelta(delta.content);
@@ -433,6 +506,14 @@ function doComplete(opts) {
                 acc.usage = j.usage;
                 if (onUsage) onUsage(j.usage);
               }
+              // llama.cpp reports `timings` (prompt_n / prompt_per_second /
+              // predicted_per_second / prompt_ms / predicted_ms) on the final
+              // chunk, alongside usage. prompt_n = tokens actually evaluated
+              // this request → cache hits = usage.prompt_tokens - prompt_n.
+              if (j.timings) {
+                acc.timings = j.timings;
+                if (onTimings) onTimings(j.timings);
+              }
               // finish_reason arrives on the choice (not the delta), usually
               // on the last chunk — "length" means max_tokens cut the output
               // and the caller may want to continue generation.
@@ -453,10 +534,20 @@ function doComplete(opts) {
           reject(new Error('llama.cpp returned an empty stream (no content or tool calls)'));
           return;
         }
+        if (acc.usage || acc.timings) {
+          // Hash of the exact serialized prefix (system prompt + tools) sent
+          // with this payload — logged with every completion so a runtime
+          // change (which would silently invalidate the llama.cpp KV cache)
+          // is immediately visible. See services/historyManager.js.
+          const prefixHash = payloadHash(payload);
+          logTimings(acc, firstTokenMs, Date.now() - t0, prefixHash);
+        }
         resolve({
           content: acc.content,
           usage: acc.usage,
+          timings: acc.timings,
           finishReason: acc.finishReason,
+          firstTokenMs,
           toolCalls: [...acc.toolCalls.entries()]
             .sort((a, b) => a[0] - b[0])
             .map(([index, e]) => ({ index, id: e.id, name: e.name, arguments: e.arguments })),
