@@ -127,9 +127,33 @@ const FOREIGN = 'some-other-model.gguf';
   t('eject: foreign occupant + no unit -> 409, never touches the foreign server',
     r && r.ok === false && r.code === 409 && /NOT the model/.test(r.error), r && JSON.stringify(r));
 
-  r = await modelLifecycle.eject('qwen-coder');
-  t('eject: foreign occupant (unit exists but stopped) -> 409',
-    r && r.ok === false && r.code === 409, r && JSON.stringify(r));
+  // Busy guard: this llama.cpp build retains id_task on IDLE slots — a stale
+  // id > 0 must never block eject of the active model (that bricked eject
+  // permanently after the first request). is_processing is the busy signal.
+  t('slotBusy: actively processing slot IS busy', modelLifecycle.slotBusy({ is_processing: true, id_task: 222 }) === true, '');
+  t('slotBusy: idle slot with retained id_task is NOT busy', modelLifecycle.slotBusy({ is_processing: false, id_task: 222 }) === false, '');
+  t('slotBusy: bare idle slot is NOT busy', modelLifecycle.slotBusy({ is_processing: false }) === false, '');
+
+  // Positive path (safe): identity-matched entry whose own unit exists but is
+  // INACTIVE -> eject proceeds to unit-stop, which is a no-op on an inactive
+  // unit. Self-guarding: case runs only when the unit is confirmed inactive.
+  const { execSync } = require('child_process');
+  const unitActive = (name) => {
+    try {
+      return execSync(`systemctl --user is-active ${name}`, {
+        env: { ...process.env, XDG_RUNTIME_DIR: '/run/user/1002', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1002/bus' },
+        timeout: 5000,
+      }).toString().trim() === 'active';
+    } catch { return false; }
+  };
+  const gm = modelManager.getModel('gemma4-4b');
+  if (gm && modelLifecycle.unitFilePath && !unitActive('llama-gemma4-4b.service')) {
+    r = await modelLifecycle.eject('gemma4-4b');
+    t('eject: own unit inactive -> proceeds to (harmless) unit stop',
+      r && r.ok === true && r.stoppedUnit && /llama-gemma4-4b/.test(r.stoppedUnit), r && JSON.stringify(r));
+  } else {
+    t('eject: own-unit-inactive positive path (unit file present)', false, 'llama-gemma4-4b.service not on disk or ACTIVE — case skipped');
+  }
 
   // ---------------- restore --------------------------------------------------
   modelManager.probeStatus = realProbeStatus;

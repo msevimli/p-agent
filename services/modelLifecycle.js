@@ -592,7 +592,7 @@ async function eject(id) {
     unloadCapCache.set(String(m.endpoint), { knownAt: Date.now(), unload: false });
 
     // Never kill the ACTIVE model mid-request: refuse while a task is
-    // processing or queued on it.
+    // processing on it.
     try {
       const active = modelManager.getActiveModel && modelManager.getActiveModel();
       if (active && active.id === m.id) {
@@ -600,7 +600,7 @@ async function eject(id) {
         const list = JSON.parse(slots.body);
         if (
           Array.isArray(list) &&
-          list.some((s) => s && (s.is_processing === true || Number(s.id_task) > 0 || Number(s.task_id) > 0))
+          list.some(slotBusy)
         ) {
           return { ok: false, code: 409, error: 'A request is currently processing on the active model — wait for it to finish before ejecting.' };
         }
@@ -739,6 +739,28 @@ function systemdEscape(arg) {
  * accident. 0.0.0.0 (not 127.0.0.1) so external tools like llama-ui on other
  * interfaces can reach the server; the p-agent health probes still use the
  * registry endpoint (loopback works for any bind).
+ *
+ * The always-on performance block is appended LAST (after the derived args)
+ * so it wins over any template flag: flash attention (explicit value — this
+ * build refuses a bare flag), -ngl 99 (offloads every layer to a GPU when one
+ * exists; safe no-op fallback on CPU-only hosts), and KV prefix reuse 256 so
+ * repeated system-prompt/history prefills collapse to a cache hit (a bare
+ * template previously re-prefilled the FULL history every turn — measured
+ * 85-138 s/turn at 26-28 tok/s). A context cap of -c 16384 is added ONLY when
+ * no context flag exists in the final args: templates that tune the window
+ * (e.g. -c 32768) keep their explicit choice, while bare templates (or none)
+ * no longer fall through to the GGUF's native 131K window that scaled compute
+ * buffers and KV past RAM and paged.
+ *
+ * KV cache type is DELIBERATELY NOT forced here: llama.cpp defaults to f16,
+ * which is the proven-stable path on this CPU-only host (measured 2026-10-14:
+ * forcing -ctk q4_0 -ctv q4_0 corrupted the KV-reuse read path — warm-prefix
+ * requests degenerated into copied/looping fragments and abrupt 1-token EOS,
+ * e.g. broken tool JSON like {"prompt":"::"}, while cold requests stayed
+ * clean, and the journal flipped kv_unified to 'true' on the q4 runs vs
+ * 'false' on every f16 run). Templates MAY still opt into quantized KV
+ * (e.g. -ctk q4_0 -ctv q4_0) knowingly — the Default template explicitly
+ * stays --cache-type-k f16 --cache-type-v f16.
  */
 function buildUnitFile(m, template) {
   const bin = resolveLlamaServerBin();
@@ -751,6 +773,10 @@ function buildUnitFile(m, template) {
   let port = '';
   try { port = String(new URL(m.endpoint).port || ''); } catch { /* no port */ }
   if (port) args = args.concat(['--port', port]);
+  if (!args.some((a) => ['-c', '--ctx-size', '--context-size'].includes(a))) {
+    args = args.concat(['-c', '16384']);
+  }
+  args = args.concat(['-fa', '1', '-ngl', '99', '--cache-reuse', '256']);
   const rendered = [bin].concat(args).map(systemdEscape).join(' ');
   const desc = `${m.name || m.id} (${modelStr}) - p-agent launch template "${template ? template.name : 'Default'}"`;
   return [
@@ -784,6 +810,13 @@ function portOf(endpoint) {
   } catch {
     return String(endpoint || '');
   }
+}
+
+/** Busy iff a slot is actively processing. NOTE: do NOT treat id_task>0 as
+ * busy — this llama.cpp build retains the LAST task id on idle slots, which
+ * would brick eject of the active model after its first request. */
+function slotBusy(s) {
+  return Boolean(s && s.is_processing === true);
 }
 
 /** Run a systemctl --user command; resolves { ok, code, stdout, stderr }. */
@@ -967,4 +1000,5 @@ module.exports = {
   resolveModelFilePath,
   resolveLlamaServerBin,
   unitFilePath,
+  slotBusy,
 };

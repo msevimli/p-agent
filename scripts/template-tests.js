@@ -117,6 +117,14 @@ try {
   t('unit substitutes <model-file> into --alias', unit.includes(`--alias qwen2.5-coder-1.5b-instruct-q5_k_m.gguf`));
   t('unit derives -m from the model', unit.includes('-m /home/hermesai/models/qwen2.5-coder-1.5b-instruct-q5_k_m.gguf'));
   t('unit renders fixed --host 0.0.0.0 bind + --port from endpoint', unit.includes('--host 0.0.0.0') && unit.includes('--port 8090'));
+  t('unit appends the always-on perf block LAST (last-wins)', unit.includes('-fa 1 -ngl 99 --cache-reuse 256'));
+  t('unit does NOT force KV quantization (CPU-stable f16 from llama.cpp default or template)', !unit.includes('q4_0') && unit.includes('--cache-type-k f16 --cache-type-v f16'));
+  t('unit does not duplicate -c when the template already sets it', (unit.match(/-c 16384/g) || []).length === 1, `count=${(unit.match(/-c 16384/g) || []).length}`);
+  const bare = modelLifecycle.buildUnitFile({ id: 'b', name: 'Bare', endpoint: 'http://127.0.0.1:8091', model: 'qwen2.5-coder-1.5b-instruct-q5_k_m.gguf' }, { name: 'Bare', args: ['--alias', '<model-file>', '--jinja'] });
+  t('unit default -c 16384 when the template has NO context flag', bare.includes('--port 8091 -c 16384 -fa 1 -ngl 99') && (bare.match(/-c 16384/g) || []).length === 1, `count=${(bare.match(/-c 16384/g) || []).length}`);
+  t('bare template keeps server-default KV type (no -ctk/-ctv forced)', !bare.includes('-ctk') && !bare.includes('-ctv'));
+  const optin = modelLifecycle.buildUnitFile({ id: 'q', name: 'OptIn', endpoint: 'http://127.0.0.1:8092', model: 'qwen2.5-coder-1.5b-instruct-q5_k_m.gguf' }, { name: 'OptIn', args: ['-ctk', 'q4_0', '-ctv', 'q4_0'] });
+  t('templates may still opt into quantized KV knowingly', optin.includes('-ctk q4_0 -ctv q4_0') && optin.includes('-fa 1 -ngl 99 --cache-reuse 256'));
   t('unit is a valid systemd skeleton', unit.includes('[Unit]') && unit.includes('[Service]') && unit.includes('Type=simple') && unit.includes('[Install]'));
   const quoted = modelLifecycle.buildUnitFile({ id: 'q', name: 'n', endpoint: 'http://127.0.0.1:1', model: 'my file.gguf' }, { name: 'T', args: ['--alias', 'my alias'] });
   t('systemd quoting for tokens with spaces', quoted.includes('my file.gguf"') && quoted.includes('"my alias"'));

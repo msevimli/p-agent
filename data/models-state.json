@@ -1,5 +1,5 @@
 {
-  "activeId": "nemotron-3-5",
+  "activeId": "qwen-coder",
   "models": [
     {
       "id": "qwen-coder",
@@ -7,7 +7,9 @@
       "provider": "local",
       "endpoint": "http://127.0.0.1:8081",
       "model": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-      "contextLength": 131072,
+      "contextLength": 16200,
+      "role": "",
+      "templateId": "new-template",
       "hasKey": false
     },
     {
@@ -124,4 +126,3 @@
     }
   ]
 }
-
