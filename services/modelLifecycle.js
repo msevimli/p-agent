@@ -281,21 +281,15 @@ async function probeModel(m, isActive) {
     return { ...publicStatus(m), lifecycle: 'unloaded', phase: null, since: e.since, detail: e.detail || `server not reachable (${st})`, online: false, busy: false, memory: null };
   }
 
-  // Server up: is a model actually loaded? (model-router servers may serve
-  // HTTP with zero models loaded.) Also capture the REAL loaded model name
-  // from /v1/models (read-only) so the status panel can show what the server
-  // actually serves, not just the registry label.
-  const models = await httpGetJson(modelManager.probeUrlFor(m.endpoint), { apiKey });
-  let loaded = true;
-  let serverModel = null;
-  try {
-    const parsed = JSON.parse(models.body);
-    if (Array.isArray(parsed.data)) {
-      if (parsed.data.length === 0) loaded = false;
-      const first = parsed.data[0];
-      if (first && typeof first.id === 'string') serverModel = first.id;
-    }
-  } catch { /* unparseable — trust /health */ }
+  // Server up: is a model actually loaded, and is it THIS model? Several
+  // registry entries may share one port, so a /health answer only proves some
+  // server is up — the served identity (/v1/models alias ids + /props
+  // model_path) decides. Matched -> lifecycle proceeds; foreign occupant ->
+  // 'conflict' (NOT online, Load instead of Eject); empty router -> unloaded.
+  const idn = await modelManager.servedIdentityFor(m.endpoint);
+  const loaded = idn.reachable ? idn.ids.length > 0 : true; // unknown identity -> trust /health
+  const serverModel = idn.ids[0] || (idn.modelPath ? String(idn.modelPath).split('/').pop() : null) || null;
+  const matched = idn.ids.length > 0 && modelManager.endpointServes(m, idn);
 
   // Slots: working/prefill detection + context capacity. Two signals are
   // combined because llama.cpp builds differ wildly:
@@ -355,6 +349,25 @@ async function probeModel(m, isActive) {
   if (!loaded) {
     setLifecycle(id, 'unloaded', { detail: 'server is up but no model is loaded (model-router mode)' });
     return { ...publicStatus(m), lifecycle: 'unloaded', phase: null, since: e.since, detail: e.detail, online: true, busy: false, memory, serverModel };
+  }
+
+  // PORT-SHARING CONFLICT: the port is alive but serves a DIFFERENT model
+  // (several registry entries share one endpoint). This entry is NOT loaded —
+  // report honestly (online:false, lifecycle 'conflict' -> Load, not Eject).
+  if (!matched) {
+    const portLabel = portOf(m.endpoint);
+    setLifecycle(id, 'unloaded', { detail: `port ${portLabel} is serving ${serverModel} — ${id} is NOT loaded` });
+    return {
+      ...publicStatus(m),
+      lifecycle: 'conflict',
+      phase: null,
+      since: e.since,
+      detail: `port ${portLabel} serves ${serverModel} (another model) — ${m.model || id} is not loaded; eject that model first or assign a different port`,
+      online: false,
+      busy: false,
+      memory: null,
+      serverModel,
+    };
   }
 
   const queueActive = !!isActive && !!requestQueue.stats().active;
@@ -545,6 +558,27 @@ async function eject(id) {
   const st = await modelManager.probeStatus(m.endpoint, apiKey);
   if (st !== 'online') {
     return { ok: false, code: 502, error: `llama.cpp server at ${m.endpoint} is not reachable (${st}) — nothing to eject.` };
+  }
+
+  // Identity guard: the port may serve a DIFFERENT model (shared endpoints).
+  // Never unload/stop a server whose occupant is not this model — unless this
+  // model's OWN unit is genuinely active (its own process to stop).
+  const idn = await modelManager.servedIdentityFor(m.endpoint);
+  if (idn.ids.length > 0 && !modelManager.endpointServes(m, idn)) {
+    const unit = cascadeService.unitNameFor(m);
+    let unitActive = false;
+    try {
+      if (fs.statSync(unitFilePath(m)).isFile()) {
+        unitActive = (await systemctlUser(['is-active', unit])).stdout.trim() === 'active';
+      }
+    } catch { /* no unit file */ }
+    if (!unitActive) {
+      return {
+        ok: false,
+        code: 409,
+        error: `${id} is NOT the model loaded on port ${portOf(m.endpoint)} — the server serves ${idn.ids[0]}; eject that model instead`,
+      };
+    }
   }
 
   // Tier 1: model-router mode — true unload.
@@ -742,6 +776,16 @@ function unitFilePath(m) {
   return path.join(SYSTEMD_USER_DIR, cascadeService.unitNameFor(m));
 }
 
+/** Port of an endpoint URL ('' endpoint -> the URL string itself). */
+function portOf(endpoint) {
+  try {
+    const u = new URL(String(endpoint || ''));
+    return String(u.port || (u.protocol === 'https:' ? '443' : '80'));
+  } catch {
+    return String(endpoint || '');
+  }
+}
+
 /** Run a systemctl --user command; resolves { ok, code, stdout, stderr }. */
 function systemctlUser(args) {
   return new Promise((resolve) => {
@@ -775,6 +819,18 @@ async function launch(id, { waitMs = 120000 } = {}) {
   const apiKey = modelManager.resolveApiKey(id);
   const st = await modelManager.probeStatus(m.endpoint, apiKey);
   if (st === 'online') {
+    // Port-sharing guard: the port may serve a DIFFERENT model (multiple
+    // registry entries share endpoints). already:true ONLY for the model the
+    // server actually serves; a foreign occupant is a 409, never a spawn
+    // attempt doomed to fail on a busy port.
+    const idn = await modelManager.servedIdentityFor(m.endpoint);
+    if (idn.ids.length > 0 && !modelManager.endpointServes(m, idn)) {
+      return {
+        ok: false,
+        code: 409,
+        error: `cannot load ${id}: port ${portOf(m.endpoint)} already serves ${idn.ids[0]} — eject that model first or assign ${id} a different port`,
+      };
+    }
     return { ok: true, already: true, id, detail: `${id} already online at ${m.endpoint}` };
   }
   const unit = cascadeService.unitNameFor(m);

@@ -72,9 +72,18 @@ re-rendered on the next Load when the template changed; hand-crafted units
 (no marker, e.g. a tuned `llama-router.service`) are preserved untouched.
 
 - `POST /api/models/:id/load` — spawn/verify the model's server (idempotent:
-  `{ok:true, already:true}` when online).
+  `{ok:true, already:true}` when online; **409** when the port already serves a
+  different model — the occupant must be ejected or the entry re-pointed to a
+  free port first).
 - `POST /api/models/:id/eject` — terminate and free RAM immediately
-  (live-verified: 14B eject freed ~9.3 GB in one call).
+  (live-verified: 14B eject freed ~9.3 GB in one call). Refuses (409) when the
+  port serves a different model and this model's own unit is not active —
+  ejecting never touches a foreign server.
+- **Identity-scoped status** — several registry entries may share one port
+  (e.g. six .gguf entries on 8081). Status verifies the served identity
+  (`/v1/models` alias ids + `/props` model_path against the entry's GGUF
+  name), so only the genuinely loaded model reports **online** with an Eject
+  button; same-port siblings report **conflict** ("port busy") with Load.
 - **Warm-on-activate** — activating a model also queues a background warm-up,
   so switching models does not cost a cold first turn.
 - **Warm-up** (`POST /api/models/warmup`) runs a `max_tokens=1` completion

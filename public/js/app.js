@@ -454,7 +454,7 @@
       <rect x="5" y="8" width="14" height="8" rx="1.5" />
       <path stroke-linecap="round" d="M9 8V6.5a3 3 0 0 1 6 0V8M9 12h.01M15 12h.01M9 16v1M15 16v1" /></svg>`;
 
-  const STATUS_LABEL = { online: 'online', offline: 'offline', unreachable: 'unreachable', timeout: 'timeout' };
+  const STATUS_LABEL = { online: 'online', offline: 'offline', unreachable: 'unreachable', timeout: 'timeout', conflict: 'port busy' };
 
   async function loadModels() {
     modelsListEl.innerHTML = '<div class="fe-muted">Loading models…</div>';

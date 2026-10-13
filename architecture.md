@@ -365,6 +365,17 @@ p-agent/
   hand-run servers with no unit (weights stayed resident — never claimed
   otherwise). Remote endpoints reject warm-up/eject/load with 400 — there are
   no local weights to manage.
+  **Identity-scoped status (port sharing):** several registry entries may
+  share one loopback port. `modelManager` resolves the served identity once
+  per endpoint per sweep (`/v1/models` alias ids — llama.cpp `--alias`
+  values — plus `/props` model_path, ~1.5s in-flight cache) and matches it
+  against each entry's GGUF name via `endpointServes`. Only the genuinely
+  loaded model reports online/lifecycle `ready`; same-port siblings get a
+  `conflict` lifecycle (online:false, "port busy" label, Load not Eject) and
+  registry status `conflict`; routers serving nothing report unloaded.
+  `launch()` returns 409 instead of spawning onto a port occupied by a
+  foreign model; `eject()` refuses (409) to unload/stop a server whose
+  occupant isn't the target unless the target's own unit is active.
   **Reasoning levels:** the 5-level controller (Off/Default/Low/Medium/High)
   rides every `/api/chat` body as `reasoningLevel`; routes/chat.js threads it
   onto the shared `gen` object so every `buildChatPayload` call site

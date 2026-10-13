@@ -361,6 +361,117 @@ function probeContextLength(endpoint) {
   });
 }
 
+// --------------------------------------------------- served-model identity
+// Several registry entries may share one loopback port (e.g. many .gguf
+// entries pointing at 8081). A port answering /health proves ONLY that SOME
+// llama-server is up — not that it serves the model being asked about. These
+// helpers resolve/serialize the identity of whatever the endpoint currently
+// serves (/v1/models alias ids — llama.cpp --alias values — plus /props
+// model_path) and match it against a registry entry, so status/load/eject are
+// scoped to the SPECIFIC model instance.
+
+const IDENTITY_CACHE_TTL_MS = 1500;
+
+function getJsonText(url) {
+  return new Promise((resolve) => {
+    const client = /^https:/i.test(url) ? https : http;
+    const opts = { timeout: 1500 };
+    let req;
+    try {
+      req = client.get(url, opts, (res) => {
+        let body = '';
+        res.on('data', (c) => { body += c; });
+        res.on('end', () => resolve(body));
+      });
+    } catch {
+      return resolve('');
+    }
+    req.on('timeout', () => { req.destroy(); resolve(''); });
+    req.on('error', () => resolve(''));
+  });
+}
+
+/**
+ * Pure parse of /v1/models + /props bodies into { reachable, ids, modelPath }.
+ * ids: alias ids from /v1/models (router servers list several;
+ * `/props.result` carries the same info in some builds). modelPath: the
+ * absolute path from /props (single-model servers).
+ */
+function parseServedIdentity(modelsBody, propsBody) {
+  const idn = { reachable: false, ids: [], modelPath: null };
+  try {
+    const parsed = JSON.parse(modelsBody || '{}');
+    if (Array.isArray(parsed.data)) {
+      idn.ids = parsed.data.map((d) => (d && typeof d.id === 'string' ? d.id : '')).filter(Boolean);
+      idn.reachable = true;
+    }
+  } catch { /* unparseable /v1/models */ }
+  try {
+    const p = JSON.parse(propsBody || '{}');
+    if (typeof p.model_path === 'string') {
+      idn.modelPath = p.model_path;
+      idn.reachable = true;
+    } else if (Array.isArray(p.result)) {
+      const ids = p.result
+        .map((x) => (x && (typeof x.id === 'string' || typeof x.model === 'string') ? String(x.id || x.model) : ''))
+        .filter(Boolean);
+      if (ids.length) {
+        for (const id of ids) if (!idn.ids.includes(id)) idn.ids.push(id);
+        idn.reachable = true;
+      }
+    }
+  } catch { /* no /props */ }
+  return idn;
+}
+
+function fetchServedIdentity(endpoint) {
+  if (!isLoopback(endpoint)) return Promise.resolve({ reachable: false, ids: [], modelPath: null });
+  const base = String(endpoint).replace(/\/+$/, '');
+  return Promise.all([getJsonText(`${base}/v1/models`), getJsonText(`${base}/props`)]).then(([m, p]) =>
+    parseServedIdentity(m, p)
+  );
+}
+
+const servedIdentityCache = new Map(); // endpoint -> { at, promise }
+
+/**
+ * Identity of whatever the endpoint currently serves, cached ~1.5s across
+ * callers so a status sweep over N entries sharing one port performs ONE
+ * fetch pair per endpoint instead of N.
+ */
+function servedIdentityFor(endpoint) {
+  const hit = servedIdentityCache.get(endpoint);
+  if (hit && Date.now() - hit.at < IDENTITY_CACHE_TTL_MS) return hit.promise;
+  const promise = fetchServedIdentity(endpoint);
+  servedIdentityCache.set(endpoint, { at: Date.now(), promise });
+  return promise;
+}
+
+/** Identity keys for a registry entry: model file name, id, modelId. */
+function identityKeys(m) {
+  return [String((m && (m.model || m.modelId)) || ''), String((m && m.id) || ''), String((m && m.modelId) || '')]
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Does the endpoint ACTUALLY serve this registry entry? Matches /v1/models
+ * alias ids (with --alias <model-file> the id IS the gguf name) and the
+ * /props model_path basename (hand-run servers without --alias report the
+ * absolute path, whose basename equals the gguf file). false when the served
+ * identity is unknown (ids list empty) — callers decide how to treat that.
+ */
+function endpointServes(m, idn) {
+  if (!m || !idn) return false;
+  const keys = identityKeys(m);
+  if (idn.ids.some((id) => keys.some((k) => k === id || id.endsWith('/' + k)))) return true;
+  if (typeof idn.modelPath === 'string' && idn.modelPath !== '') {
+    const base = idn.modelPath.split('/').pop() || '';
+    if (keys.some((k) => k === base || k.endsWith(base) || base.endsWith(k))) return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------- public API
 /** All models with active flag and live status. */
 async function listModels() {
@@ -369,10 +480,19 @@ async function listModels() {
     state.models.map(async (m) => {
       const pub = publicModel(m);
       pub.active = m.id === state.activeId;
-      const [liveStatus, liveCtx] = await Promise.all([
+      const [liveStatus0, liveCtx] = await Promise.all([
         probeStatus(m.endpoint, resolveApiKey(m.id)),
         probeContextLength(m.endpoint),
       ]);
+      // Port-sharing guard: several registry entries may share one endpoint.
+      // /health says "a server is up" — verify it serves THIS model before
+      // reporting online; a foreign occupant gets status 'conflict' (the UI
+      // shows Load, not Eject, for anything but 'online').
+      let liveStatus = liveStatus0;
+      if (liveStatus0 === 'online' && isLoopback(m.endpoint)) {
+        const idn = await servedIdentityFor(m.endpoint);
+        if (idn.ids.length > 0 && !endpointServes(m, idn)) liveStatus = 'conflict';
+      }
       pub.status = liveStatus;
       // Live context wins for local llama.cpp servers; static value is the fallback.
       if (liveCtx) pub.contextLength = liveCtx;
@@ -614,4 +734,11 @@ module.exports = {
   probeUrlFor,
   detectProvider,
   categoryFor,
+  // served-model identity (port-sharing guard)
+  parseServedIdentity,
+  fetchServedIdentity,
+  servedIdentityFor,
+  endpointServes,
+  identityKeys,
+  _identityCache: servedIdentityCache,
 };

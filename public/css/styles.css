@@ -671,6 +671,8 @@ html.dark .model-endpoint { color: #7dd3fc; }
 .model-status.offline .dot { background: #ef4444; }
 .model-status.unreachable, .model-status.timeout { color: #d97706; }
 .model-status.unreachable .dot, .model-status.timeout .dot { background: #f59e0b; }
+.model-status.conflict { color: #b45309; }
+.model-status.conflict .dot { background: #f59e0b; box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.25); }
 
 /* footer: focus actions */
 .model-actions {
