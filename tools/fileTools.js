@@ -40,7 +40,7 @@ const readFileTool = {
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Workspace-relative file path' },
+      path: { type: 'string', description: 'Workspace-relative file path, e.g. "scripts/get_solana_price.py"' },
       offset: { type: 'number', description: 'First line to read (1-based, default 1)' },
       limit: { type: 'number', description: 'Max lines to read (default: to EOF, capped by size)' },
     },
@@ -76,6 +76,23 @@ const readFileTool = {
         content,
       };
     } catch (e) {
+      // Log files under logs/ (or log-named paths) don't exist until the
+      // automation's first scheduled run — sharpen the error so the model
+      // stops pre-reading output it can't have yet (the old generic ENOENT
+      // triggered retry loops).
+      const rel = relOf(abs);
+      const base = String(rel).split(/[\\/]/).pop() || '';
+      const looksLikeLog = /^logs\//.test(String(rel)) || /\.log$/i.test(base) || /^log/i.test(base);
+      if (e && e.code === 'ENOENT' && looksLikeLog) {
+        return {
+          ok: false,
+          error:
+            `${rel} does not exist yet — log files are only written when the automation runs on its ` +
+            `schedule (or after a run_automation trigger). It is NORMAL for it to be absent right ` +
+            `after creation. Do not re-read it in this task; to get it now, trigger the automation ` +
+            `with run_automation once, then read it.`,
+        };
+      }
       return fail(e);
     }
   },
@@ -88,7 +105,7 @@ const writeFileTool = {
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Workspace-relative file path' },
+      path: { type: 'string', description: 'Workspace-relative file path, e.g. "scripts/get_solana_price.py"' },
       content: {
         type: ['string', 'array'],
         description: 'File content, or an array of lines joined with newlines',
@@ -117,7 +134,7 @@ const editFileTool = {
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Workspace-relative file path' },
+      path: { type: 'string', description: 'Workspace-relative file path, e.g. "scripts/get_solana_price.py"' },
       old_text: { type: 'string', description: 'Exact text to replace' },
       new_text: { type: 'string', description: 'Replacement text' },
       replace_all: { type: 'boolean', description: 'Replace every occurrence instead of just the first (default false)' },
@@ -157,7 +174,7 @@ const listFilesTool = {
     properties: {
       path: {
         type: 'string',
-        description: 'Workspace-relative directory path (defaults to the workspace root)',
+        description: 'Workspace-relative directory path, e.g. "scripts" (defaults to the workspace root)',
       },
       recursive: {
         type: 'boolean',
@@ -219,4 +236,37 @@ const listFilesTool = {
   },
 };
 
-module.exports = { tools: [readFileTool, writeFileTool, editFileTool, listFilesTool], resolveWithin, ROOT };
+const deleteFileTool = {
+  name: 'delete_file',
+  description:
+    'Permanently delete a file in the workspace (like rm <file>). Fails cleanly for directories, ' +
+    'missing files and paths outside the workspace.',
+  parameters: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Workspace-relative path of the file to delete, e.g. "scripts/old.py"' },
+    },
+    required: ['path'],
+  },
+  execute(args) {
+    const abs = resolveWithin(args && args.path);
+    if (!abs) return { ok: false, error: 'path escapes the allowed workspace' };
+    let st;
+    try {
+      st = fs.statSync(abs);
+    } catch (e) {
+      return { ok: false, error: `no such file: ${relOf(abs)}` };
+    }
+    if (st.isDirectory()) {
+      return { ok: false, error: `${relOf(abs)} is a directory — delete_file removes single files only` };
+    }
+    try {
+      fs.unlinkSync(abs);
+    } catch (e) {
+      return fail(e);
+    }
+    return { ok: true, deleted: true, path: relOf(abs) };
+  },
+};
+
+module.exports = { tools: [readFileTool, writeFileTool, editFileTool, listFilesTool, deleteFileTool], resolveWithin, ROOT };

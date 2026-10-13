@@ -28,6 +28,7 @@ const path = require('path');
 const http = require('http');
 const https = require('https');
 const config = require('../config');
+const templateStore = require('./templateStore');
 
 const STATE_FILE = path.join(config.dataDir, 'models-state.json');
 const DOTENV_FILE = config.dotEnvFile;
@@ -147,6 +148,21 @@ function detectProvider(endpoint, explicit) {
   return 'remote';
 }
 
+/**
+ * Models-panel section category for an entry:
+ *   'cascade' — member of the two-stage cascade pair (role router/primary);
+ *   'local'   — standalone local llama.cpp server (loopback, no cascade role);
+ *   'cloud'   — remote OpenAI-compatible / OpenRouter endpoint.
+ * The cascade category is role-driven (not endpoint-driven): a remote model
+ * mis-configured with a role still lands in the cascade section so the
+ * mismatch is visible instead of silently hidden in Cloud.
+ */
+function categoryFor(m) {
+  const role = String(m && m.role || '');
+  if (role === 'router' || role === 'primary') return 'cascade';
+  return isLoopback(m && m.endpoint) ? 'local' : 'cloud';
+}
+
 /** Strip secrets from a model before sending it to the client (still has hasKey). */
 function publicModel(m, opts) {
   if (!m) return null;
@@ -163,6 +179,9 @@ function publicModel(m, opts) {
     model: m.model,
     contextLength: m.contextLength,
     provider: m.provider || 'local',
+    role: String(m.role || ''),
+    templateId: String(m.templateId || ''),
+    category: categoryFor(m),
     hasKey,
     active: false,
   };
@@ -231,6 +250,18 @@ function validate(body) {
   // clamped rather than rejecting.
   contextLength = Math.min(contextLength, 1000000);
   if (errs.length) return { ok: false, errors: errs };
+  // Cascade role (optional): 'router' (fast stage-1 model) or 'primary'
+  // (heavy stage-2 model); anything else is treated as unset. Roles are
+  // re-resolved per request (services/cascade.js), so edits apply instantly.
+  const role = typeof b.role === 'string' ? b.role.trim().toLowerCase() : '';
+  // Launch template (optional): a template id from services/templateStore;
+  // '' = unset (the built-in default applies when the lifecycle manager
+  // generates a launch unit for a model that has no unit yet).
+  const templateId = String(b.templateId || '').trim();
+  if (templateId && !templateStore.get(templateId)) {
+    errs.push(`launch template not found: ${templateId}`);
+  }
+  if (errs.length) return { ok: false, errors: errs };
   return {
     ok: true,
     id: b.id,
@@ -239,6 +270,8 @@ function validate(body) {
     endpoint: String(b.endpoint).trim().replace(/\/+$/, ''),
     model: String(model).trim(),
     contextLength,
+    role: role === 'router' || role === 'primary' ? role : '',
+    templateId,
   };
 }
 
@@ -373,6 +406,11 @@ function getModel(id, opts) {
   return m ? publicModel(m, opts) : null;
 }
 
+/** Raw registry snapshot ({ activeId, models }) — role/cascade consumers. */
+function getState() {
+  return loadState();
+}
+
 /** Set the active model. Unknown id → error. */
 function setActive(id) {
   const state = loadState();
@@ -401,10 +439,15 @@ function createModel(body) {
     endpoint: v.endpoint,
     model: v.model,
     contextLength: v.contextLength,
+    role: v.role,
+    templateId: v.templateId,
   };
   // First model becomes active by default.
   if (state.models.length === 0) state.activeId = v.id;
   state.models.push(entry);
+  // Assigning a role here steals it from any other current holder — the
+  // cascade pair stays unique even when roles are set via the model editor.
+  clearDuplicateRoles(state, entry);
   saveState(state);
   // A key from the dashboard goes to .env (gitignored) — never into the
   // registry, which stays plaintext-secret-free by construction.
@@ -431,6 +474,8 @@ function updateModel(id, body) {
   }
   if (patch.contextLength === undefined) patch.contextLength = existing.contextLength;
   if (patch.provider === undefined) patch.provider = existing.provider;
+  if (patch.role === undefined) patch.role = existing.role;
+  if (patch.templateId === undefined) patch.templateId = existing.templateId;
   const v = validate(patch);
   if (!v.ok) return { ok: false, errors: v.errors };
 
@@ -449,6 +494,8 @@ function updateModel(id, body) {
     endpoint: v.endpoint,
     model: v.model,
     contextLength: v.contextLength,
+    role: v.role,
+    templateId: v.templateId,
   };
   // apiKey semantics: a non-blank value updates the per-model var in .env; an
   // explicit blank/null clears it. Omitting apiKey leaves the stored var
@@ -462,6 +509,9 @@ function updateModel(id, body) {
   }
 
   state.models[idx] = entry;
+  // Role exclusivity (see clearDuplicateRoles): saving a model with role
+  // 'router'/'primary' clears that role from whatever model held it before.
+  clearDuplicateRoles(state, entry);
   if (state.activeId === id) state.activeId = targetId;
   saveState(state);
   const m = publicModel(entry);
@@ -485,20 +535,83 @@ function deleteModel(id) {
   return { ok: true, deleted: true, active: state.activeId };
 }
 
+// ---------------------------------------------------------------- cascade roles
+/**
+ * Enforce cascade-role uniqueness: when `keep` carries a cascade role
+ * ('router'|'primary'), strip that SAME role from every other entry. Called
+ * on every create/update and by setCascadeRoles(), so the registry can never
+ * hold two routers or two primaries (resolveFrom() would silently pick the
+ * first). Returns true when something changed.
+ */
+function clearDuplicateRoles(state, keep) {
+  const role = keep && keep.role;
+  if (role !== 'router' && role !== 'primary') return false;
+  let changed = false;
+  for (const m of state.models) {
+    if (m !== keep && m.role === role) {
+      m.role = '';
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
+ * Atomically assign the two-stage cascade pair: `routerId` becomes role
+ * 'router', `primaryId` becomes role 'primary'; every other model's role is
+ * cleared. Either id may be null/'' to unset that stage (both empty clears
+ * the whole cascade). The ids must exist and must be two different models.
+ * Saves once. Roles are re-read from disk on every request (cascade.resolve
+ * in services/cascade.js), so chat routing switches to the new pair
+ * instantly — no restart.
+ */
+function setCascadeRoles(routerId, primaryId) {
+  const state = loadState();
+  const byId = (id) => {
+    const key = id !== null && id !== undefined ? String(id) : '';
+    return key ? state.models.find((m) => m.id === key) || null : null;
+  };
+  const router = byId(routerId);
+  const primary = byId(primaryId);
+  if (routerId && !router) return { ok: false, error: `model not found: ${routerId}` };
+  if (primaryId && !primary) return { ok: false, error: `model not found: ${primaryId}` };
+  if (router && primary && router.id === primary.id) {
+    return { ok: false, error: 'router and primary must be two different models' };
+  }
+  let changed = false;
+  for (const m of state.models) {
+    if (m.role) { m.role = ''; changed = true; }
+  }
+  if (router) { router.role = 'router'; changed = true; }
+  if (primary) { primary.role = 'primary'; changed = true; }
+  // Assigning a cascade pair ACTIVATES the primary: the resolver only runs
+  // the two-stage cascade while the selected model IS the configured primary,
+  // so pair assignment must select it too — otherwise the panel's "assign
+  // pair" would silently leave the system in single-model mode.
+  if (primary) state.activeId = primary.id;
+  if (changed) saveState(state);
+  const share = (m) => (m ? { id: m.id, name: m.name, role: m.role } : null);
+  return { ok: true, router: share(router), primary: share(primary), activeId: primary ? primary.id : null };
+}
+
 module.exports = {
   STATE_FILE,
   DOTENV_FILE,
   listModels,
   getActiveModel,
   getModel,
+  getState,
   setActive,
   createModel,
   updateModel,
   deleteModel,
+  setCascadeRoles,
+  clearDuplicateRoles,
   resolveApiKey,
   writeDotEnvVar,
   envVarForModel,
   probeStatus,
   probeUrlFor,
   detectProvider,
+  categoryFor,
 };

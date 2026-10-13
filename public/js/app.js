@@ -9,6 +9,18 @@
     currentMessages: [],
     streaming: false,
     settings: { temperature: 0.7, top_p: 0.95, max_tokens: 2048 },
+    // Reasoning effort/visibility controller (Off|Default|Low|Medium|High),
+    // persisted; 'off' hides thinking panels AND asks the backend to disable
+    // reasoning (reasoning_effort:'none' / no budget). Migrates the earlier
+    // binary pagent.showReasoning preference ('0' -> off).
+    reasoningLevel: (() => {
+      try {
+        const v = localStorage.getItem('pagent.reasoningLevel');
+        if (v && ['off', 'default', 'low', 'medium', 'high'].includes(v)) return v;
+        if (localStorage.getItem('pagent.showReasoning') === '0') return 'off';
+        return 'default';
+      } catch { return 'default'; }
+    })(),
     context: { window: 8192, inputTokens: 0, outputTokens: 0, source: 'estimated' },
     lastUsage: null, // { sessionId, prompt_tokens, completion_tokens } from llama
     pendingDeleteId: null, // session awaiting inline delete confirmation
@@ -16,6 +28,16 @@
     view: 'chat', // 'chat' | 'files' — which panel is shown in the main area
     fsDir: '', // current directory in the File Explorer (workspace-relative; '' = root)
     attachments: [], // [{ id, name, size }] queued for the next chat message
+    // Models-panel accordion: per-category ('cloud'|'local'|'cascade') open
+    // state. null until the first render, which seeds it smartly (only the
+    // section holding the active model or a cascade role expands); the
+    // delegated toggle handler updates it after that, so re-renders preserve
+    // the user's manual choices.
+    modelsSections: null,
+    // Models-panel tabs: 'models' | 'templates'.
+    modelsTab: 'models',
+    // Launch-template cache [{ id, name, description, builtin, args }].
+    templates: [],
   };
 
   // ------------------------------------------------------------- dom refs
@@ -25,6 +47,8 @@
   const sessionListEl = $('#sessionList');
   const promptInput = $('#promptInput');
   const sendBtn = $('#sendBtn');
+  const genTimerEl = $('#genTimer');
+  const skillPickerEl = $('#skillPicker');
   const statusDot = $('#statusDot');
   const statusText = $('#statusText');
   const statusPill = $('#statusPill');
@@ -48,6 +72,8 @@
   const contextSummary = $('#contextSummary');
   const contextPopover = $('#contextPopover');
   const settingsPopover = $('#settingsPopover');
+  const reasoningMenu = $('#reasoningMenu');
+  const reasoningLevelLabel = $('#reasoningLevelLabel');
   const genSettingsBtn = $('#genSettingsBtn');
   const tempRange = $('#tempRange');
   const tempVal = $('#tempVal');
@@ -77,6 +103,17 @@
   const modelsRefresh = $('#modelsRefresh');
   const modelsAddBtn = $('#modelsAddBtn');
   const modalEl = $('#modelModal');
+
+  // System view refs
+  const systemViewEl = $('#systemView');
+  const systemBtn = $('#systemBtn');
+  const systemBackChat = $('#systemBackChat');
+  const systemRefresh = $('#systemRefresh');
+  const systemPromptText = $('#systemPromptText');
+  const systemSaveBtn = $('#systemSaveBtn');
+  const systemResetBtn = $('#systemResetBtn');
+  const systemSourceBadge = $('#systemSourceBadge');
+  const systemSaveState = $('#systemSaveState');
   const modelForm = $('#modelForm');
   const modelFormError = $('#modelFormError');
   const modelModalTitle = $('#modelModalTitle');
@@ -87,6 +124,25 @@
   const modelModelId = $('#modelModelId');
   const modelCtx = $('#modelCtx');
   const modelApiKey = $('#modelApiKey');
+  const modelRole = $('#modelRole');
+  const modelTemplate = $('#modelTemplate');
+  // Templates tab + editor modal refs
+  const modelsTabBtn = $('#modelsTabBtn');
+  const templatesTabBtn = $('#templatesTabBtn');
+  const templatesListEl = $('#templatesList');
+  const templatesAddBtn = $('#templatesAddBtn');
+  const templatesRefresh = $('#templatesRefresh');
+  const modelsExplainer = $('#modelsExplainer');
+  const templatesExplainer = $('#templatesExplainer');
+  const templateModalEl = $('#templateModal');
+  const templateForm = $('#templateForm');
+  const templateFormError = $('#templateFormError');
+  const templateModalTitle = $('#templateModalTitle');
+  const templateIdEl = $('#templateId');
+  const templateName = $('#templateName');
+  const templateDesc = $('#templateDesc');
+  const templateArgs = $('#templateArgs');
+  const templateLockedNote = $('#templateLockedNote');
 
   // Automations view + editor modal refs
   const automationsViewEl = $('#automationsView');
@@ -184,14 +240,22 @@
   $('#menuBtn').addEventListener('click', openSidebar);
   $('#sidebarBackdrop').addEventListener('click', closeSidebar);
 
-  // ------------------------------------------------------------- sidebar accordion
+  // ------------------------------------------------------------- accordion
   // Toggle a collapsible section (header + its body share the .open state).
-  document.querySelectorAll('.section-header').forEach((h) => {
-    h.addEventListener('click', () => {
-      const open = h.classList.toggle('open');
-      const body = h.nextElementSibling;
-      if (body) body.classList.toggle('open', open);
-    });
+  // Delegated (not bound at init) so dynamically rendered sections — e.g. the
+  // Models panel categories — collapse/expand too, matching the sidebar.
+  document.addEventListener('click', (e) => {
+    const h = e.target.closest('.section-header');
+    if (!h) return;
+    const open = h.classList.toggle('open');
+    const body = h.nextElementSibling;
+    if (body) body.classList.toggle('open', open);
+    // Models-panel sections: persist the user's choice so the next render
+    // (refresh, activate, role change…) doesn't reset it. Sidebar sections
+    // have no .model-section ancestor and stay stateless.
+    const sec = h.closest('.model-section');
+    const cat = sec && /(?:^|\s)cat-([a-z]+)/.exec(sec.className);
+    if (cat && state.modelsSections) state.modelsSections[cat[1]] = open;
   });
 
   // ------------------------------------------------------------- view switching
@@ -203,6 +267,7 @@
     library: libraryViewEl,
     automations: automationsViewEl,
     channels: channelsViewEl,
+    system: systemViewEl,
   };
   const SUBTITLES = {
     chat: 'Local AI Agent',
@@ -212,6 +277,7 @@
     library: 'Library',
     automations: 'Automations',
     channels: 'Channels',
+    system: 'System',
   };
   const NAV_BTNS = {
     chat: null,
@@ -221,6 +287,7 @@
     library: libraryBtn,
     automations: automationsBtn,
     channels: channelsBtn,
+    system: systemBtn,
   };
 
   function showView(name) {
@@ -236,6 +303,7 @@
     if (name === 'library') loadLibrary();
     if (name === 'automations') loadAutomations();
     if (name === 'channels') loadChannels();
+    if (name === 'system') loadSystemPrompt();
   }
 
   // ------------------------------------------------------------- skills view
@@ -251,6 +319,8 @@
       return;
     }
     renderSkills(data.skills);
+    // Keep the slash-picker cache in sync with the Skills view (same data).
+    refreshPickerSkills(data.skills);
   }
 
   const TRASH_ICON = `<svg class="ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
@@ -397,7 +467,7 @@
       modelsListEl.innerHTML = `<div class="fe-muted fs-error">⚠️ ${escapeHtml(err.message)}</div>`;
       return;
     }
-    renderModels(data.models);
+    renderModels(data.models, data.cascade);
   }
 
   function modelStatus(status) {
@@ -405,23 +475,212 @@
     return `<span class="model-status ${escapeHtml(status)}"><span class="dot"></span>${label}</span>`;
   }
 
-  function renderModels(models) {
+  const MODEL_SECTIONS = [
+    {
+      key: 'cloud',
+      title: 'Cloud / Online APIs',
+      icon: '☁️',
+      hint: 'Remote OpenAI-compatible providers — OpenRouter and other hosted APIs with a key.',
+    },
+    {
+      key: 'local',
+      title: 'Local Models',
+      icon: '🖥️',
+      hint: 'Standalone llama.cpp servers running on this machine.',
+    },
+    {
+      key: 'cascade',
+      title: 'Two-Stage Cascading (Hybrid)',
+      icon: '🔀',
+      hint: 'Hybrid: a fast 1.5B router (intent + tool calls) feeding a heavy 7B primary (final answers).',
+    },
+  ];
+
+  /**
+   * First-render accordion defaults: only the section that is IN USE expands —
+   * the one holding the active model, plus the cascade section when any
+   * router/primary role is configured. Everything else starts collapsed.
+   * Called once; from then on state.modelsSections mirrors the user's manual
+   * toggles (see the delegated .section-header handler).
+   */
+  function defaultModelsSections(models) {
+    const open = new Set();
+    for (const m of models || []) {
+      if (!m) continue;
+      if (m.active) open.add(m.category);
+      if (m.role === 'router' || m.role === 'primary') open.add('cascade');
+    }
+    return {
+      cloud: open.has('cloud'),
+      local: open.has('local'),
+      cascade: open.has('cascade'),
+    };
+  }
+
+  /** Render the Models panel as collapsible, labeled category sections. */
+  function renderModels(models, cascadeInfo) {
     modelsListEl.innerHTML = '';
+    if (!state.modelsSections) state.modelsSections = defaultModelsSections(models);
     if (!models.length) {
       modelsListEl.innerHTML = '<div class="fe-muted">No models configured yet. Click "Add model" to create one.</div>';
       return;
     }
-    for (const m of models) {
-      const card = document.createElement('div');
-      card.className = 'model-card' + (m.active ? ' active-model' : '');
-      card.setAttribute('data-model', m.id);
-      card.innerHTML = `
+    for (const s of MODEL_SECTIONS) {
+      const list = models.filter((m) => m.category === s.key);
+      // Collapsed-without-clutter: Cloud/Local hide when empty; the cascade
+      // section always renders — it is the headline feature and shows an
+      // empty-state hint instead of disappearing.
+      if (s.key !== 'cascade' && !list.length) continue;
+
+      const open = state.modelsSections[s.key] !== false;
+      const section = document.createElement('div');
+      section.className = 'model-section cat-' + s.key;
+      const header = document.createElement('button');
+      header.className = 'section-header model-section-header' + (open ? ' open' : '');
+      header.title = 'Toggle ' + s.title;
+      header.innerHTML =
+        `<svg class="chev" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">` +
+        `<path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>` +
+        `<span class="ms-icon">${s.icon}</span>` +
+        `<span class="ms-title">${s.title}</span>` +
+        (s.key === 'cascade'
+          ? `<span class="ms-badge ${cascadeInfo && cascadeInfo.enabled ? 'on' : 'off'}">` +
+            `${cascadeInfo && cascadeInfo.enabled ? 'cascade enabled' : 'cascade disabled'}</span>`
+          : '') +
+        `<span class="ms-count">${list.length} model${list.length === 1 ? '' : 's'}</span>`;
+      const body = document.createElement('div');
+      body.className = 'section-body' + (open ? ' open' : '');
+      const inner = document.createElement('div');
+      inner.className = 'section-body-inner';
+      if (s.key === 'cascade') {
+        // Pass the FULL registry (not just cascade-section members) so the
+        // role dropdowns can offer every registered model as a candidate.
+        const summary = cascadeCard(cascadeInfo, models);
+        if (summary) inner.appendChild(summary);
+      }
+      if (!list.length) {
+        const empty = document.createElement('div');
+        empty.className = 'fe-muted model-section-empty';
+        empty.innerHTML = escapeHtml(s.hint);
+        inner.appendChild(empty);
+      }
+      list.forEach((m) => inner.appendChild(modelCard(m)));
+      body.appendChild(inner);
+      section.appendChild(header);
+      section.appendChild(body);
+      modelsListEl.appendChild(section);
+    }
+  }
+
+  /** Load/Eject a local model's llama-server via its systemd unit. The
+   *  fetch resolves only when the endpoint answered /health (load) or the
+   *  unit stopped (eject) — the button text doubles as the spinner. */
+  async function lifecycleAction(id, action, btn) {
+    btn.disabled = true;
+    btn.textContent = action === 'load' ? 'Loading…' : 'Ejecting…';
+    try {
+      const res = await fetch(`/api/models/${encodeURIComponent(id)}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || `${action} failed`);
+      modelToast(action === 'load' ? `Loaded ${id} — ${data.unit || 'unit'} online` : `Ejected ${id} — memory freed`);
+    } catch (err) {
+      modelToast(err.message);
+    }
+    loadModels();
+  }
+
+  // ------------------------------------------------------------- system view
+  function applySystemState(data) {
+    // data: { prompt, source, overridden }; fills textarea + badge.
+    systemPromptText.value = data.prompt;
+    systemSourceBadge.classList.toggle('hidden', !data.overridden);
+    systemSaveState.textContent = data.overridden
+      ? `Custom prompt active (saved ${new Date().toLocaleTimeString()})`
+      : 'Showing the built-in template — unsaved edits have not been applied yet';
+  }
+
+  async function loadSystemPrompt() {
+    systemSaveState.textContent = 'Loading…';
+    let data;
+    try {
+      const res = await fetch('/api/system/prompt');
+      data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not load system prompt');
+      applySystemState(data);
+    } catch (err) {
+      systemSaveState.textContent = '';
+      modelToast(err.message);
+      systemPromptText.value = '';
+    }
+  }
+
+  async function saveSystemPrompt() {
+    const prompt = systemPromptText.value;
+    if (!prompt.trim()) {
+      modelToast('System prompt must not be empty');
+      return;
+    }
+    systemSaveBtn.disabled = true;
+    try {
+      const res = await fetch('/api/system/prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not save system prompt');
+      applySystemState(data);
+      modelToast('System prompt saved — applies from the next chat turn');
+    } catch (err) {
+      modelToast(err.message);
+    } finally {
+      systemSaveBtn.disabled = false;
+    }
+  }
+
+  async function resetSystemPrompt() {
+    if (!confirm('Reset the system prompt to the built-in template? Your custom prompt will be deleted.')) return;
+    systemResetBtn.disabled = true;
+    try {
+      const res = await fetch('/api/system/prompt', { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not reset system prompt');
+      applySystemState(data);
+      modelToast('System prompt reset to the built-in template');
+    } catch (err) {
+      modelToast(err.message);
+    } finally {
+      systemResetBtn.disabled = false;
+    }
+  }
+
+  systemBackChat.addEventListener('click', () => showView('chat'));
+  systemRefresh.addEventListener('click', loadSystemPrompt);
+  systemSaveBtn.addEventListener('click', saveSystemPrompt);
+  systemResetBtn.addEventListener('click', resetSystemPrompt);
+
+  /** One model card; renders identically in every category section. */
+  function modelCard(m) {
+    const card = document.createElement('div');
+    card.className = 'model-card' + (m.active ? ' active-model' : '');
+    card.setAttribute('data-model', m.id);
+    const roleChip = m.role
+      ? `<span class="model-role-chip ${escapeHtml(m.role)}" title="` +
+        `${m.role === 'router' ? 'Router — fast stage-1: intent + tool calls' : 'Primary — heavy stage-2: final answers'}">` +
+        `${escapeHtml(m.role)}</span>`
+      : '';
+    card.innerHTML = `
         <div class="model-card-row">
           <span class="model-ic">${MODEL_ICON}</span>
           <div class="model-main">
             <div class="model-name">
               ${escapeHtml(m.name)}
               ${m.active ? '<span class="model-active-tag">active</span>' : ''}
+              ${roleChip}
             </div>
             <div class="model-desc">${escapeHtml(m.model)}</div>
             <div class="model-grid">
@@ -449,17 +708,176 @@
             title="${m.active ? 'This is the active model' : 'Use this model for the next message'}">
             ${m.active ? 'Active' : 'Set active'}
           </button>
+          ${m.category === 'cloud' ? '' : `
+          <button class="model-load" data-load="${escapeHtml(m.id)}" ${m.status === 'online' ? 'hidden' : ''}
+            title="Start llama-server for this model (unit llama-${escapeHtml(m.id)}.service) and wait for /health">Load</button>
+          <button class="model-eject" data-eject="${escapeHtml(m.id)}" ${m.status === 'online' ? '' : 'hidden'}
+            title="Stop this model's llama-server and free its memory immediately">Eject</button>`}
           <div class="model-edit-del">
             <button class="model-edit" data-edit="${escapeHtml(m.id)}" title="Edit ${escapeHtml(m.name)}">Edit</button>
             ${m.active ? '' : `<button class="model-del" data-del="${escapeHtml(m.id)}" title="Delete ${escapeHtml(m.name)}">Delete</button>`}
           </div>
         </div>`;
-      card.querySelector('[data-set]').addEventListener('click', () => setActiveModel(m.id, card));
-      card.querySelector('[data-edit]').addEventListener('click', () => openModelModal(m.id));
-      const del = card.querySelector('[data-del]');
-      if (del) del.addEventListener('click', () => deleteModel(m.id));
-      modelsListEl.appendChild(card);
+    card.querySelector('[data-set]').addEventListener('click', () => setActiveModel(m.id, card));
+    card.querySelector('[data-edit]').addEventListener('click', () => openModelModal(m.id));
+    const loadBtn = card.querySelector('[data-load]');
+    if (loadBtn) loadBtn.addEventListener('click', () => lifecycleAction(m.id, 'load', loadBtn));
+    const ejectBtn = card.querySelector('[data-eject]');
+    if (ejectBtn) ejectBtn.addEventListener('click', () => lifecycleAction(m.id, 'eject', ejectBtn));
+    const del = card.querySelector('[data-del]');
+    if (del) del.addEventListener('click', () => deleteModel(m.id));
+    return card;
+  }
+
+  /** Router → primary flow card at the top of the cascade section. */
+  // Shared by cascadeCard and cascadeRoleSelect (endpoint → ':port').
+  function portOf(model) {
+    try { return ':' + (new URL(model.endpoint).port || ''); } catch { return ''; }
+  }
+
+  function cascadeCard(cascadeInfo, allModels) {
+    const info = cascadeInfo || {};
+    const r = info.router;
+    const p = info.primary;
+    let hint;
+    if (info.enabled) {
+      hint =
+        `Stage 1 <strong>${escapeHtml(r.name)}</strong>${r.endpoint ? ' (' + escapeHtml(r.endpoint) + ')' : ''} picks intent and emits tool calls; simple chat is answered directly. ` +
+        `Everything else escalates to stage 2 <strong>${escapeHtml(p.name)}</strong>${p.endpoint ? ' (' + escapeHtml(p.endpoint) + ')' : ''}. Escalation mode: ${escapeHtml(info.escalate || 'marker')}.`;
+    } else if (r || p) {
+      hint = 'Cascade is <strong>off</strong>: the router must be a local (127.0.0.1) llama.cpp endpoint and must differ from the primary. Pick the pair below, then start the servers.';
+    } else {
+      hint = 'No cascade configured yet. Pick the <strong>Router</strong> and <strong>Primary</strong> models below — the pair activates as soon as both are set, then start the servers.';
     }
+    const card = document.createElement('div');
+    card.className = 'cascade-card';
+    card.innerHTML = `
+        <div class="cascade-flow">
+          <span class="cascade-node node-router">⚡ Router</span>
+          <span class="cascade-arrow">→</span>
+          <span class="cascade-node node-primary">🧠 Primary</span>
+          <span class="ms-badge ${info.enabled ? 'on' : 'off'}">${info.enabled ? 'ON' : 'OFF'}</span>
+        </div>
+        <div class="cascade-selects">
+          ${cascadeRoleSelect('router', r, allModels, p)}
+          <span class="cascade-arrow">→</span>
+          ${cascadeRoleSelect('primary', p, allModels, r)}
+        </div>
+        <div class="cascade-hint">${hint}</div>
+        <div class="cascade-actions">
+          <button class="cascade-start" ${info.enabled ? '' : 'disabled'}
+            title="${info.enabled ? 'Start llama-router.service + llama-primary.service' : 'Assign both roles first'}">▶ Start cascade servers</button>
+          <button class="cascade-stop"
+            title="Stop llama-router.service + llama-primary.service and free their memory">⏹ Stop / Eject cascade servers</button>
+          <span class="cascade-notes">units: llama-router.service / llama-primary.service</span>
+        </div>`;
+    const start = card.querySelector('.cascade-start');
+    start.addEventListener('click', async () => {
+      start.disabled = true;
+      start.textContent = 'Starting…';
+      try {
+        const res = await fetch('/api/models/launch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'cascade launch failed');
+        const results = Array.isArray(data.results) ? data.results : [];
+        const okN = results.filter((x) => x && x.ok).length;
+        modelToast(okN ? `Started ${okN}/${results.length} cascade servers` : 'Cascade servers were already running');
+      } catch (err) {
+        modelToast(err.message);
+      }
+      loadModels();
+    });
+    const stopBtn = card.querySelector('.cascade-stop');
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      stopBtn.textContent = 'Stopping…';
+      try {
+        const res = await fetch('/api/models/cascade/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'cascade stop failed');
+        const results = Array.isArray(data.results) ? data.results : [];
+        const stopped = results.filter((x) => x && x.ok && !x.skipped).length;
+        const skipped = results.filter((x) => x && x.skipped).length;
+        if (stopped) modelToast(`Stopped ${stopped}/${results.length} cascade server${stopped > 1 ? 's' : ''} — memory freed`);
+        else if (skipped) modelToast('No cascade units installed — nothing to stop');
+        else modelToast('Cascade servers were not running');
+      } catch (err) {
+        modelToast(err.message);
+      }
+      stopBtn.disabled = false;
+      stopBtn.textContent = '⏹ Stop / Eject cascade servers';
+      loadModels();
+    });
+    const routerSel = card.querySelector('[data-role="router"]');
+    const primarySel = card.querySelector('[data-role="primary"]');
+    let busy = false;
+    // One atomic call carrying BOTH picks: the backend clears every role and
+    // stamps the pair, so a change to either dropdown reconfigures the whole
+    // cascade. The selects stay disabled until the round-trip and re-render.
+    async function applyRoles() {
+      if (busy) return;
+      busy = true;
+      routerSel.disabled = true;
+      primarySel.disabled = true;
+      try {
+        const res = await fetch('/api/models/cascade/roles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ routerId: routerSel.value, primaryId: primarySel.value }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Could not update cascade roles');
+        const rn = data.router ? data.router.name : 'no router';
+        const pn = data.primary ? data.primary.name : 'no primary';
+        modelToast(`Cascade: ${rn} → ${pn}`);
+      } catch (err) {
+        modelToast(err.message);
+      }
+      busy = false;
+      loadModels();
+    }
+    routerSel.addEventListener('change', applyRoles);
+    primarySel.addEventListener('change', applyRoles);
+    return card;
+  }
+
+  /**
+   * One role dropdown for the cascade card. Every registered model is a
+   * candidate (the OTHER stage's current pick is excluded so a model can
+   * never be both router and primary). The option text shows the endpoint
+   * port for local servers and a ⚠ remote marker otherwise, so a pick that
+   * disables the cascade (remote router / mismatched endpoint) is visible
+   * before saving.
+   */
+  function cascadeRoleSelect(roleKey, current, allModels, otherPick) {
+    const currentId = current && current.id ? current.id : '';
+    const label = roleKey === 'router' ? 'Router (Stage 1)' : 'Primary (Stage 2)';
+    const loopback = (endpoint) =>
+      /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])([:/]|$)/i.test(String(endpoint || ''));
+    const opts = ['<option value="">— none —</option>']
+      .concat(
+        (Array.isArray(allModels) ? allModels : [])
+          .filter((m) => m && (!otherPick || m.id !== otherPick.id))
+          .map((m) => {
+            const note = loopback(m.endpoint) ? (portOf(m) || '') : '⚠ remote';
+            const sel = m.id === currentId ? ' selected' : '';
+            return `<option value="${escapeHtml(m.id)}"${sel}>${escapeHtml(m.name)}${note ? ' — ' + escapeHtml(note) : ''}</option>`;
+          })
+      )
+      .join('');
+    return `
+        <label class="cascade-pick" title="Which registered model acts as the ${label}">
+          <span class="cascade-pick-label">${label}</span>
+          <select class="cascade-role-select" data-role="${roleKey}">${opts}</select>
+        </label>`;
   }
 
   // Set the active model with optimistic UI feedback (green "Active" pill + tag).
@@ -513,8 +931,30 @@
     modelFormError.classList.add('hidden');
   }
 
+  /** Rebuild the launch-template dropdown (Default + every template). */
+  function fillTemplateSelect(selectedId) {
+    modelTemplate.innerHTML =
+      '<option value="">Default</option>' +
+      state.templates
+        .map((t) => `<option value="${escapeHtml(t.id)}"${t.id === selectedId ? ' selected' : ''}>${escapeHtml(t.name)}${t.builtin ? ' (built-in)' : ''}</option>`)
+        .join('');
+  }
+
+  /** Select a template in the modal, fetching the list first if needed. */
+  function selectTemplateValue(id) {
+    if (state.templates.length) { modelTemplate.value = id || ''; return; }
+    fetch('/api/models/templates')
+      .then((r) => r.json())
+      .then((d) => {
+        state.templates = d && Array.isArray(d.templates) ? d.templates : [];
+        fillTemplateSelect(id || '');
+      })
+      .catch(() => { /* select stays on Default */ });
+  }
+
   function openModelModal(id) {
     resetModelForm();
+    fillTemplateSelect('');
     if (id) {
       fetch(`/api/models/${encodeURIComponent(id)}`)
         .then((r) => r.json())
@@ -528,6 +968,8 @@
           modelEndpoint.value = m.endpoint;
           modelModelId.value = m.model;
           modelCtx.value = m.contextLength || '';
+          modelRole.value = m.role || '';
+          selectTemplateValue(m.templateId || '');
           modelName.disabled = false;
         })
         .catch((err) => { modelToast(err.message); return; });
@@ -555,6 +997,8 @@
       endpoint: modelEndpoint.value.trim(),
       model: modelModelId.value.trim(),
       contextLength: parseInt(modelCtx.value, 10) || 8192,
+      role: modelRole.value || '',
+      templateId: modelTemplate.value || '',
     };
     // Only send apiKey when a new one is typed; blank → keep existing on edit.
     if (modelApiKey.value.trim()) body.apiKey = modelApiKey.value.trim();
@@ -595,14 +1039,193 @@
     modelToast._t = setTimeout(() => toast.classList.remove('show'), 3200);
   }
 
-  modelsBtn.addEventListener('click', () => { showView('models'); closeSidebar(); });
+  modelsBtn.addEventListener('click', () => { showView('models'); closeSidebar(); loadTemplates(); });
+  systemBtn.addEventListener('click', () => { showView('system'); closeSidebar(); });
   modelsBackChat.addEventListener('click', () => showView('chat'));
   modelsRefresh.addEventListener('click', () => loadModels());
   modelsAddBtn.addEventListener('click', () => openModelModal(null));
   $('#modelModalClose').addEventListener('click', closeModelModal);
   $('#modelFormCancel').addEventListener('click', closeModelModal);
   modalEl.addEventListener('click', (e) => { if (e.target === modalEl) closeModelModal(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modalEl.classList.contains('hidden')) closeModelModal(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!modalEl.classList.contains('hidden')) closeModelModal();
+    else if (!templateModalEl.classList.contains('hidden')) closeTemplateModal();
+  });
+
+  // ------------------------------------------------------------- templates tab
+  /** Switch the Models panel between the Models and Templates tabs. */
+  function setModelsTab(tab) {
+    state.modelsTab = tab === 'templates' ? 'templates' : 'models';
+    const isModels = state.modelsTab === 'models';
+    modelsListEl.classList.toggle('hidden', !isModels);
+    templatesListEl.classList.toggle('hidden', isModels);
+    modelsTabBtn.classList.toggle('active', isModels);
+    templatesTabBtn.classList.toggle('active', !isModels);
+    modelsTabBtn.setAttribute('aria-selected', isModels);
+    templatesTabBtn.setAttribute('aria-selected', !isModels);
+    modelsAddBtn.classList.toggle('hidden', !isModels);
+    templatesAddBtn.classList.toggle('hidden', isModels);
+    modelsRefresh.classList.toggle('hidden', !isModels);
+    templatesRefresh.classList.toggle('hidden', isModels);
+    modelsExplainer.classList.toggle('hidden', !isModels);
+    templatesExplainer.classList.toggle('hidden', isModels);
+    if (!isModels && !state.templates.length) loadTemplates();
+  }
+
+  /** Load launch templates into state.templates and render the tab. */
+  async function loadTemplates() {
+    try {
+      const [tplRes, modRes] = await Promise.all([
+        fetch('/api/models/templates'),
+        fetch('/api/models'),
+      ]);
+      const tplData = await tplRes.json();
+      const modData = await modRes.json();
+      if (!tplRes.ok || !tplData.ok) throw new Error(tplData.error || 'Could not load templates');
+      state.templates = Array.isArray(tplData.templates) ? tplData.templates : [];
+      // How many models reference each template (for the card's usage note).
+      const usage = {};
+      for (const m of (modData && modData.models) || []) {
+        if (m && m.templateId) usage[m.templateId] = (usage[m.templateId] || 0) + 1;
+      }
+      for (const tpl of state.templates) {
+        tpl.usage = usage[tpl.id] ? `${usage[tpl.id]} model${usage[tpl.id] === 1 ? '' : 's'} assigned` : '';
+      }
+      renderTemplates(state.templates);
+    } catch (err) {
+      templatesListEl.innerHTML = `<div class="fe-muted fs-error">⚠️ ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function renderTemplates(list) {
+    templatesListEl.innerHTML = '';
+    if (!list.length) {
+      templatesListEl.innerHTML = '<div class="fe-muted">No templates yet. Click "New template" to create one.</div>';
+      return;
+    }
+    for (const tpl of list) templatesListEl.appendChild(templateCard(tpl));
+  }
+
+  /** One template card (built-in shows an undeletable Delete button). */
+  function templateCard(tpl) {
+    const card = document.createElement('div');
+    card.className = 'template-card' + (tpl.builtin ? ' builtin' : '');
+    const preview = (tpl.args || []).join(' ');
+    const n = (tpl.args || []).length;
+    card.innerHTML = `
+        <div class="template-card-row">
+          <div class="template-main">
+            <div class="template-name">
+              ${escapeHtml(tpl.name)}
+              ${tpl.builtin ? '<span class="template-builtin-tag" title="Built-in template — cannot be deleted">built-in</span>' : ''}
+              <span class="template-count">${n} flag${n === 1 ? '' : 's'}</span>
+            </div>
+            ${tpl.description ? `<div class="template-desc">${escapeHtml(tpl.description)}</div>` : ''}
+            <code class="template-args" title="Flags applied on launch">${escapeHtml(preview)}</code>
+          </div>
+        </div>
+        <div class="model-actions">
+          <span class="fe-muted template-usage" title="Models using this template">${tpl.usage || ''}</span>
+          <div class="model-edit-del">
+            <button class="model-edit" data-tpl-edit="${escapeHtml(tpl.id)}" title="Edit ${escapeHtml(tpl.name)}">Edit</button>
+            <button class="model-del" data-tpl-del="${escapeHtml(tpl.id)}"
+              ${tpl.builtin ? 'disabled title="Built-in template cannot be deleted"' : `title="Delete ${escapeHtml(tpl.name)}"`}>Delete</button>
+          </div>
+        </div>`;
+    card.querySelector('[data-tpl-edit]').addEventListener('click', () => openTemplateModal(tpl.id));
+    const del = card.querySelector('[data-tpl-del]');
+    if (!tpl.builtin) del.addEventListener('click', () => deleteTemplate(tpl.id));
+    return card;
+  }
+
+  function resetTemplateForm() {
+    templateForm.reset();
+    templateFormError.classList.add('hidden');
+  }
+
+  function openTemplateModal(id) {
+    resetTemplateForm();
+    if (id) {
+      const tpl = state.templates.find((t) => t.id === id);
+      if (!tpl) return modelToast('Template not found');
+      templateModalTitle.textContent = tpl.builtin ? 'Edit built-in template' : 'Edit template';
+      templateIdEl.value = tpl.id;
+      templateName.value = tpl.name;
+      templateDesc.value = tpl.description || '';
+      templateArgs.value = (tpl.args || []).join('\n');
+      // Built-in: content editable, identity locked.
+      templateName.disabled = !!tpl.builtin;
+      templateLockedNote.classList.toggle('hidden', !tpl.builtin);
+    } else {
+      templateModalTitle.textContent = 'New template';
+      templateIdEl.value = '';
+      templateName.disabled = false;
+      templateLockedNote.classList.add('hidden');
+      templateArgs.value = '';
+    }
+    templateModalEl.classList.remove('hidden');
+    (id ? templateArgs : templateName).focus();
+  }
+
+  function closeTemplateModal() {
+    templateModalEl.classList.add('hidden');
+  }
+
+  async function deleteTemplate(id) {
+    const tpl = state.templates.find((t) => t.id === id);
+    if (!tpl) return;
+    if (tpl.builtin) return modelToast('The built-in default template cannot be deleted');
+    if (!confirm(`Delete template "${tpl.name}"? Models assigned to it fall back to Default on launch.`)) return;
+    try {
+      const res = await fetch(`/api/models/templates/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not delete template');
+      loadTemplates();
+    } catch (err) {
+      modelToast(err.message);
+    }
+  }
+
+  templateForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    templateFormError.classList.add('hidden');
+    const id = templateIdEl.value.trim();
+    const isBuiltin = id && (state.templates.find((t) => t.id === id) || {}).builtin;
+    const body = {
+      name: templateName.value.trim(),
+      description: templateDesc.value.trim(),
+      // Whitespace-separated flags; the textarea shows one per line.
+      args: templateArgs.value.split(/\s+/).filter(Boolean),
+    };
+    const url = id ? `/api/models/templates/${encodeURIComponent(id)}` : '/api/models/templates';
+    try {
+      const res = await fetch(url, {
+        method: id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        const msg = data.error || (data.errors ? data.errors.join('; ') : 'Could not save template');
+        throw new Error(msg);
+      }
+      closeTemplateModal();
+      modelToast(`${isBuiltin ? 'Default template' : 'Template'} saved — applies on the next launch of any model that uses it`);
+      loadTemplates();
+    } catch (err) {
+      templateFormError.textContent = '⚠️ ' + err.message;
+      templateFormError.classList.remove('hidden');
+    }
+  });
+
+  modelsTabBtn.addEventListener('click', () => setModelsTab('models'));
+  templatesTabBtn.addEventListener('click', () => setModelsTab('templates'));
+  templatesAddBtn.addEventListener('click', () => openTemplateModal(null));
+  templatesRefresh.addEventListener('click', () => loadTemplates());
+  $('#templateModalClose').addEventListener('click', closeTemplateModal);
+  $('#templateFormCancel').addEventListener('click', closeTemplateModal);
+  templateModalEl.addEventListener('click', (e) => { if (e.target === templateModalEl) closeTemplateModal(); });
 
   // ------------------------------------------------------------- file explorer
   const FE_DIR_ICON = `<svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
@@ -843,6 +1466,9 @@
     state.pendingDeleteId = null;
     state.currentId = id;
     state.currentMessages = s.messages || [];
+    // Reported usage belongs to the session it was captured in — never let
+    // it leak into another session's budget.
+    state.lastUsage = null;
     state.attachments = [];
     renderChips();
     renderMessages();
@@ -854,6 +1480,7 @@
     state.pendingDeleteId = null;
     state.currentId = null;
     state.currentMessages = [];
+    state.lastUsage = null;
     state.attachments = [];
     renderChips();
     renderMessages();
@@ -867,6 +1494,7 @@
     if (state.currentId === id) {
       state.currentId = null;
       state.currentMessages = [];
+      state.lastUsage = null;
       renderMessages();
     }
     renderSessionList();
@@ -886,6 +1514,11 @@
     });
     const saved = await res.json();
     state.currentId = saved.id;
+    // The usage event is captured mid-stream, when currentId is still null
+    // on a brand-new session. Bind it to the persisted id so the context
+    // pill uses reported prompt_tokens (real session context) instead of
+    // the character estimate.
+    if (state.lastUsage) state.lastUsage.sessionId = state.currentId;
     const idx = state.sessions.findIndex((s) => s.id === saved.id);
     if (idx >= 0) state.sessions[idx] = saved;
     else state.sessions.unshift(saved);
@@ -902,12 +1535,12 @@
   function renderMessages() {
     messagesEl.innerHTML = '';
     emptyStateEl.style.display = state.currentMessages.length ? 'none' : 'flex';
-    state.currentMessages.forEach((m) => appendMessage(m.role, m.content, false, m.meta));
+    state.currentMessages.forEach((m) => appendMessage(m.role, m.content, false, m.meta, m.reasoning));
     scrollToBottom();
     updateBudget();
   }
 
-  function appendMessage(role, content, animate = true, meta) {
+  function appendMessage(role, content, animate = true, meta, reasoning) {
     emptyStateEl.style.display = 'none';
     const wrap = document.createElement('div');
     wrap.className = 'msg ' + (animate ? 'msg' : '');
@@ -916,7 +1549,21 @@
       wrap.textContent = content;
     } else {
       wrap.className = 'msg msg-assistant';
-      wrap.innerHTML = marked.parse(content);
+      const reasoningHTML =
+        reasoning && reasoning.trim()
+          ? `<div class="reasoning collapsed"><button class="reasoning-toggle" type="button"><span class="reasoning-dot"></span>Reasoning / Thinking<span class="reasoning-chev">▾</span></button><div class="reasoning-body"><pre class="reasoning-text">${escapeHtml(reasoning)}</pre></div></div>`
+          : '';
+      wrap.innerHTML = reasoningHTML + marked.parse(content);
+      // Bubble-level delegation owns EVERY .reasoning-toggle in this message
+      // (live placeholder + history panels): one binding, toggle the panel
+      // containing the clicked button.
+      wrap.addEventListener('click', (e) => {
+        const t = e.target && e.target.closest ? e.target.closest('.reasoning-toggle') : null;
+        if (t) {
+          const panel = t.closest('.reasoning');
+          if (panel) panel.classList.toggle('collapsed');
+        }
+      });
       if (meta) {
         const metaEl = document.createElement('div');
         metaEl.className = 'msg-meta';
@@ -971,30 +1618,39 @@
   }
 
   // Badge text for a completed assistant message; null when there is nothing
-  // to show (no usage reported — e.g. interrupted requests). `tg` is the
-  // llama.cpp `timings` object from the final chunk: prompt_n = tokens
-  // actually evaluated this request, so cached = prompt_tokens - prompt_n.
-  // The badge makes the KV cache verifiable: on the second message of a
-  // conversation the "(N cached)" number should be large and the "prompt
-  // speed" number small.
+  // to show (no usage reported — e.g. interrupted requests).
+  //
+  // CONTRACT: the visible badge carries ONLY this response's own generated
+  // tokens — completion_tokens, accumulated server-side across every
+  // completion round of the turn (router + tool loop + final answer).
+  // Session context (prompt_tokens) NEVER appears on the message footer; the
+  // bottom context pill owns that number (updateBudget). KV-cache + speed
+  // details live in the footer's title tooltip (genMetaTooltip).
   function genMetaText(u, tg) {
     if (!u) return null;
-    const totalTokens = (Number(u.prompt_tokens) || 0) + (Number(u.completion_tokens) || 0);
+    const totalTokens = Number(u.completion_tokens) || 0;
     const parts = [];
     if (Number(u.elapsedMs) > 0) parts.push(`⚡ ${fmtDuration(u.elapsedMs)}`);
-    if (totalTokens > 0) {
-      const cached = tg && Number.isFinite(tg.prompt_n)
-        ? Math.max(0, (Number(u.prompt_tokens) || 0) - Number(tg.prompt_n))
-        : null;
-      const tokPart = `${formatTok(totalTokens)} tok`;
-      parts.push(cached > 0 ? `${tokPart} (${formatTok(cached)} cached)` : tokPart);
-      const pp = tg && Number(tg.prompt_per_second);
-      const gen = tg && Number(tg.predicted_per_second);
-      if (Number.isFinite(pp) && pp > 0 && Number.isFinite(gen) && gen > 0) {
-        parts.push(`${pp.toFixed(1)}/${gen.toFixed(1)} tok/s`); // prompt/gen speed
-      }
-    }
+    if (totalTokens > 0) parts.push(`${formatTok(totalTokens)} tok`);
     return parts.length ? parts.join(' · ') : null;
+  }
+
+  // KV-cache / throughput detail for the footer tooltip: `tg` is the
+  // llama.cpp `timings` object from the final chunk (prompt_n = tokens
+  // actually evaluated this request, so cached = prompt_tokens - prompt_n).
+  function genMetaTooltip(u, tg) {
+    if (!u || !tg) return null;
+    const bits = [];
+    const cached = Number.isFinite(tg.prompt_n)
+      ? Math.max(0, (Number(u.prompt_tokens) || 0) - Number(tg.prompt_n))
+      : null;
+    if (cached !== null) bits.push(`${formatTok(cached)} prompt tokens reused from the KV cache`);
+    const pp = Number(tg.prompt_per_second);
+    const gen = Number(tg.predicted_per_second);
+    if (Number.isFinite(pp) && pp > 0 && Number.isFinite(gen) && gen > 0) {
+      bits.push(`${pp.toFixed(1)}/${gen.toFixed(1)} prompt/gen tok/s`);
+    }
+    return bits.length ? bits.join(' · ') : null;
   }
 
   // Rough token estimate fallback: ~4 chars per token, per message.
@@ -1021,7 +1677,11 @@
   function updateBudget() {
     const win = state.context.window || 8192;
     const { input, output, source } = computeTokens();
-    const used = input + output;
+    // Session context usage: cumulative PROMPT tokens in the active window
+    // vs the max context limit (e.g. "2.6k / 65.5k · 4%"). Output tokens of
+    // the last turn belong to the message footer (± this turn's completion
+    // only), never to the session budget shown in the pill/ring/bar.
+    const used = input;
     const pct = Math.min(100, Math.max(0, Math.round((used / win) * 100)));
 
     // ring + bar colour by usage severity
@@ -1052,6 +1712,7 @@
     contextPopover.classList.add('hidden');
     settingsPopover.classList.add('hidden');
     attachPopover.classList.add('hidden');
+    if (reasoningMenu) reasoningMenu.classList.add('hidden');
   }
   contextBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1059,6 +1720,53 @@
     closePopovers();
     if (willOpen) contextPopover.classList.remove('hidden');
   });
+  // Reasoning effort & visibility controller (Off|Default|Low|Medium|High):
+  // the compose-toolbar brain button opens #reasoningMenu; the chosen level
+  // is persisted (pagent.reasoningLevel) and sent with every /api/chat
+  // request (body.reasoningLevel -> routes/chat.js -> buildChatPayload ->
+  // reasoning_effort / thinking budget). Off ALSO hides every thinking panel
+  // (live + history) via body.no-reasoning; the stream keeps arriving and
+  // the trace is still stored on the message, so switching back restores it.
+  const reasoningToggleBtn = $('#reasoningToggle');
+  const REASONING_LEVEL_LABEL = { off: 'Off', default: 'Default', low: 'Low', medium: 'Medium', high: 'High' };
+  const applyReasoningVisibility = () => {
+    const off = state.reasoningLevel === 'off';
+    document.body.classList.toggle('no-reasoning', off);
+    if (reasoningToggleBtn) {
+      reasoningToggleBtn.classList.toggle('on', !off);
+      reasoningToggleBtn.title = off
+        ? 'Reasoning: Off — click to change the effort level'
+        : `Reasoning effort: ${REASONING_LEVEL_LABEL[state.reasoningLevel] || 'Default'} — click to change`;
+    }
+    if (reasoningLevelLabel) {
+      reasoningLevelLabel.textContent = REASONING_LEVEL_LABEL[state.reasoningLevel] || 'Default';
+    }
+    if (reasoningMenu) {
+      reasoningMenu.querySelectorAll('[data-level]').forEach((btn) => {
+        const active = btn.getAttribute('data-level') === state.reasoningLevel;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+    }
+  };
+  if (reasoningToggleBtn && reasoningMenu) {
+    reasoningToggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const willOpen = reasoningMenu.classList.contains('hidden');
+      closePopovers();
+      if (willOpen) reasoningMenu.classList.remove('hidden');
+    });
+    reasoningMenu.addEventListener('click', (e) => {
+      const item = e.target && e.target.closest ? e.target.closest('[data-level]') : null;
+      if (!item) return;
+      state.reasoningLevel = item.getAttribute('data-level') || 'default';
+      try { localStorage.setItem('pagent.reasoningLevel', state.reasoningLevel); } catch { /* private mode */ }
+      reasoningMenu.classList.add('hidden');
+      applyReasoningVisibility();
+    });
+    applyReasoningVisibility();
+  }
+
   genSettingsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     const willOpen = settingsPopover.classList.contains('hidden');
@@ -1104,14 +1812,166 @@
   });
   applySettingsToUI();
 
+  // ------------------------------------------------------------- slash picker
+  // "/" autocomplete: while composing, a caret word starting with "/" lists
+  // the enabled skills; arrows + Enter/Tab (or click) insert "/skillname ".
+  let pickerSkills = null; // [{ name, description }] enabled skills, lazy cache
+  let pickerMatches = [];  // currently rendered subset
+  let pickerIndex = 0;     // highlighted row
+
+  function refreshPickerSkills(skills) {
+    pickerSkills = (Array.isArray(skills) ? skills : [])
+      .filter((s) => s && s.name && s.enabled !== false)
+      .map((s) => ({ name: s.name, description: s.description || '' }));
+  }
+
+  let pickerSkillsPromise = null;
+  function ensurePickerSkills() {
+    if (pickerSkills) return Promise.resolve(pickerSkills);
+    if (!pickerSkillsPromise) {
+      pickerSkillsPromise = (async () => {
+        try {
+          const res = await fetch('/api/skills');
+          const data = await res.json();
+          refreshPickerSkills(data && data.skills);
+        } catch {
+          pickerSkills = [];
+        }
+        return pickerSkills;
+      })();
+    }
+    return pickerSkillsPromise;
+  }
+
+  // The caret word: "/query" at line start or right after whitespace.
+  function pickerQuery() {
+    const v = promptInput.value;
+    const caret = promptInput.selectionStart == null ? v.length : promptInput.selectionStart;
+    const m = /(?:^|\s)\/([A-Za-z0-9._-]*)$/.exec(v.slice(0, caret));
+    return m ? { query: m[1].toLowerCase(), slashAt: caret - m[1].length - 1 } : null;
+  }
+
+  function closeSkillPicker() {
+    skillPickerEl.classList.add('hidden');
+    skillPickerEl.innerHTML = '';
+    pickerMatches = [];
+  }
+
+  function paintSkillPicker() {
+    for (const item of skillPickerEl.children) {
+      item.classList.toggle('active', Number(item.dataset.index) === pickerIndex);
+    }
+  }
+
+  function renderSkillPicker(list) {
+    skillPickerEl.innerHTML = '';
+    pickerMatches = list;
+    pickerIndex = Math.min(pickerIndex, Math.max(0, list.length - 1));
+    list.forEach((s, i) => {
+      const item = document.createElement('div');
+      item.className = 'skill-picker-item' + (i === pickerIndex ? ' active' : '');
+      item.dataset.index = String(i);
+      item.innerHTML =
+        `<span class="skill-picker-name">/${escapeHtml(s.name)}</span>` +
+        (s.description ? `<span class="skill-picker-desc">${escapeHtml(s.description)}</span>` : '');
+      item.addEventListener('mousedown', (e) => e.preventDefault()); // keep textarea focus
+      item.addEventListener('click', () => acceptSkillPick(i));
+      skillPickerEl.appendChild(item);
+    });
+  }
+
+  async function maybeOpenSkillPicker() {
+    const q = pickerQuery();
+    if (!q) return closeSkillPicker();
+    await ensurePickerSkills();
+    const now = pickerQuery();
+    if (!now) return closeSkillPicker(); // input moved on while fetching
+    const matches = (pickerSkills || [])
+      .filter((s) => s.name.toLowerCase().includes(now.query))
+      .sort((a, b) => {
+        const ap = a.name.toLowerCase().startsWith(now.query) ? 0 : 1;
+        const bp = b.name.toLowerCase().startsWith(now.query) ? 0 : 1;
+        return ap - bp || a.name.localeCompare(b.name);
+      });
+    if (!matches.length) return closeSkillPicker();
+    renderSkillPicker(matches);
+    skillPickerEl.classList.remove('hidden');
+  }
+
+  function acceptSkillPick(i) {
+    const s = pickerMatches[i];
+    const q = pickerQuery();
+    if (!s || !q) return closeSkillPicker();
+    const v = promptInput.value;
+    // Insert the bare on-disk skill name — NO leading slash. The "/" is only
+    // the picker trigger; a slash-prefixed name would reach the backend as
+    // "/print_datetime" and fail slug validation (the backend now tolerates
+    // the slash form too, but the message should carry the real name).
+    const insert = `${s.name} `;
+    // Replace the typed "/query" (slash at q.slashAt, query after it) with
+    // the full "skillname " mention.
+    promptInput.value = v.slice(0, q.slashAt) + insert + v.slice(q.slashAt + q.query.length + 1);
+    const caret = q.slashAt + insert.length;
+    promptInput.setSelectionRange(caret, caret);
+    autoResize();
+    closeSkillPicker();
+    promptInput.focus();
+  }
+
+  // Close when clicking anywhere outside the picker (item clicks use
+  // mousedown-preventDefault so the textarea never blurs mid-insert).
+  document.addEventListener('click', (e) => {
+    if (!skillPickerEl.classList.contains('hidden') && !skillPickerEl.contains(e.target)) closeSkillPicker();
+  });
+
+  // ------------------------------------------------------------- gen timer
+  // Live "⏱ Ns…" pill in the compose toolbar while the agent is working
+  // (queue wait + tool loop + generation); hidden when idle.
+  let genStartedAt = 0;
+  let genTimerInterval = null;
+
+  function paintGenTimer() {
+    const s = Math.max(0, Math.round((Date.now() - genStartedAt) / 1000));
+    genTimerEl.textContent =
+      `⏱ ${s >= 60 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s` : `${s}s`}…`;
+  }
+
+  function startGenTimer() {
+    genStartedAt = Date.now();
+    genTimerEl.classList.remove('hidden');
+    paintGenTimer();
+    clearInterval(genTimerInterval);
+    genTimerInterval = setInterval(paintGenTimer, 1000);
+  }
+
+  function stopGenTimer() {
+    clearInterval(genTimerInterval);
+    genTimerInterval = null;
+    genTimerEl.classList.add('hidden');
+    genTimerEl.textContent = '';
+  }
+
   // ------------------------------------------------------------- input
   function autoResize() {
     promptInput.style.height = 'auto';
     promptInput.style.height = Math.min(promptInput.scrollHeight, 192) + 'px';
   }
-  promptInput.addEventListener('input', autoResize);
+  promptInput.addEventListener('input', () => {
+    autoResize();
+    maybeOpenSkillPicker();
+  });
 
   promptInput.addEventListener('keydown', (e) => {
+    const pickerOpen = !skillPickerEl.classList.contains('hidden');
+    if (pickerOpen && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key)) {
+      e.preventDefault();
+      e.stopImmediatePropagation(); // never send or leave the input while picking
+      if (e.key === 'ArrowDown') { pickerIndex = (pickerIndex + 1) % pickerMatches.length; paintSkillPicker(); }
+      else if (e.key === 'ArrowUp') { pickerIndex = (pickerIndex - 1 + pickerMatches.length) % pickerMatches.length; paintSkillPicker(); }
+      else if (e.key === 'Enter' || e.key === 'Tab') { acceptSkillPick(pickerIndex); }
+      else if (e.key === 'Escape') { closeSkillPicker(); }
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -1127,6 +1987,60 @@
   });
 
   // ------------------------------------------------------------- chat
+  // Reasoning / thinking stream state machine — pure and DOM-free so it can
+  // be unit-tested through window.__streamHooks (see the UI test harness).
+  // pumpStream splits <thinking>…</thinking> blocks (DeepSeek-R1 style, e.g.
+  // llama.cpp distills) out of the content stream into the reasoning trace,
+  // tolerating tags split arbitrarily across SSE chunks. Reasoning deltas
+  // arriving in their own field (OpenRouter `reasoning` — the relay sends
+  // them as delta.reasoning) bypass pumpStream and append directly.
+  const THINK_OPEN = '<thinking>';
+  const THINK_CLOSE = '</thinking>';
+  function streamState() {
+    return { mode: 'answer', raw: '', text: '', reasoning: '' };
+  }
+  function isPartialThinkTag(tail) {
+    if (!/^\s{0,2}<[a-z]*$/.test(tail) || tail.length >= 12) return false;
+    const name = tail.replace(/^\s{0,2}/, '');
+    return name.length > 0 && THINK_OPEN.startsWith(name);
+  }
+  function isPartialCloseTag(tail) {
+    return tail.length > 0 && tail.length < THINK_CLOSE.length && THINK_CLOSE.startsWith(tail);
+  }
+  function pumpStream(st, delta) {
+    st.raw += delta;
+    for (;;) {
+      if (st.mode === 'thinking') {
+        const ci = st.raw.indexOf(THINK_CLOSE);
+        if (ci === -1) {
+          // Hold a trailing PARTIAL close tag across chunks (e.g. '</th' +
+          // 'inking>…') — appending it to the reasoning trace would leak the
+          // tag and, worse, the next chunk would complete the tag inside the
+          // trace ('</th' + 'inking>…' contains no full tag for indexOf).
+          if (isPartialCloseTag(st.raw.slice(-(THINK_CLOSE.length - 1)))) break;
+          st.reasoning += st.raw;
+          st.raw = '';
+          break;
+        }
+        st.reasoning += st.raw.slice(0, ci);
+        st.raw = st.raw.slice(ci + THINK_CLOSE.length);
+        st.mode = 'answer';
+        continue;
+      }
+      const oi = st.raw.indexOf(THINK_OPEN);
+      if (oi === -1) {
+        if (isPartialThinkTag(st.raw.slice(-12))) break; // hold for the next chunk
+        st.text += st.raw;
+        st.raw = '';
+        break;
+      }
+      if (oi > 0) st.text += st.raw.slice(0, oi);
+      st.raw = st.raw.slice(oi + THINK_OPEN.length);
+      st.mode = 'thinking';
+    }
+  }
+  window.__streamHooks = { streamState, pumpStream, THINK_OPEN, THINK_CLOSE, state: () => state, renderMessages, appendMessage };
+
   // Fetch /api/chat with ONE automatic retry on transport-level failures only
   // (never on user abort). Server-side, the request queue already retries
   // transient upstream errors, so a queued request recovers on its own.
@@ -1175,17 +2089,34 @@
       appendMessage('user', text);
     }
     setStreamingUI(true);
+    startGenTimer();
     // Optimistic badge: the request is out — show the model as active even
     // before the next status poll picks up the prefill phase.
     if (state.modelStatus) renderModelStatus({ ...state.modelStatus, busy: true });
 
-    // assistant placeholder: status feed (hidden) + content slot (typing first)
+    // assistant placeholder: status feed (hidden) + reasoning panel + content
+    // slot (typing first). The reasoning panel appears only once reasoning
+    // tokens arrive; it is auto-open while thinking and collapses on
+    // completion (the toggle re-expands it at any time).
     const assistantEl = appendMessage(
       'assistant',
-      `<div class="agent-status hidden"></div><div class="agent-content"><span class="typing"><span></span><span></span><span></span></span></div>`
+      `<div class="agent-status hidden"></div>` +
+        `<div class="reasoning hidden collapsed">` +
+        `<button class="reasoning-toggle" type="button"><span class="reasoning-dot"></span>Reasoning / Thinking<span class="reasoning-chev">▾</span></button>` +
+        `<div class="reasoning-body"><pre class="reasoning-text"></pre></div>` +
+        `</div>` +
+        `<div class="agent-content"><span class="typing"><span></span><span></span><span></span></span></div>`
     );
     const statusEl = assistantEl.querySelector('.agent-status');
+    const reasoningEl = assistantEl.querySelector('.reasoning');
+    const reasoningTextEl = assistantEl.querySelector('.reasoning-text');
+    // NOTE: no toggle binding here — appendMessage's bubble-level delegation
+    // already owns .reasoning-toggle clicks (a second binding on the same
+    // button would toggle twice per click and silently cancel out).
     const contentEl = assistantEl.querySelector('.agent-content');
+    // Live-stream accumulation: reasoning trace + visible answer text,
+    // split/pumped per SSE delta (see pumpStream above).
+    const st = streamState();
     let typingOn = true;
     const statuses = [];
     const addToolStatus = (msg) => {
@@ -1216,12 +2147,82 @@
     state.abortController = ac;
     let full = ''; // accumulated assistant text, visible to the abort handler
 
+    // Paint the current stream state into the DOM without re-parsing the
+    // whole markdown on every token (no flicker); plain text while
+    // streaming, markdown once at the end. The reasoning panel shows live
+    // and auto-opens while tokens are arriving.
+    const liveRender = () => {
+      if (typingOn && (st.text || st.reasoning)) {
+        typingOn = false;
+        contentEl.innerHTML = '';
+      }
+      if (contentEl.textContent !== st.text) contentEl.textContent = st.text;
+      if (st.reasoning) {
+        reasoningEl.classList.remove('hidden');
+        reasoningEl.classList.remove('collapsed');
+        reasoningEl.classList.add('streaming');
+        reasoningTextEl.textContent = st.reasoning.trim();
+      }
+      // The final answer has started: thinking is done — stop the pulsing
+      // dot and collapse the panel (the toggle re-expands it anytime).
+      if (st.text && reasoningEl.classList.contains('streaming')) {
+        reasoningEl.classList.remove('streaming');
+        reasoningEl.classList.add('collapsed');
+      }
+      scrollToBottom();
+    };
+
+    // Completion-time reasoning panel finalization: stop the pulsing dot and
+    // collapse the panel (the toggle re-expands it); hide it entirely when
+    // nothing was streamed.
+    const pushReasoning = (reasoning) => {
+      reasoningEl.classList.remove('streaming');
+      reasoningEl.classList.add('collapsed');
+      if (!reasoning) reasoningEl.classList.add('hidden');
+    };
+
+    const handleData = (json) => {
+      if (json.type === 'status') {
+        statuses.push(json.message || '');
+        addToolStatus(json.message || '');
+        return;
+      }
+      if (json.type === 'round') {
+        // Round boundary: the backend streams EVERY round's deltas live; a
+        // non-final round (tool-call JSON, ROUTE_TO_PRIMARY markers) must
+        // not stick as the visible answer — wipe it. The final round's
+        // event (final:true) leaves the live text in place.
+        if (!json.final) {
+          const had = !!(st.text || st.reasoning);
+          st.text = '';
+          st.reasoning = '';
+          st.raw = '';
+          st.mode = 'answer';
+          full = '';
+          if (had) {
+            contentEl.textContent = '';
+            reasoningEl.classList.add('hidden');
+            reasoningTextEl.textContent = '';
+          }
+        }
+        return;
+      }
+      const d = json.choices?.[0]?.delta || {};
+      if (typeof d.reasoning === 'string' && d.reasoning) st.reasoning += d.reasoning;
+      if (typeof d.content === 'string' && d.content) pumpStream(st, d.content);
+      if (st.text !== full) full = st.text;
+      if (st.text || st.reasoning) liveRender();
+      if (json.usage) captureUsage(json.usage);
+      if (json.timings) captureTimings(json.timings);
+    };
+
     try {
       const res = await fetchChat(
         {
           messages: apiMessages,
           stream: true,
           generation: { ...state.settings },
+          reasoningLevel: state.reasoningLevel,
           ...(sentAttachments.length
             ? { attachments: sentAttachments.map((a) => ({ id: a.id })) }
             : {}),
@@ -1243,18 +2244,6 @@
       }
 
       // Stream SSE: consume status events (tool activity), content deltas, usage.
-      const handleData = (json) => {
-        if (json.type === 'status') {
-          statuses.push(json.message || '');
-          addToolStatus(json.message || '');
-          return;
-        }
-        const delta = json.choices?.[0]?.delta?.content || '';
-        if (delta) full += delta;
-        if (json.usage) captureUsage(json.usage);
-        if (json.timings) captureTimings(json.timings);
-      };
-
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -1275,8 +2264,10 @@
         }
 
         if (full) {
-          contentEl.innerHTML = marked.parse(full);
-          attachCopyButtons(contentEl);
+          // Live plain-text paint per chunk (markdown only at the end) —
+          // re-parsing the whole message on every token flickers and stalls
+          // on long outputs; textContent stays smooth at any token rate.
+          if (contentEl.textContent !== full) contentEl.textContent = full;
           scrollToBottom();
         }
       }
@@ -1290,7 +2281,7 @@
       }
 
       // If the only output was an error status, surface it instead of an empty answer.
-      if (!full) {
+      if (!full && !st.reasoning) {
         const errStatus = statuses.find((s) => s && s.trim().startsWith('\u26a0'));
         if (errStatus) {
           contentEl.innerHTML =
@@ -1302,17 +2293,23 @@
       }
 
       const metaText = genMetaText(reqUsage, reqTimings);
-      state.currentMessages.push({ role: 'assistant', content: full, meta: metaText });
+      state.currentMessages.push({
+        role: 'assistant',
+        content: full,
+        ...(st.reasoning ? { reasoning: st.reasoning.trim() } : {}),
+        meta: metaText,
+      });
+      pushReasoning(st.reasoning);
       contentEl.innerHTML = marked.parse(full);
       attachCopyButtons(contentEl);
       if (metaText) {
         const metaEl = document.createElement('div');
         metaEl.className = 'msg-meta';
         metaEl.textContent = metaText;
-        // "12.1/2.8 tok/s" = prompt processing / generation speed (llama.cpp timings).
-        if (reqTimings) {
-          metaEl.title = 'Prompt/generation speed from llama.cpp timings; "cached" = prompt tokens reused from the KV cache.';
-        }
+        // KV-cache / throughput detail moves to the hover tooltip so the
+        // visible badge stays strictly "duration · this response's tokens".
+        const tip = genMetaTooltip(reqUsage, reqTimings);
+        if (tip) metaEl.title = 'Footer badges: duration + tokens generated by this response only. ' + tip;
         assistantEl.appendChild(metaEl);
       }
       scrollToBottom();
@@ -1322,8 +2319,14 @@
       const aborted = err && err.name === 'AbortError';
       if (aborted) {
         // User pressed Stop: freeze whatever partial response arrived.
-        if (full) {
-          state.currentMessages.push({ role: 'assistant', content: full, meta: genMetaText(reqUsage, reqTimings) });
+        if (full || st.reasoning) {
+          state.currentMessages.push({
+            role: 'assistant',
+            content: full,
+            ...(st.reasoning ? { reasoning: st.reasoning.trim() } : {}),
+            meta: genMetaText(reqUsage, reqTimings),
+          });
+          pushReasoning(st.reasoning);
           contentEl.innerHTML = marked.parse(full);
           attachCopyButtons(contentEl);
           const note = document.createElement('div');
@@ -1347,6 +2350,7 @@
     } finally {
       if (state.abortController === ac) state.abortController = null;
       setStreamingUI(false);
+      stopGenTimer();
       refreshModelStatus(); // badge returns to the real lifecycle state
     }
   }

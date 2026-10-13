@@ -307,14 +307,31 @@ function clip(text, n) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-/** Run a workspace script with `node` in a bounded subprocess. */
+/** Run a workspace script in a bounded subprocess (interpreter by extension).
+ *  The subprocess cwd is the WORKSPACE ROOT (not the script's folder), so
+ *  relative paths inside scripts — e.g. `> logs/datetime.log` — land in the
+ *  workspace where both the user and the agent's file tools can reach them.
+ *  WORKSPACE_ROOT is exported to the child for absolute resolution.
+ */
 function runScript(script, args, timeoutMs) {
   return new Promise((resolve) => {
     const abs = resolveScript(script);
     if (!abs) return resolve({ ok: false, status: 'error', summary: `script escapes workspace: ${script}`, detail: '' });
+    const root = path.resolve(config.workRoot);
+    try {
+      // The conventional logs/ directory must exist for redirections like
+      // `> logs/x.log` to land (shell redirection does not create dirs).
+      fs.mkdirSync(path.join(root, 'logs'), { recursive: true });
+    } catch { /* read-only FS etc.: the script will fail with its own error */ }
     let child;
     try {
-      child = spawn(process.execPath, [abs, ...(args || [])], { cwd: path.dirname(abs) });
+      if (/\.py$/.test(abs)) {
+        child = spawn('python3', [abs, ...(args || [])], { cwd: root, env: { ...process.env, WORKSPACE_ROOT: root } });
+      } else if (/\.sh$/.test(abs)) {
+        child = spawn('sh', [abs, ...(args || [])], { cwd: root, env: { ...process.env, WORKSPACE_ROOT: root } });
+      } else {
+        child = spawn(process.execPath, [abs, ...(args || [])], { cwd: root, env: { ...process.env, WORKSPACE_ROOT: root } });
+      }
     } catch (e) {
       return resolve({ ok: false, status: 'error', summary: `could not start script: ${e.message}`, detail: '' });
     }

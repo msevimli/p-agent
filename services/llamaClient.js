@@ -141,20 +141,24 @@ function buildChatMessages(rawMessages, systemPrompt) {
  * Build the full /v1/chat/completions payload. `generation` holds optional
  * per-request overrides from the frontend settings control; unset fields fall
  * back to configured defaults. `opts.system` overrides the injected system
- * prompt; `opts.tools` appends an OpenAI `tools` array for native tool calls.
+ * prompt; `opts.tools` appends an OpenAI `tools` array for native tool calls;
+ * `opts.target` overrides the endpoint/model (two-stage cascade routing) —
+ * absent means the active model; `opts.maxTokens`/`opts.temperature` override
+ * the per-request generation settings for THIS payload only.
  */
 function buildChatPayload(rawMessages, generation, opts) {
   const gen = generation && typeof generation === 'object' ? generation : {};
   const o = opts && typeof opts === 'object' ? opts : {};
   const num = (v, fb) => (typeof v === 'number' && Number.isFinite(v) ? v : fb);
+  const target = o.target && o.target.baseUrl ? o.target : activeTarget();
   const payload = {
-    model: activeTarget().model,
+    model: target.model || config.llamaModel,
     messages: buildChatMessages(rawMessages, o.system),
-    temperature: num(gen.temperature, config.llamaTemperature),
+    temperature: num(o.temperature, num(gen.temperature, config.llamaTemperature)),
     top_p: num(gen.top_p, config.llamaTopP),
     repeat_penalty: num(gen.repeat_penalty, config.llamaRepeatPenalty), // native loop-breaker
     repeat_last_n: num(gen.repeat_last_n, config.llamaRepeatLastN),
-    max_tokens: num(gen.max_tokens, config.llamaMaxTokens), // bound so SSE ends at [DONE]
+    max_tokens: num(o.maxTokens, num(gen.max_tokens, config.llamaMaxTokens)), // bound so SSE ends at [DONE]
     // Ask llama.cpp to report real prompt/output token counts on the last chunk.
     stream_options: { include_usage: true },
     // Reuse the KV cache for the stable prompt prefix (system + tools +
@@ -163,6 +167,34 @@ function buildChatPayload(rawMessages, generation, opts) {
     stream: true,
   };
   if (Array.isArray(o.tools) && o.tools.length) payload.tools = o.tools;
+  // Reasoning effort/visibility controller (Off|Default|Low|Medium|High).
+  // Purely a sampling/template-kwarg concern — NEVER part of the prompt, so
+  // the KV prefix is untouched (for templates that do not bake effort into
+  // their rendering; see the skill contract for the caps caveat).
+  //   default/absent -> omit, provider default behavior
+  //   local llama.cpp: this build parses OAI reasoning_effort natively
+  //     (tools/server/server-common.cpp: 'none' erases the chat-template
+  //     kwarg, i.e. DISABLES thinking) and accepts Anthropic-style
+  //     thinking:{type:'enabled',budget_tokens} -> thinking_budget_tokens
+  //     (tools/server/server-chat.cpp). On-levels carry both.
+  //   cloud (OpenRouter/OpenAI-compatible): reasoning_effort only;
+  //     Off -> 'none' (OpenAI/OpenRouter convention; providers without a
+  //     reasoning switch ignore the key).
+  const reasoningLevel = String(o.reasoningLevel || gen.reasoningLevel || 'default').toLowerCase();
+  if (reasoningLevel !== 'default' && reasoningLevel !== '') {
+    const THINK_BUDGET = { low: 1024, medium: 4096, high: 16384 };
+    // Unknown levels are DROPPED (provider default) — never echoed into the
+    // payload where a strict provider might reject them.
+    if (reasoningLevel === 'off') {
+      payload.reasoning_effort = 'none'; // native disable on both paths
+    } else if (!THINK_BUDGET[reasoningLevel]) {
+      /* unknown -> omit */
+    } else {
+      const loopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)/i.test(String(target.baseUrl || ''));
+      payload.reasoning_effort = reasoningLevel;
+      if (loopback) payload.thinking = { type: 'enabled', budget_tokens: THINK_BUDGET[reasoningLevel] };
+    }
+  }
   // Guard retry: force a tool call for exactly one request (only set when the
   // retry path asks for it; the field is absent otherwise so the server's
   // default tool_choice behavior is untouched).
@@ -174,10 +206,12 @@ function buildChatPayload(rawMessages, generation, opts) {
 
 /**
  * Open the upstream POST to /v1/chat/completions. The caller supplies the
- * upstream-response handler (typically parseSseToClient).
+ * upstream-response handler (typically parseSseToClient). An optional
+ * targetOverride { baseUrl, model, apiKey } routes the request to a specific
+ * endpoint (two-stage cascade); absent means the active model.
  */
-function streamCompletions(payload, onResponse) {
-  const target = activeTarget();
+function streamCompletions(payload, onResponse, targetOverride) {
+  const target = targetOverride && targetOverride.baseUrl ? targetOverride : activeTarget();
   const headers = { 'Content-Type': 'application/json' };
   if (target.apiKey) headers.Authorization = `Bearer ${target.apiKey}`;
   return clientFor(target.baseUrl).request(
@@ -371,7 +405,7 @@ function joinToolCallArgs(a, b) {
  *   timings.prompt_ms+predicted_ms — model-side total
  * Falls back gracefully when the server omits usage/timings.
  */
-function logTimings(acc, firstTokenMs, wallMs, prefixHash) {
+function logTimings(acc, firstTokenMs, wallMs, prefixHash, modelName) {
   const u = acc.usage || {};
   const t = acc.timings || {};
   const promptTotal = Number.isFinite(u.prompt_tokens) ? u.prompt_tokens : null;
@@ -394,7 +428,7 @@ function logTimings(acc, firstTokenMs, wallMs, prefixHash) {
   if (firstTokenMs !== null) bits.push(`ttft=${(firstTokenMs / 1000).toFixed(1)}s`);
   bits.push(`wall=${(wallMs / 1000).toFixed(1)}s`);
   if (prefixHash) bits.push(`prefix=${prefixHash}`);
-  console.log(`[llm] model=${activeTarget().model} ${bits.join(' ')}`);
+  console.log(`[llm] model=${modelName || activeTarget().model} ${bits.join(' ')}`);
 }
 
 /** Hash of the serialized static prefix (system prompt + tools) of a chat
@@ -418,14 +452,15 @@ function payloadHash(payload) {
  *  - usage:        the usage object from the final chunk (may be null)
  *  - timings:      the llama.cpp timings object from the final chunk (may be null)
  *  - firstTokenMs: ms from request write to first content/tool-call delta (may be null)
- * Optional onDelta/onUsage/onTimings/onFirstChunk callbacks stream tokens,
- * usage, timings and first-byte as they arrive.
+ * Optional onDelta/onReasoning/onUsage/onTimings/onFirstChunk callbacks stream
+ * tokens (content resp. reasoning-trace), usage, timings and first-byte as
+ * they arrive.
  * Rejects with an Error on non-200 upstream responses or network failure.
  */
 function doComplete(opts) {
   return new Promise((resolve, reject) => {
-    const { payload, onDelta, onUsage, onFirstChunk, onTimings } = opts || {};
-    const acc = { content: '', toolCalls: new Map(), usage: null, timings: null, finishReason: null };
+    const { payload, onDelta, onReasoning, onUsage, onFirstChunk, onTimings } = opts || {};
+    const acc = { content: '', reasoning: '', toolCalls: new Map(), usage: null, timings: null, finishReason: null };
     // Wall clock for the timing log; measured from inside the queue slot, so
     // it excludes FIFO wait (that is surfaced separately as queue position).
     const t0 = Date.now();
@@ -476,7 +511,24 @@ function doComplete(opts) {
             try {
               const j = JSON.parse(d);
               const delta = j.choices && j.choices[0] ? j.choices[0].delta || {} : {};
-              if (firstTokenMs === null && (typeof delta.content === 'string' && delta.content || Array.isArray(delta.tool_calls) && delta.tool_calls.length)) {
+              // Reasoning-trace deltas — OpenRouter sends `delta.reasoning`
+              // (string or token array) + `reasoning_summary`; DeepSeek-R1
+              // distills via llama.cpp / GLM-style providers send
+              // `reasoning_content` / `reasoning_text`. Every shape is
+              // accumulated into acc.reasoning and forwarded via onReasoning.
+              const rzArr = Array.isArray(delta.reasoning) ? delta.reasoning.join('') : null;
+              const rzRaw =
+                (typeof delta.reasoning_content === 'string' && delta.reasoning_content) ||
+                (typeof delta.reasoning_text === 'string' && delta.reasoning_text) ||
+                (typeof delta.reasoning_summary === 'string' && delta.reasoning_summary) ||
+                rzArr ||
+                (typeof delta.reasoning === 'string' ? delta.reasoning : '') ||
+                '';
+              if (rzRaw) {
+                acc.reasoning = (acc.reasoning || '') + rzRaw;
+                if (onReasoning) onReasoning(rzRaw);
+              }
+              if (firstTokenMs === null && ((typeof delta.content === 'string' && delta.content) || rzRaw || (Array.isArray(delta.tool_calls) && delta.tool_calls.length))) {
                 firstTokenMs = Date.now() - t0;
               }
               if (typeof delta.content === 'string' && delta.content) {
@@ -540,10 +592,11 @@ function doComplete(opts) {
           // change (which would silently invalidate the llama.cpp KV cache)
           // is immediately visible. See services/historyManager.js.
           const prefixHash = payloadHash(payload);
-          logTimings(acc, firstTokenMs, Date.now() - t0, prefixHash);
+          logTimings(acc, firstTokenMs, Date.now() - t0, prefixHash, payload && payload.model);
         }
         resolve({
           content: acc.content,
+          reasoning: acc.reasoning,
           usage: acc.usage,
           timings: acc.timings,
           finishReason: acc.finishReason,
@@ -557,15 +610,16 @@ function doComplete(opts) {
         supervisor.stop();
         reject(new Error(`llama.cpp stream error: ${e.message}`));
       });
-    });
+    }, opts.target);
     upstream.on('error', (e) => {
       supervisor.stop();
       reject(new Error(`llama.cpp unreachable: ${e.message}`));
     });
     // TEMP DIAGNOSTIC: exact payload as sent (messages[0].content = full system
     // prompt incl. embedded tool schema; payload.tools = OpenAI tool defs).
+    const dbgTarget = opts.target && opts.target.baseUrl ? opts.target : activeTarget();
     dbgDump(
-      `PAYLOAD  url=${chatCompletionsUrl(activeTarget().baseUrl)} model=${activeTarget().model}`,
+      `PAYLOAD  url=${chatCompletionsUrl(dbgTarget.baseUrl)} model=${dbgTarget.model || payload.model}`,
       JSON.stringify(payload, null, 2)
     );
     upstream.write(JSON.stringify(payload));

@@ -10,6 +10,7 @@
  * and call llamaClient. Kept out of the HTTP layer on purpose.
  */
 const registry = require('../tools');
+const path = require('path');
 
 function listTools() {
   return registry.map(({ name, description, parameters }) => ({
@@ -50,13 +51,32 @@ function getTool(name) {
 // other steps in between still executes, so intentional double runs remain
 // possible; a repeat of a FAILED command also still executes (recovery).
 
-const DEDUP_EXEMPT = new Set(['run_automation', 'run_skill', 'run_shell']);
+// Read-only queries are idempotent and cheap: a repeated list after a state
+// change must return FRESH data (and must never surface as a confusing
+// "duplicate tool call skipped" error), so they are exempt from the ledger.
+const DEDUP_EXEMPT = new Set([
+  'run_automation',
+  'run_skill',
+  'run_shell',
+  'list_automations',
+  'list_skills',
+  'list_files',
+  'list_library_files',
+]);
 // Per-chat-request execution ledger: { name, argsKey } of every executed call.
 const seenCalls = [];
 
 // Normalized key of the last successfully executed shell command (null when
 // none yet / after the ledger reset). Reset with resetSeenCalls().
 let lastShellCommandKey = null;
+// Whether that last recorded shell run produced ANY visible output.
+let lastShellHadOutput = false;
+// Whether the last recorded shell command contained unquoted shell operators
+// (& ; | < > ` ( )). If it did, the command was parsed differently than a
+// quoted variant of it — a same-key quoted re-emission is a CORRECTED retry
+// (e.g. `curl URL?ids=x&v=y` backgrounds the fetch and 'succeeds' on a stray
+// assignment) and must execute, not be blocked as a duplicate.
+let lastShellHadOps = false;
 
 /**
  * Normalize a shell command into a comparison key: tokenize on whitespace
@@ -85,7 +105,13 @@ function normalizeShellCommandKey(cmd) {
     .map((t) => {
       const tok = t.replace(/"/g, "'"); // canonical quote char
       const inner = tok.slice(1, -1);
-      if (tok.length >= 2 && tok[0] === "'" && tok[tok.length - 1] === "'" && !inner.includes("'") && !/\s/.test(inner)) {
+      // Quotes are cosmetic for fully-quoted single tokens ONLY when they do
+      // not change shell semantics — a $ / ` / backslash inside survives
+      // quoting (expansion, command substitution) and must keep the token
+      // distinct, so a quoted retry of `curl "$URL"` vs `curl $URL` is not
+      // misread as the same command.
+      const hasExpansion = /\$|`|\\/.test(inner);
+      if (tok.length >= 2 && tok[0] === "'" && tok[tok.length - 1] === "'" && !inner.includes("'") && !/\s/.test(inner) && !hasExpansion) {
         return inner; // fully-quoted single token: quotes are cosmetic here
       }
       return tok;
@@ -111,6 +137,33 @@ function canonicalArgsKey(args) {
   return walk(args);
 }
 
+/**
+ * True when a shell command contains shell operators OUTSIDE quotes — i.e.
+ * & ; | < > ` ( ) — so quoting them CHANGES what the shell actually runs
+ * (`curl URL?ids=x&v=y` backgrounds the fetch and runs `v=y` as an
+ * assignment; `curl "URL?ids=x&v=y"` fetches the whole URL). Such a command
+ * is structurally ambiguous, so a quoted re-emission is a CORRECTED retry,
+ * not a duplicate. (Expansion/globbing cases like $VAR or globs are already
+ * kept distinct by normalizeShellCommandKey's quote rules.)
+ */
+function shellCommandHasUnquotedOps(cmd) {
+  if (typeof cmd !== 'string') return false;
+  let q = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i];
+    if (q) {
+      if (ch === q) q = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      q = ch;
+      continue;
+    }
+    if ('&;|<>`()'.includes(ch)) return true;
+  }
+  return false;
+}
+
 /** True if this exact (name, args) pair was already executed this session. */
 function wasCallExecuted(name, args) {
   const key = canonicalArgsKey(args);
@@ -121,11 +174,58 @@ function wasCallExecuted(name, args) {
 function resetSeenCalls() {
   seenCalls.length = 0;
   lastShellCommandKey = null;
+  lastShellHadOutput = false;
+  lastShellHadOps = false;
 }
 
 /** Remember an executed (name, args) pair. */
 function recordCall(name, args) {
-  seenCalls.push({ name, argsKey: canonicalArgsKey(args) });
+  seenCalls.push({ name, args, argsKey: canonicalArgsKey(args) });
+}
+
+/** Slug an automation name into its id (mirrors the store's slugify). */
+function slugifyId(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/** Skill names compare slash-normalized (cleanSkillName contract). */
+function stripLeadingSlash(s) {
+  return typeof s === 'string' ? s.replace(/^\/+/, '') : s;
+}
+
+/**
+ * Redundant-churn guard: `name` deletes a target that THIS request already
+ * created — write_file→delete_file (same path), write_skill→delete_skill
+ * (same name, slash-normalized), create_automation→delete_automation (same
+ * id, name slugified). Observed live: a multi-step task burned minutes on
+ * create → "already exists" → delete → recreate loops. The creation STAYS;
+ * the delete is skipped with a directive to proceed forward.
+ */
+function createdEarlierInRequest(name, args, ledger) {
+  const seen = ledger || seenCalls;
+  if (name === 'delete_automation') {
+    const id = args && args.id;
+    if (!id) return null;
+    const hit = seen.find((x) => x.name === 'create_automation' && slugifyId(x.args && x.args.name) === id);
+    return hit ? `automation ${JSON.stringify(hit.args && hit.args.name)}` : null;
+  }
+  if (name === 'delete_skill') {
+    const nm = stripLeadingSlash(args && args.name);
+    if (!nm) return null;
+    const hit = seen.find((x) => x.name === 'write_skill' && stripLeadingSlash(x.args && x.args.name) === nm);
+    return hit ? `skill ${JSON.stringify(nm)}` : null;
+  }
+  if (name === 'delete_file') {
+    const p = args && args.path;
+    if (!p) return null;
+    const np = normPath(p);
+    const hit = seen.find((x) => x.name === 'write_file' && normPath(x.args && x.args.path) === np);
+    return hit ? `file ${JSON.stringify(p)}` : null;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +365,76 @@ function validateArgs(name, args) {
 }
 
 /**
+ * File-argument normalization — applied BEFORE schema validation.
+ *
+ * Small models routinely emit file paths under alias keys ('file',
+ * 'filepath', 'filename', 'src', 'target') or as a bare unkeyed string
+ * instead of the schema's 'path' key, and the rejected call then gets
+ * repeated unchanged until the anti-repetition freeze. Normalizing here
+ * makes the call EXECUTE, and because the dedup ledger records the
+ * normalized args, alias-keyed repeats of the same path also dedup
+ * identically instead of re-running.
+ */
+const FILE_PATH_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'delete_file', 'list_files']);
+const FILE_PATH_ALIASES = ['file', 'filepath', 'file_path', 'filename', 'src', 'target'];
+// Exact JSON shape expected for each tool — appended to rejection errors so
+// the model corrects its payload instead of re-emitting (file tools + run_shell).
+const ARG_FORMATS = {
+  read_file: '{"path": "relative/file/path.ext"}',
+  write_file: '{"path": "relative/file/path.ext", "content": "file text"}',
+  edit_file: '{"path": "relative/file/path.ext", "old_text": "exact existing text", "new_text": "replacement text"}',
+  delete_file: '{"path": "relative/file/path.ext"}',
+  list_files: '{"path": "relative/directory"}',
+  run_shell: '{"command": "your_shell_command_here"}',
+};
+/**
+ * Normalize run_shell arguments the same way file tools are normalized:
+ * small models (Gemma 4B etc.) emit the command under alias keys (cmd, exec,
+ * script, c, shell_command) or as a bare unkeyed string instead of the
+ * schema's 'command' key, and the rejected call then gets repeated unchanged
+ * until the anti-repetition freeze. Normalizing here makes the call EXECUTE;
+ * the dedup ledger and the consecutive-command guard see the canonical
+ * command, so alias-keyed repeats of the same command are recognized as the
+ * same command (run_shell is DEDUP_EXEMPT, the consecutive guard applies).
+ */
+const SHELL_COMMAND_ALIASES = ['cmd', 'exec', 'script', 'c', 'shell_command'];
+function normalizeShellToolArgs(name, args) {
+  if (name !== 'run_shell') return args;
+  // Bare unkeyed string as the whole args value: run_shell "free -h".
+  if (typeof args === 'string' && args.trim() !== '') return { command: args.trim() };
+  // Alias keys: first present alias with a real string value becomes command.
+  if (args && typeof args === 'object' && !Array.isArray(args) && !Object.prototype.hasOwnProperty.call(args, 'command')) {
+    for (const alias of SHELL_COMMAND_ALIASES) {
+      if (Object.prototype.hasOwnProperty.call(args, alias) && typeof args[alias] === 'string' && args[alias].trim() !== '') {
+        const out = { ...args };
+        out.command = args[alias].trim();
+        delete out[alias];
+        return out;
+      }
+    }
+  }
+  return args;
+}
+
+function normalizeFileToolArgs(name, args) {
+  if (!FILE_PATH_TOOLS.has(name)) return args;
+  // Bare unkeyed string as the whole args value: read_file "scripts/x.py".
+  if (typeof args === 'string' && args.trim() !== '') return { path: args.trim() };
+  // Alias keys: first present alias with a real string value becomes path.
+  if (args && typeof args === 'object' && !Array.isArray(args) && !Object.prototype.hasOwnProperty.call(args, 'path')) {
+    for (const alias of FILE_PATH_ALIASES) {
+      if (Object.prototype.hasOwnProperty.call(args, alias) && typeof args[alias] === 'string' && args[alias].trim() !== '') {
+        const out = { ...args };
+        out.path = args[alias].trim();
+        delete out[alias];
+        return out;
+      }
+    }
+  }
+  return args;
+}
+
+/**
  * Execute one tool by name. Always resolves (never rejects) to a result.
  *
  * 1. Schema validation first: required params must be present, non-empty and
@@ -281,9 +451,15 @@ function validateArgs(name, args) {
 async function executeTool(name, args) {
   const tool = getTool(name);
   if (!tool) return { ok: false, error: `unknown tool: ${name}` };
-  const v = validateArgs(name, args);
+  const norm = normalizeShellToolArgs(name, normalizeFileToolArgs(name, args));
+  const v = validateArgs(name, norm);
   if (!v.ok) {
-    return { ok: false, invalidArgs: true, error: `invalid arguments for ${name}: ${v.error}` };
+    const fmt = ARG_FORMATS[name];
+    return {
+      ok: false,
+      invalidArgs: true,
+      error: `invalid arguments for ${name}: ${v.error}${fmt ? ` Expected format: ${fmt}` : ''}`,
+    };
   }
   const nargs = v.args;
   // Consecutive-duplicate guard for shell commands: if the SAME command
@@ -293,7 +469,7 @@ async function executeTool(name, args) {
   // and repeats of FAILED commands (recovery), still execute.
   if (name === 'run_shell' && typeof nargs.command === 'string') {
     const key = normalizeShellCommandKey(nargs.command);
-    if (key && key === lastShellCommandKey) {
+    if (key && key === lastShellCommandKey && lastShellHadOutput && !lastShellHadOps) {
       return {
         ok: false,
         error:
@@ -315,10 +491,26 @@ async function executeTool(name, args) {
     }
     recordCall(name, nargs);
   }
+  // Redundant-churn guard (before any side effect): deleting a target this
+  // request created is an undo-loop, not progress — the original creation
+  // stays and the delete is skipped with a directive. Not recorded, so a
+  // repeated churn delete still hits this guard (never the ledger).
+  const churn = createdEarlierInRequest(name, nargs);
+  if (churn) {
+    return {
+      ok: false,
+      skippedRedundant: true,
+      error:
+        `${name} skipped: you created ${churn} earlier in this request — deleting it now is a redundant undo. ` +
+        'Keep it and continue; do NOT delete-and-recreate.',
+    };
+  }
   try {
     const result = await Promise.resolve(tool.execute(nargs));
     if (name === 'run_shell' && result && result.ok) {
       lastShellCommandKey = normalizeShellCommandKey(nargs.command);
+      lastShellHadOutput = !!(result.stdout || result.stderr);
+      lastShellHadOps = shellCommandHasUnquotedOps(nargs.command);
     }
     return result;
   } catch (e) {
@@ -356,26 +548,45 @@ function safeParseArgs(str) {
 }
 
 /**
- * Normalize a parsed call object. Accepts BOTH the plife JSON contract
- * ({tool, args}) and the OpenAI/Qwen2.5 shape ({name, arguments}), with the
- * args keys interchangeable (args | arguments). A missing args key inside an
- * explicit tool tag/fence (or for the {tool,…} contract) defaults to {};
- * `outsideTags` (bare JSON in prose / whole-output) additionally requires an
- * explicit arguments/args key for name-shaped objects, so stray JSON that
- * merely mentions a registered tool name never fires. The registered tool
- * name must match exactly in every case. Returns { tool, args } or null.
+ * Normalize a parsed call object. Accepts the plife JSON contract ({tool,
+ * args}), the OpenAI/Qwen2.5 shapes ({name, arguments} and its echoed
+ * variants {"function": <name>, "arguments": {...}} / {"function":
+ * {"name": …, "arguments": …}}), with the args keys interchangeable
+ * (args | arguments). A missing args key inside an explicit tool tag/fence
+ * (or for the {tool,…} contract) defaults to {}; `outsideTags` (bare JSON in
+ * prose / whole-output) additionally requires an explicit arguments/args key
+ * for name-shaped objects, so stray JSON that merely mentions a registered
+ * tool name never fires. The registered tool name must match exactly in
+ * every case. Returns { tool, args } or null.
  */
 function normalizeCallObject(o, outsideTags) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  // OpenAI-native wrapper echo: {"function": {"name": …, "arguments": …}}.
+  const fnObj =
+    o.function && typeof o.function === 'object' && !Array.isArray(o.function)
+      ? o.function
+      : null;
   const name =
     (typeof o.tool === 'string' && o.tool) ||
+    (typeof o.function === 'string' && o.function) ||
+    (fnObj && typeof fnObj.name === 'string' && fnObj.name) ||
     (typeof o.name === 'string' && o.name) ||
     '';
   if (!name || !hasTool(name)) return null;
   const hasToolKey = typeof o.tool === 'string';
-  const hasArgsKey = o.args !== undefined || o.arguments !== undefined;
+  const hasArgsKey =
+    o.args !== undefined ||
+    o.arguments !== undefined ||
+    !!(fnObj && fnObj.arguments !== undefined);
   if (outsideTags && !hasToolKey && !hasArgsKey) return null; // mere name mention
-  const raw = hasArgsKey ? (o.args !== undefined ? o.args : o.arguments) : {};
+  const raw =
+    fnObj && fnObj.arguments !== undefined
+      ? fnObj.arguments
+      : o.args !== undefined
+        ? o.args
+        : o.arguments !== undefined
+          ? o.arguments
+          : {};
   if (typeof raw === 'string') {
     // arguments may arrive double-encoded as a JSON string
     try {
@@ -490,9 +701,10 @@ function extractToolCall(text) {
 function findBareToolObject(text) {
   // Object-start candidates: any of the key markers that can open a call
   // object — "tool" for the plife contract, "name"+"arguments"/"args" for
-  // the OpenAI/Qwen shape (name-shaped objects require an args key, so a
-  // prose mention of a tool name alone never fires).
-  const keys = ['"tool"', '"name"', '"arguments"', '"args"'];
+  // the OpenAI/Qwen shape, and "function" for the OpenAI-echo shape
+  // (name-shaped objects require an args key, so a prose mention of a tool
+  // name alone never fires).
+  const keys = ['"tool"', '"function"', '"name"', '"arguments"', '"args"'];
   const hits = [];
   for (const key of keys) {
     let i = text.indexOf(key);
@@ -556,10 +768,58 @@ function buildSystemPrompt(base) {
     `${base}\n\n` +
     'You are the plife dashboard agent. Use the provided tools to inspect and modify files, ' +
     'run shell commands, and manage automations, skills and the file Library.\n' +
-    'To call a tool, output exactly ONE JSON object as the very first thing, nothing before it:\n' +
-    '{"tool": "<tool_name>", "args": {...}}\n' +
-    'Complete, real values only — no placeholders (?, ..., <path>, N/A, TODO). Calls with ' +
-    'missing or placeholder arguments are rejected. Never repeat a tool call that already succeeded.\n' +
+    'To call a tool, output a JSON object of the form {"tool": "<tool_name>", "args": {...}}.\n' +
+    'EMIT SEVERAL INDEPENDENT CALLS IN ONE REPLY: when a task has multiple steps that do not ' +
+    'depend on each other (e.g. writing two files, creating a script and scheduling an ' +
+    'automation), output one JSON object per call in the same reply (several ```json blocks) — ' +
+    'they are all executed together, which saves round trips. Only wait for a result when a ' +
+    'later call depends on an earlier one (running a file you just wrote, reading a file before ' +
+    'replying, checking output before continuing). Complete, real values only — no placeholders ' +
+    '(?, ..., <path>, N/A, TODO). Calls with missing or placeholder arguments are rejected. ' +
+    'Never repeat a tool call that already succeeded, and never re-list or re-read what a tool ' +
+    'result already told you.\n' +
+    'PLAN multi-step work BEFORE calling tools: decide the exact file names, skill names and ' +
+    'arguments once, then emit the independent calls together. NEVER churn: do not re-create, ' +
+    're-write or delete-and-recreate what a tool result already created — if a call reports ' +
+    '"already exists" or a name collision, use the existing item or pick a NEW name and move on. ' +
+    'Never delete something you created earlier in the same task, and do not repeat similar ' +
+    'calls with only trivial changes. One verification at the end is enough. Paths are ' +
+    'workspace-relative: write scripts into the workspace (e.g. scripts/...), never absolute ' +
+    'system paths like /workspace or /tmp.\n' +
+    'WORKSPACE ACCESS: you ALWAYS have direct, live access to the workspace and every file in ' +
+    'it — list_files, read_file, write_file, edit_file, delete_file and run_shell operate ' +
+    'there. NEVER claim you cannot see or check the workspace, and NEVER tell the user to ' +
+    'inspect files or run commands manually in a terminal — use your tools and answer from ' +
+    'their real output. Automation and script logs land in the workspace logs/ directory by ' +
+    'default (scripts resolve relative paths against the workspace root). When a user asks ' +
+    'where a file or log is, or whether it exists, locate it with list_files/read_file and ' +
+    'report the actual result.\n' +
+    'FILE TOOL PAYLOADS — exact argument shapes, copy these: read_file: {"tool":"read_file","args":{"path":"scripts/get_solana_price.py"}}; ' +
+    'write_file: {"tool":"write_file","args":{"path":"scripts/new.py","content":"print(1)"}}; ' +
+    'edit_file: {"tool":"edit_file","args":{"path":"scripts/x.py","old_text":"exact existing text","new_text":"replacement text"}}; ' +
+    'delete_file: {"tool":"delete_file","args":{"path":"scripts/old.py"}}; ' +
+    'list_files: {"tool":"list_files","args":{"path":"scripts"}}. ' +
+    'The path key is ALWAYS required — never use another key (file, filename, src), never a bare ' +
+    'string, never a placeholder; pass the path exactly as it appears in list_files output. ' +
+    'run_shell: {"tool":"run_shell","args":{"command":"free -h"}} — the command key is ALWAYS ' +
+    'required: never use cmd/exec/script/shell_command, never a bare string, never a placeholder ' +
+    '("your_shell_command_here" is a placeholder example, not a value you should send); one ' +
+    'command at a time, single line, no pipes-to-nowhere.\n' +
+    'SCRIPT & AUTOMATION TASKS — strict order, each step EXACTLY ONCE: (1) write the script ' +
+    'file once; (2) create the automation pointing to that script once; (3) list the ' +
+    'automations once to confirm; (4) STOP and give the final answer. NEVER read output log ' +
+    'files in the same task — logs are only written when the automation runs on its schedule ' +
+    'LATER, so a missing log right after creation is NORMAL, not an error. NEVER run chmod on ' +
+    '.py files (the python runner does not need the executable bit). NEVER rewrite a script ' +
+    'you just wrote, NEVER re-create an automation that already exists, and NEVER retry a call ' +
+    'that a tool result just told you was skipped as a duplicate — treat skips as done and ' +
+    'move forward.\n' +
+    'SHELL URL QUOTING — MANDATORY: any URL containing a query string (? or &) passed to curl ' +
+    'or wget MUST be enclosed in DOUBLE QUOTES: `curl -s "https://api.example.com/v1/price?ids=solana&vs_currencies=usd"`. ' +
+    'An unquoted & is a shell background/separator operator, so the request breaks or truncates. ' +
+    'For JSON APIs, embedding a small python3 one-liner is often more reliable: ' +
+    '`python3 -c "import urllib.request,json; d=json.load(urllib.request.urlopen(\'https://api.example.com/v1/price?ids=solana&vs_currencies=usd\')); print(d)"`. ' +
+    'If a fetch failed, retry the corrected quoted command — a corrected retry is NOT a duplicate.\n' +
     'If a call fails, fix it and retry once, then keep going. After the tool results, work until ' +
     'the task is done, then reply with a short plain-text final answer.\n' +
     'You execute shell commands yourself with the run_shell tool and have internet access through curl. ' +
@@ -568,7 +828,12 @@ function buildSystemPrompt(base) {
     'Automations: creating/scheduling/running/removing automations is done with the automation ' +
     'tools — never suggest OS crontab entries.\n' +
     'Library: attached files are usually inlined in your input; use the library tools to list, ' +
-    'read or save documents.\n'
+    'read or save documents.\n' +
+    'Skills: skills are plain user-managed folders in the workspace skills/ directory — they are ' +
+    'NOT built-in tools or core functionality. List them with list_skills, create or update them ' +
+    'with write_skill, run them with run_skill, and permanently DELETE any user skill with ' +
+    'delete_skill when the user asks. A delete request never needs an exemption — just call the ' +
+    'tool; only report failure when the tool returns an error (invalid name or skill not found).\n'
   );
 }
 
@@ -592,7 +857,7 @@ function buildSystemPrompt(base) {
 //  - a brand-new topic mid-conversation grows the set exactly once (one
 //    one-time cache invalidation, then stable again),
 //  - the result is sorted by name → deterministic serialization.
-const CORE_TOOL_NAMES = ['edit_file', 'list_files', 'read_file', 'run_shell', 'write_file'];
+const CORE_TOOL_NAMES = ['delete_file', 'edit_file', 'list_files', 'read_file', 'run_shell', 'write_file'];
 
 const TOPIC_TOOLS = [
   {
@@ -804,6 +1069,66 @@ function inferAutomationFromUser(text) {
   return args;
 }
 
+// ---------------------------------------------------------------------------
+// Parallel-safe grouping for one round's tool calls
+//
+// chat.js executes a round's calls group-by-group: calls INSIDE a group may
+// run concurrently, groups run in emission order. The conflict rules below
+// guarantee that concurrency can never corrupt state or the dedup ledger:
+//   - exec tools (run_shell, run_skill, run_automation) run arbitrary code →
+//     they serialize with EVERYTHING (including each other);
+//   - file tools conflict only on path overlap (same file, or a listing of a
+//     directory that contains the other call's target) — different paths are
+//     safe to parallelize;
+//   - automation/skills/library tools share a JSON state store → they
+//     serialize within their class;
+//   - unknown tools are conservative: serialize with everything.
+// An exact-duplicate call pair can never land in the same group (identical
+// args ⇒ same target ⇒ conflict ⇒ split across groups ⇒ the dedup ledger,
+// which records sequentially, catches the repeat).
+// ---------------------------------------------------------------------------
+function callClass(name) {
+  if (name === 'run_shell' || name === 'run_skill' || name === 'run_automation') return 'exec';
+  if (['read_file', 'write_file', 'edit_file', 'delete_file', 'list_files'].includes(name)) return 'file';
+  if (name.includes('automation')) return 'store-auto';
+  if (name.includes('skill')) return 'store-skill';
+  if (name.includes('library')) return 'store-library';
+  return 'other';
+}
+function normPath(p) {
+  return path
+    .resolve(String(p == null ? '.' : p))
+    .replace(/[\/\\]+$/, '');
+}
+function pathsOverlap(a, b) {
+  if (a === b) return true;
+  return a.startsWith(b + '/') || b.startsWith(a + '/');
+}
+function callsConflict(a, b) {
+  const ca = callClass(a && a.name);
+  const cb = callClass(b && b.name);
+  if (ca === 'exec' || cb === 'exec' || ca === 'other' || cb === 'other') return true;
+  if (ca === 'file' && cb === 'file') {
+    return pathsOverlap(normPath(a.args && a.args.path), normPath(b.args && b.args.path));
+  }
+  // same shared-state store class (or different classes entirely: file vs
+  // store classes touch disjoint storage → no conflict)
+  return ca === cb;
+}
+function groupIndependent(calls) {
+  const groups = [];
+  outer: for (const c of calls) {
+    for (const g of groups) {
+      if (!g.some((x) => callsConflict(x, c))) {
+        g.push(c);
+        continue outer;
+      }
+    }
+    groups.push([c]);
+  }
+  return groups;
+}
+
 module.exports = {
   listTools,
   getTool,
@@ -812,6 +1137,7 @@ module.exports = {
   resetSeenCalls,
   canonicalArgsKey,
   normalizeShellCommandKey,
+  shellCommandHasUnquotedOps,
   validateArgs,
   toOpenAITools,
   hasTool,
@@ -827,4 +1153,9 @@ module.exports = {
   isAutomationCreationRequest,
   findAutomationPayload,
   inferAutomationFromUser,
+  groupIndependent,
+  callClass,
+  pathsOverlap,
+  createdEarlierInRequest,
+  slugifyId,
 };

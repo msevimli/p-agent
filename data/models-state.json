@@ -1,15 +1,6 @@
 {
-  "activeId": "qwen-2-5-7b-q5",
+  "activeId": "nemotron-3-5",
   "models": [
-    {
-      "id": "gemma",
-      "name": "Gemma 2 2B Instruct",
-      "provider": "local",
-      "endpoint": "http://127.0.0.1:8080",
-      "model": "gemma-2-2b-it-Q4_K_M.gguf",
-      "contextLength": 8192,
-      "hasKey": false
-    },
     {
       "id": "qwen-coder",
       "name": "Qwen2.5 Coder 7B",
@@ -29,22 +20,14 @@
       "hasKey": false
     },
     {
-      "id": "Qwen2.5-VL-3B",
-      "name": "Qwen2.5-VL-3B-Instruct-Q4_K_M",
-      "provider": "local",
-      "endpoint": "http://127.0.0.1:8080",
-      "model": "Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
-      "contextLength": 8192,
-      "hasKey": false
-    },
-    {
       "id": "ling_3_0",
       "name": "Ling: Ling 3.0 Flash Sante",
       "provider": "openrouter",
       "endpoint": "https://openrouter.ai/api/v1",
       "model": "inclusionai/ling-3.0-flash-sante:free",
       "contextLength": 8192,
-      "hasKey": false
+      "templateId": "",
+      "hasKey": true
     },
     {
       "id": "deepseek",
@@ -56,30 +39,87 @@
       "hasKey": false
     },
     {
-      "id": "qwen-coder-3",
-      "name": "Qwen3-coder-30b",
-      "provider": "local",
-      "endpoint": "http://127.0.0.1:8082",
-      "model": "qwen3-coder-30b-a3b",
-      "contextLength": 8192,
-      "hasKey": false
-    },
-    {
-      "id": "deepseek-r1",
-      "name": "DeepSeek-R1",
-      "provider": "local",
-      "endpoint": "http://127.0.0.1:8081",
-      "model": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
-      "contextLength": 16334,
-      "hasKey": false
-    },
-    {
       "id": "qwen-2-5-7b-q5",
       "name": "Qwen2.5-7B-Q5-K-M",
       "provider": "local",
-      "endpoint": "http://127.0.0.1:8083",
+      "endpoint": "http://127.0.0.1:8080",
       "model": "qwen2.5-coder-7b-instruct-q5_k_m.gguf",
-      "contextLength": 131072,
+      "contextLength": 65536,
+      "hasKey": false,
+      "role": "primary"
+    },
+    {
+      "id": "qwen-2-5-1-5b-q5",
+      "name": "Qwen2.5-1.5B-Q5-K-M",
+      "provider": "local",
+      "endpoint": "http://127.0.0.1:8081",
+      "model": "qwen2.5-coder-1.5b-instruct-q5_k_m.gguf",
+      "contextLength": 32768,
+      "hasKey": false
+    },
+    {
+      "id": "qwen-2-5-3b",
+      "name": "Qwen2.5-3B-Q5-K-M",
+      "provider": "local",
+      "endpoint": "http://127.0.0.1:8081",
+      "model": "qwen2.5-coder-3b-instruct-q5_k_m.gguf",
+      "contextLength": 8192,
+      "hasKey": false,
+      "role": "router"
+    },
+    {
+      "id": "gemma4-4b",
+      "name": "Gemma4-4B",
+      "provider": "local",
+      "endpoint": "http://127.0.0.1:8081",
+      "model": "gemma-4-E4B-it-Q5_K_M.gguf",
+      "contextLength": 8192,
+      "role": "",
+      "templateId": "",
+      "hasKey": false
+    },
+    {
+      "id": "nemotron-3-5",
+      "name": "Nemotron 3.5 Lightning",
+      "provider": "remote",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "nvidia/nemotron-3.5-lightning:free",
+      "contextLength": 256192,
+      "role": "",
+      "templateId": "",
+      "hasKey": true
+    },
+    {
+      "id": "qwen3-5-q-4-ud",
+      "name": "qwen3.5-9B-UD",
+      "provider": "local",
+      "endpoint": "http://127.0.0.1:8081",
+      "model": "Qwen3.5-9B-UD-Q4_K_XL.gguf",
+      "contextLength": 16192,
+      "role": "",
+      "templateId": "",
+      "hasKey": false
+    },
+    {
+      "id": "liquidai-lfm2-5-2-6b",
+      "name": "LiquidAI: LFM2.5-2.6B",
+      "provider": "openrouter",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "liquid/lfm-2.5-2.6b:free",
+      "contextLength": 250000,
+      "role": "",
+      "templateId": "",
+      "hasKey": true
+    },
+    {
+      "id": "nematron-nano-9b",
+      "name": "Nematron-Nano-9B",
+      "provider": "local",
+      "endpoint": "http://127.0.0.1:8081",
+      "model": "nvidia_NVIDIA-Nemotron-Nano-9B-v2-Q5_K_M.gguf",
+      "contextLength": 8192,
+      "role": "",
+      "templateId": "new-template",
       "hasKey": false
     }
   ]

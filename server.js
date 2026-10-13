@@ -26,11 +26,13 @@ app.use('/api/sessions', require('./routes/sessions'));
 app.use('/api/fs', require('./routes/fs'));
 app.use('/api/library', require('./routes/library'));
 app.use('/api/skills', require('./routes/skills'));
+app.use('/api/models/templates', require('./routes/templates'));
 app.use('/api/models', require('./routes/models'));
 app.use('/api/automations', require('./routes/automations'));
 app.use('/api/queue', require('./routes/queue'));
 app.use('/api/channels', require('./routes/channels'));
 app.use('/api/system', require('./routes/system'));
+app.use('/api/system/prompt', require('./routes/systemPrompt'));
 
 // Optional introspection endpoint so the tool registry is inspectable at runtime.
 app.get('/api/tools', (_req, res) => {
@@ -52,26 +54,49 @@ app.listen(config.port, () => {
   telegramBot.syncStart();
   if (telegramBot.status().enabled) console.log('telegram channel: enabled (polling when token is set)');
 
-  // Warm-up the active model in the background (AUTO_WARMUP=false to skip):
-  // one max_tokens=1 completion containing ONLY the static prompt prefix so
-  // the first real user message starts from the llama.cpp KV cache instead of
-  // a minutes-long cold prefill. Runs through the same FIFO request queue as
-  // chat and never blocks startup; an unreachable server produces a clear
-  // logged error instead of hanging.
-  if (config.autoWarmup) {
+  // Model management + warm-up at boot: ensure the cascade pair (or the
+  // active model) is running via its systemd user units (AUTO_MANAGE_MODELS
+  // to skip), then prefill the static prompt prefixes (AUTO_WARMUP=false to
+  // skip) so the first real user message starts from the llama.cpp KV cache
+  // instead of a minutes-long cold prefill. Runs in the background through
+  // the same FIFO queue as chat and never blocks startup.
+  const cascadeBoot = require('./services/cascade').resolve();
+  const bootModelIds = () => {
+    if (cascadeBoot.enabled) return [cascadeBoot.router.id, cascadeBoot.primary.id];
     const active = modelManager.getActiveModel();
-    if (active && active.id) {
+    return active && active.id ? [active.id] : [];
+  };
+  const warmBoot = (ids) => {
+    if (!config.autoWarmup) return;
+    for (const id of ids) {
       modelLifecycle
-        .warmup(active.id)
+        .warmup(id)
         .then((r) => {
           if (r && r.ok && r.promptTokens) {
-            console.log(`startup warm-up: prefix pre-filled (${r.promptTokens} prompt tokens)`);
+            console.log(`startup warm-up (${id}): prefix pre-filled (${r.promptTokens} prompt tokens)`);
           } else if (r && !r.ok) {
-            console.log(`startup warm-up skipped: ${r.error}`);
+            console.log(`startup warm-up skipped (${id}): ${r.error}`);
           }
         })
-        .catch((e) => console.log(`startup warm-up skipped: ${String((e && e.message) || e)}`));
+        .catch((e) => console.log(`startup warm-up skipped (${id}): ${String((e && e.message) || e)}`));
     }
+  };
+  if (config.autoManageModels) {
+    modelLifecycle
+      .ensureCascadeModels()
+      .then((res) => {
+        const line = (Array.isArray(res) ? res : [res])
+          .map((x) => (x && x.ok ? `ok ${x.detail || x.id || ''}` : `FAIL ${(x && x.error) || '?'}`))
+          .join(' | ');
+        console.log(`[models] ensure: ${line}`);
+        warmBoot(bootModelIds());
+      })
+      .catch((e) => {
+        console.log(`[models] ensure failed: ${String((e && e.message) || e)}`);
+        warmBoot(bootModelIds());
+      });
+  } else {
+    warmBoot(bootModelIds());
   }
 });
 

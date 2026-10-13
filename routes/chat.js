@@ -26,17 +26,27 @@
  */
 const express = require('express');
 const router = express.Router();
+const fs = require('fs');
+const path = require('path');
 const config = require('../config');
+const systemPromptSvc = require('../services/systemPrompt');
 const { complete, buildChatPayload } = require('../services/llamaClient');
 const toolLoop = require('../services/toolLoop');
 const historyManager = require('../services/historyManager');
 const libraryManager = require('../services/libraryManager');
 const toolCallParser = require('../services/toolCallParser');
+const cascadeService = require('../services/cascade');
 const automationsTools = require('../tools/automationsTools');
 const createAutomationTool = automationsTools.tools.find((t) => t.name === 'create_automation');
 
 // --- SSE framing helpers -----------------------------------------------------
 const contentChunk = (c) => `data: ${JSON.stringify({ choices: [{ delta: { content: c } }] })}\n\n`;
+const reasoningChunk = (r) => `data: ${JSON.stringify({ choices: [{ delta: { content: '', reasoning: r } }] })}\n\n`;
+// Round boundary for live-streamed loop rounds: the frontend keeps the
+// streamed text of the FINAL round (final:true) and wipes any earlier
+// round's raw text (tool-call JSON / ROUTE_TO_PRIMARY markers) once the
+// round concludes (final:false) — live tokens without tool-JSON pollution.
+const roundChunk = (final) => `data: ${JSON.stringify({ type: 'round', final: !!final })}\n\n`;
 const statusChunk = (m) => `data: ${JSON.stringify({ type: 'status', message: m })}\n\n`;
 const usageChunk = (u) => `data: ${JSON.stringify({ choices: [], usage: u })}\n\n`;
 const DONE_CHUNK = 'data: [DONE]\n\n';
@@ -56,6 +66,15 @@ const FORCE_TOOL_MSG =
   '{"tool": "create_automation", "args": {"name": "...", "schedule_type": "interval" or "cron", ' +
   '"interval_minutes": N or "cron": "5-field expression", "action_type": "script"|"skill"|"prompt", ' +
   '"script" / "skill" / "prompt": "..."}} — use the schedule and action the user asked for.';
+
+// Fed back when the final answer LOOKS like a tool call but could not be
+// parsed (malformed JSON — unbalanced quotes, stray commas). Never serve
+// raw JSON as the final answer; one corrective round re-emits the call.
+const MALFORMED_TOOL_MSG =
+  'Your previous reply looked like a tool call, but its JSON was malformed and could not ' +
+  'be parsed, so NOTHING was executed. Re-emit the ENTIRE call as valid JSON now, with ' +
+  'nothing before or after it, e.g. {"tool": "<tool_name>", "args": {...}} — mind the ' +
+  'quotes and commas.';
 
 function openSse(res, queuePosition) {
   res.status(200);
@@ -92,8 +111,29 @@ function trimNotice(rePrefillTokens, getTimings) {
   return `✂ Context trimmed, next reply may take longer (est. re-prefill ~${Math.max(1, Math.round(rePrefillTokens / pp))}s).`;
 }
 
-// Swallow write-after-abort / socket-closed errors during shutdown.
+// Swallow write-after-abort / socket-closed errors during shutdown. While a
+// request is active it also mirrors every status line and streamed token into
+// res._chatState (the recovery registry), so a client that lost its SSE socket
+// can poll GET /api/chat/state/:sessionId and recover the turn. Recording
+// happens even when `lost` — only the actual socket write is skipped then.
 function safeWrite(res, chunk, lost) {
+  const st = res && res._chatState;
+  if (st && typeof chunk === 'string' && chunk.startsWith('data: ')) {
+    try {
+      const j = JSON.parse(chunk.slice(6));
+      if (j && j.type === 'status' && typeof j.message === 'string') {
+        st.statuses.push(String(j.message).slice(0, 300));
+        if (st.statuses.length > 100) st.statuses.shift();
+        st.updatedAt = Date.now();
+      } else if (
+        j && j.choices && j.choices[0] && j.choices[0].delta &&
+        typeof j.choices[0].delta.content === 'string'
+      ) {
+        st.text = (st.text + j.choices[0].delta.content).slice(-2_000_000);
+        st.updatedAt = Date.now();
+      }
+    } catch { /* not a JSON payload — ignore */ }
+  }
   if (lost) return;
   try {
     res.write(chunk);
@@ -107,14 +147,81 @@ function ensureSystem(messages, systemPrompt) {
 }
 
 // Human-readable status label for a tool call (for the frontend activity feed).
+// File labels resolve alias keys (file/filepath/filename/src) and bare-string
+// args to `path` — same normalization as executeTool, so the status never
+// shows "Reading file: ?" for a call that will actually execute. run_shell
+// resolves the same alias set for `command` (cmd/exec/script/c/shell_command).
+const FILE_PATH_ALIASES = ['file', 'filepath', 'file_path', 'filename', 'src', 'target'];
+const SHELL_COMMAND_ALIASES = ['cmd', 'exec', 'script', 'c', 'shell_command'];
+function labelCommand(a) {
+  if (a === null || a === undefined) return '?';
+  if (typeof a === 'string') return a.trim() || '?';
+  if (typeof a !== 'object' || Array.isArray(a)) return '?';
+  if (typeof a.command === 'string' && a.command.trim() !== '') return a.command;
+  for (const alias of SHELL_COMMAND_ALIASES) {
+    if (typeof a[alias] === 'string' && a[alias].trim() !== '') return a[alias];
+  }
+  return '?';
+}
+function labelPath(a) {
+  if (a === null || a === undefined) return '?';
+  if (typeof a === 'string') return a.trim() || '?';
+  if (typeof a !== 'object' || Array.isArray(a)) return '?';
+  if (typeof a.path === 'string' && a.path.trim() !== '') return a.path;
+  for (const alias of FILE_PATH_ALIASES) {
+    if (typeof a[alias] === 'string' && a[alias].trim() !== '') return a[alias];
+  }
+  return '?';
+}
+// Conversation-aware path recovery for file tools with unusable args: when
+// the model calls read_file/write_file/edit_file with empty/missing args,
+// the single existing file path in the conversation is overwhelmingly the
+// intended target ("can you check and refactor: scripts/get_solana_price.py").
+// Fill it ONLY when exactly one unique candidate exists AND it resolves to a
+// real file inside the workspace — ambiguous or missing targets stay
+// rejected (a rejected call is safe and teaches the model; a wrong read
+// would confuse it). write/edit never EXECUTE on the filled path alone
+// (content/old_text+new_text are still required), so this cannot overwrite
+// anything without the model also supplying real content. delete_file is
+// deliberately excluded (destructive).
+const FILE_PATH_RE = /[\w./-]+\.(?:py|js|ts|sh|md|txt|json|ya?ml|toml|csv|html|css|log)\b/gi;
+function recoverFilePath(msgs) {
+  const text = (msgs || [])
+    .map((m) => (m && typeof m.content === 'string' ? m.content : ''))
+    .join('\n');
+  const cands = [...new Set((text.match(FILE_PATH_RE) || []).map((s) => s.trim()))].filter(
+    (s) => s.includes('/') && !/^https?:\/\//i.test(s)
+  );
+  if (cands.length !== 1) return null;
+  const abs = path.resolve(config.workRoot, cands[0]);
+  if (!(abs === config.workRoot || abs.startsWith(config.workRoot + path.sep))) return null;
+  try {
+    if (!fs.statSync(abs).isFile()) return null;
+  } catch {
+    return null;
+  }
+  return cands[0];
+}
+
+// Order-insensitive serialization of a call's args — used to count repeated
+// IDENTICAL invalid emissions (the model re-emitting the same broken call is
+// a stronger signal than the 7-round cap).
+function stableArgsKey(args) {
+  if (args === null || args === undefined || typeof args !== 'object') return '::' + String(args);
+  return Object.keys(args)
+    .sort()
+    .map((k) => `${k}=${JSON.stringify(args[k])}`)
+    .join('&');
+}
+
 function toolLabel(name, args) {
   const a = args || {};
   switch (name) {
-    case 'read_file': return `Reading file: ${a.path || '?'}`;
-    case 'write_file': return `Writing file: ${a.path || '?'}`;
-    case 'edit_file': return `Editing file: ${a.path || '?'}`;
-    case 'list_files': return `Listing directory: ${a.path || '.'}`;
-    case 'run_shell': return `Running command: ${String(a.command || '').slice(0, 90)}`;
+    case 'read_file': return `Reading file: ${labelPath(a)}`;
+    case 'write_file': return `Writing file: ${labelPath(a)}`;
+    case 'edit_file': return `Editing file: ${labelPath(a)}`;
+    case 'list_files': return `Listing directory: ${labelPath(a) !== '?' ? labelPath(a) : '.'}`;
+    case 'run_shell': return `Running command: ${String(labelCommand(a)).slice(0, 90)}`;
     case 'create_automation': return `Creating automation: ${a.name || '?'}`;
     case 'run_automation': return `Triggering automation: ${a.id || '?'}`;
     case 'delete_automation': return `Deleting automation: ${a.id || '?'}`;
@@ -241,15 +348,21 @@ function emitTextChunks(res, text, lost) {
  * tools array answers conversationally instead of echoing call JSON).
  * Callers must NOT re-emit the returned text: it was streamed live.
  */
-async function streamPlainAnswer(res, agentMessages, gen, onUsage, lost, firstAttempt, plainSystem, onTimings) {
+async function streamPlainAnswer(res, agentMessages, gen, onUsage, lost, firstAttempt, plainSystem, onTimings, target) {
   let out = '';
   let prevLen = -1;
   for (let r = 0; r <= config.continuationMaxRounds; r++) {
     const acc = await (r === 0 && firstAttempt
       ? firstAttempt
       : complete({
-          payload: buildChatPayload(agentMessages, gen, plainSystem ? { system: plainSystem } : {}),
+          payload: buildChatPayload(agentMessages, gen, {
+            ...(plainSystem ? { system: plainSystem } : {}),
+            ...(target ? { target } : {}),
+          }),
+          // Socket-layer target override (doComplete/streamCompletions).
+          target,
           onDelta: (d) => safeWrite(res, contentChunk(d), lost),
+          onReasoning: (r) => safeWrite(res, reasoningChunk(r), lost),
           onUsage,
           onTimings,
         }));
@@ -277,6 +390,12 @@ router.post('/', async (req, res) => {
 
   const { messages, stream = true, attachments } = req.body || {};
   const gen = req.body && typeof req.body.generation === 'object' ? req.body.generation : {};
+  // Reasoning effort/visibility controller rides the gen object so EVERY
+  // buildChatPayload call site (plain path, tool loop, cascade router)
+  // inherits it from this one line; buildChatPayload maps it to payload
+  // params (reasoning_effort / thinking budget) per endpoint class.
+  const reasoningLevel = String((req.body && req.body.reasoningLevel) || '').toLowerCase();
+  if (reasoningLevel && gen && typeof gen === 'object') gen.reasoningLevel = reasoningLevel;
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages array is required' });
   }
@@ -285,13 +404,17 @@ router.post('/', async (req, res) => {
   }
 
   const toolsEnabled = config.toolCallingEnabled && toolLoop.listTools().length > 0;
-  const systemPrompt = toolsEnabled
+  // A persisted system-prompt override (System view) replaces the generated
+  // template byte-for-byte, on both the tool path and the tool-less path.
+  const generatedPrompt = toolsEnabled
     ? toolLoop.buildSystemPrompt(config.llamaSystemPrompt)
     : `${config.llamaSystemPrompt}\n\n${toolLoop.AUTOMATIONS_GUIDANCE}`;
+  const systemPromptText = systemPromptSvc.getOverride() || generatedPrompt;
+  const systemPrompt = systemPromptText;
   // Degraded/tool-less re-runs must NOT instruct JSON tool-call output (a
   // model that cannot carry the tools array would echo the call as plain
-  // text); they get the base prompt only.
-  const plainSystemPrompt = `${config.llamaSystemPrompt}\n\n${toolLoop.AUTOMATIONS_GUIDANCE}`;
+  // text); they get the base prompt only. The override still applies.
+  const plainSystemPrompt = systemPromptSvc.getOverride() || `${config.llamaSystemPrompt}\n\n${toolLoop.AUTOMATIONS_GUIDANCE}`;
 
   // Working conversation history (system-first) mutated by the loop. Library
   // attachments are resolved and inlined into the last user message BEFORE
@@ -325,8 +448,53 @@ router.post('/', async (req, res) => {
       : toolLoop.toOpenAITools()
     : undefined;
 
+  // Two-stage cascade: a fast 'router' model handles stage 1 (intent + tool
+  // selection), a heavy 'primary' model stage 2 (final generation). Resolved
+  // fresh per request from the registry roles; when no router role exists the
+  // classic single-model loop on the active model is used unchanged.
+  const cascade = cascadeService.resolve();
+  // Router-stage tools: the five core file/shell tools only (automation,
+  // Library, skills are primary-model territory). Same byte-stable array for
+  // warm-up and every router round — PROMPT-CACHE CONTRACT.
+  const routerToolsArr = cascadeService.routerTools();
+  // Names the router may actually execute at stage 1. Anchor for the
+  // off-registry guard: a router-emitted call for ANY other registered tool
+  // escalates to the primary without executing (see the guard inside the loop).
+  // NOTE: routerToolsArr holds OpenAI-wrapped tools ({ type, function: { name } })
+  // — read the name from the wrapped shape (t.name is undefined there; this
+  // mistake once made the Set a single `undefined` and blocked ALL router calls).
+  const routerToolNames = new Set(
+    routerToolsArr.map((t) => (t && t.function && t.function.name) || t.name).filter(Boolean)
+  );
+
+  // Router-stage payloads must carry the ROUTER system prompt (agent prompt +
+  // routing addendum). agentMessages holds the PRIMARY system prompt, so the
+  // leading system message is swapped for router rounds (buildChatMessages
+  // only injects opts.system when no system message exists). The swap is
+  // byte-stable: same router prompt string every round -> KV cache stays
+  // valid for the shared tail.
+  const withRouterSystem = (msgs) =>
+    cascade.enabled && Array.isArray(msgs) && msgs[0] && msgs[0].role === 'system'
+      ? msgs.map((m, idx) => (idx === 0 ? { ...m, content: cascade.routerSystem } : m))
+      : msgs;
+
   let usage = null;
   let lastTimings = null; // llama.cpp timings from the final chunk (cache + speeds)
+
+  // Per-turn token telemetry: llama.cpp reports usage PER COMPLETION, so
+  // accumulate completion_tokens across every round of this turn (router +
+  // tool loop + final answer). The client's message badge then shows ONLY
+  // what this response generated — never the cumulative session context.
+  // prompt_tokens keeps the final round's value (the session context that
+  // completion actually saw — used for the client budget + histTokens
+  // calibration, which stay per-completion).
+  const captureUsage = (u) => {
+    if (!u) return;
+    usage = {
+      ...u,
+      completion_tokens: (Number(usage && usage.completion_tokens) || 0) + (Number(u.completion_tokens) || 0),
+    };
+  };
 
   // Context budget (server-reported n_ctx, read-only) + watermark thresholds
   // for history compaction. `histTokens` tracks the estimated tokens of the
@@ -401,17 +569,39 @@ router.post('/', async (req, res) => {
   };
   res.on('close', () => clearTimeout(coldStartTimer));
 
+  // Live-stream handlers shared by the pre-queued first completion AND every
+  // tool-loop round: content deltas and reasoning traces are written to the
+  // client as they arrive. roundStreamed records whether the current round
+  // actually emitted tokens (declared here — firstCall is built above the
+  // loop; the final-round flush decision reads it after the loop).
+  let roundStreamed = false;
+  const streamDelta = (d) => {
+    roundStreamed = true;
+    safeWrite(res, contentChunk(d), lost);
+  };
+  const streamReasoning = (r) => safeWrite(res, reasoningChunk(r), lost);
+
   const firstCall = toolsEnabled
     ? {
-        payload: buildChatPayload(agentMessages, gen, { system: systemPrompt, tools }),
-        onUsage: (u) => { usage = u; },
+        payload: buildChatPayload(cascade.enabled ? withRouterSystem(agentMessages) : agentMessages, gen, cascade.enabled
+          ? { system: cascade.routerSystem, tools: routerToolsArr, target: cascade.targets.router, maxTokens: config.routerMaxTokens, temperature: config.routerTemperature }
+          : { system: systemPrompt, tools }),
+        // Target override for the SOCKET layer (doComplete/streamCompletions) —
+        // the payload-level target only stamps payload.model/samplers.
+        target: cascade.enabled ? cascade.targets.router : undefined,
+        // Stream round 1 live exactly like every other loop round (the
+        // round-boundary events then keep or wipe the text as appropriate).
+        onDelta: streamDelta,
+        onReasoning: streamReasoning,
+        onUsage: captureUsage,
         onTimings: (t) => { lastTimings = t; },
         onFirstChunk: markFirstChunk,
       }
     : {
         payload: buildChatPayload(agentMessages, gen, {}),
         onDelta: (d) => safeWrite(res, contentChunk(d), lost),
-        onUsage: (u) => { usage = u; },
+        onReasoning: (r) => safeWrite(res, reasoningChunk(r), lost),
+        onUsage: captureUsage,
         onTimings: (t) => { lastTimings = t; },
         onFirstChunk: markFirstChunk,
       };
@@ -442,6 +632,10 @@ router.post('/', async (req, res) => {
     );
   }
 
+  if (cascade.enabled) {
+    safeWrite(res, statusChunk(`⚡ ${cascade.router.name} — fast routing (intent + tool selection)…`), lost);
+  }
+
   // Watermarked mid-loop compaction by the same deterministic replay: after
   // a round appends new messages, replay the accumulated list; an event
   // fires only when the running estimate crosses the high watermark
@@ -466,13 +660,13 @@ router.post('/', async (req, res) => {
   // Plain-generation path with context-overflow recovery: compact the
   // history once and retry (never loops); used by the passthrough and the
   // empty-stream fallback. onUsage also calibrates the history estimate.
-  const runPlain = async (firstAttempt, plainSys) => {
+  const runPlain = async (firstAttempt, plainSys, target) => {
     const onUsageCb = (u) => {
-      usage = u;
+      captureUsage(u);
       if (u && Number.isFinite(u.prompt_tokens)) histTokens = u.prompt_tokens - config.promptPrefixTokens;
     };
     try {
-      return await streamPlainAnswer(res, agentMessages, gen, onUsageCb, lost, firstAttempt, plainSys, (t) => { lastTimings = t; });
+      return await streamPlainAnswer(res, agentMessages, gen, onUsageCb, lost, firstAttempt, plainSys, (t) => { lastTimings = t; }, target);
     } catch (e) {
       if (!historyManager.isContextError(e) || ctxRetried || lost) throw e;
       ctxRetried = true;
@@ -488,7 +682,7 @@ router.post('/', async (req, res) => {
       historyManager.rememberLastCompactOutput(agentMessages);
       logCompaction('post-overflow(plain)', c.before, c.after, c.removed, rePrefill, budget, () => lastTimings);
       safeWrite(res, statusChunk('⚠ Context limit reached — history trimmed, retrying once.'), lost);
-      return await streamPlainAnswer(res, agentMessages, gen, onUsageCb, lost, null, plainSys, (t) => { lastTimings = t; });
+      return await streamPlainAnswer(res, agentMessages, gen, onUsageCb, lost, null, plainSys, (t) => { lastTimings = t; }, target);
     }
   };
 
@@ -498,6 +692,15 @@ router.post('/', async (req, res) => {
     // pushed their text to the client token-by-token — the final flush below
     // must not re-emit it (which would duplicate the answer).
     let liveStreamed = false;
+    // Same for the tool loop's FINAL round: it streams itself live, so the
+    // flush must not re-emit it either. Declared here because the flush
+    // block below lives OUTSIDE the tool-loop block. `roundStreamed` (the
+    // handler-scope flag streamDelta sets above) records whether the CURRENT
+    // round's deltas actually reached the client (some upstreams/models
+    // never fire onDelta — an empty-string round, non-streaming mocks in
+    // tests) — the flush is skipped ONLY when the final round really
+    // streamed its text, otherwise the answer would be lost.
+    let finalStreamedLive = false;
 
     if (!toolsEnabled) {
       // --- single-completion passthrough (tool calling off), with chunked
@@ -512,26 +715,91 @@ router.post('/', async (req, res) => {
       let automationRetries = 0;
       let automationSettled = false;
       let guardRetried = false; // no-tool guard retry: at most once per user message
+      let malformedCallRetried = false; // malformed tool-call correction: at most once per user message
       let forceToolChoice = false; // one-shot tool_choice:"required" for the retry
+      // Cascade stage tracking: 'route' (fast router) until it answers
+      // directly, escalates, or tools execute — then 'primary' for the rest of
+      // the loop. Without a cascade the loop starts (and stays) in 'primary'
+      // with stageTarget=null, i.e. the classic active-model behavior.
+      let stage = cascade.enabled ? 'route' : 'primary';
+      let stageTarget = cascade.enabled ? cascade.targets.router : null;
+      let stageSystem = cascade.enabled ? cascade.routerSystem : systemPrompt;
+      let firstRoundDone = false; // never re-await the pre-queued firstPromise
+      // Anti-spam abort state (per user message): a structural stop when the
+      // model repeats only already-skipped calls instead of making progress.
+      let execRounds = 0; // hard cap on rounds that execute tool calls
+      let dupStreak = 0; // consecutive rounds whose calls were ALL skips
+      let frozen = false; // tool execution locked out; final answer forced
+      let frozenRounds = 0;
+      // Per-request count of IDENTICAL rejected emissions (name -> argsKey ->
+      // count): the model repeating the exact same invalid call 3 times gets
+      // frozen instead of burning all 7 rounds on the same mistake.
+      const rejectedCalls = new Map();
+      const MAX_TOOL_ROUNDS = 7;
+      // Live-streaming bookkeeping: loop rounds stream their deltas to the
+      // client in real time (see onDelta/onReasoning below); the round
+      // boundary events tell the frontend which text to keep. The FINAL
+      // round streams itself — the end-of-request flush must not re-emit it.
+      // (finalStreamedLive itself is declared at the handler scope — the
+      // flush block reads it from outside this block.)
+      const endRound = (final_) => safeWrite(res, roundChunk(final_), lost);
+      const switchToPrimary = (why) => {
+        if (stage === 'primary') return;
+        stage = 'primary';
+        stageTarget = cascade.targets.primary;
+        stageSystem = systemPrompt;
+        console.log(`[cascade] stage=primary (${why})`);
+      };
       for (let i = 0; i < config.toolMaxIterations; i++) {
         if (lost) break; // client gone — don't spend queue slots on nobody
+        roundStreamed = false; // per-round: did THIS round's deltas reach the client?
         let acc;
         try {
-          acc = await (i === 0 && !ctxRetried
+          acc = await (i === 0 && !firstRoundDone
                     ? firstPromise
                     : complete({
-                        payload: buildChatPayload(agentMessages, gen, (() => {
-                          const o = { system: systemPrompt, tools };
+                        payload: buildChatPayload(stage === 'route' && cascade.enabled ? withRouterSystem(agentMessages) : agentMessages, gen, (() => {
+                          const o = { system: stageSystem, tools: stage === 'route' && cascade.enabled ? routerToolsArr : tools, target: stageTarget };
+                          if (stage === 'route' && cascade.enabled) {
+                            o.maxTokens = config.routerMaxTokens;
+                            o.temperature = config.routerTemperature;
+                          }
                           if (forceToolChoice) {
                             o.toolChoice = 'required'; // guard retry only — one request
                             forceToolChoice = false;
                           }
                           return o;
                         })()),
-                        onUsage: (u) => { usage = u; },
+                        // Socket-layer target override (see firstCall above).
+                        target: stageTarget,
+                        // Live-stream this round's tokens to the client:
+                        // content deltas as they arrive, reasoning traces as
+                        // they arrive; round boundary events (roundChunk)
+                        // let the frontend keep only the final round's text.
+                        onDelta: streamDelta,
+                        onReasoning: streamReasoning,
+                        onUsage: captureUsage,
                         onTimings: (t) => { lastTimings = t; },
                       }));
+          if (i === 0) firstRoundDone = true;
         } catch (e) {
+          // The pre-queued first promise can never be re-awaited after any
+          // failure — subsequent rounds use a fresh complete().
+          if (i === 0) firstRoundDone = true;
+          // Cascade graceful fallback (stage 1): ANY router failure
+          // (unreachable, empty stream, HTTP error) escalates this round to
+          // the primary model — the turn never dies on the fast model.
+          if (cascade.enabled && stage === 'route' && !lost) {
+            console.log(`[cascade] router fallback: ${String((e && e.message) || e).slice(0, 200)}`);
+            safeWrite(
+              res,
+              statusChunk(`⚠ ${cascade.router.name} failed — falling back to ${cascade.primary.name} for this step.`),
+              lost
+            );
+            switchToPrimary('router-error');
+            i--; // redo this round on the primary
+            continue;
+          }
           // A tool-enabled completion came back as an empty stream (some
           // providers/models cannot carry the tools array — OpenRouter/Phala
           // is known to do this). Instead of failing the whole turn, degrade
@@ -545,7 +813,7 @@ router.post('/', async (req, res) => {
               ),
               lost
             );
-            finalText = await runPlain(null, plainSystemPrompt);
+            finalText = await runPlain(null, plainSystemPrompt, stageTarget);
             liveStreamed = true;
             answered = true;
             break;
@@ -623,6 +891,12 @@ router.post('/', async (req, res) => {
           }
         }
 
+        // The round's streamed deltas reached the client live (onDelta
+        // below). If any tool call was parsed, this round's raw text is
+        // transient tool JSON — close the round so the frontend wipes it;
+        // the FINAL round (no calls) closes as final and its live text stays.
+        if (calls.length) endRound(false);
+
         if (!calls.length) {
           if (acc.finishReason === 'length' && acc.content.trim()) {
             // max_tokens cut the output mid-answer (possibly mid JSON tool
@@ -637,6 +911,7 @@ router.post('/', async (req, res) => {
               compactIfNeeded('continuation');
               finalText += acc.content;
               safeWrite(res, statusChunk(`✂ ${CONTINUE_STATUS} (tool-loop round ${i + 1})`), lost);
+              endRound(false); // partial max-tokens output — next round replaces it
               continue; // not an answer yet — keep generating
             }
           }
@@ -648,6 +923,13 @@ router.post('/', async (req, res) => {
           //    JSON it was about to quote), execute it directly; 2) otherwise
           //    force a corrective tool-call round; 3) then fall back to
           //    grounded inference from the user's own wording.
+          // Cascade: automation requests escalate to the primary immediately —
+          // the router stage never carries automation/library/skills tools.
+          if (cascade.enabled && stage === 'route' && automationIntent && !automationSettled && !lost) {
+            safeWrite(res, statusChunk(`🧠 ${cascade.primary.name} — automation request delegated to the primary model (router has core tools only).`), lost);
+            switchToPrimary('automation');
+            continue;
+          }
           if (automationIntent && !automationSettled && !lost) {
             const payload =
               toolLoop.findAutomationPayload(acc.content) ||
@@ -676,6 +958,7 @@ router.post('/', async (req, res) => {
                   : `⚠ Intercepted manual output; create_automation failed: ${result.error || 'unknown error'}`),
                 lost
               );
+              endRound(false); // intercepted round text never becomes the answer
               continue; // model confirms; the explanation is never streamed as the answer
             }
             if (automationRetries < config.maxAutomationForcedRounds) {
@@ -689,6 +972,7 @@ router.post('/', async (req, res) => {
                 statusChunk(`⚠ Model explained instead of calling create_automation — forcing a tool call (round ${automationRetries}/${config.maxAutomationForcedRounds})`),
                 lost
               );
+              endRound(false);
               continue;
             }
             // Forced rounds exhausted and the model still cannot emit the
@@ -724,6 +1008,7 @@ router.post('/', async (req, res) => {
                 });
                 histTokens += historyManager.estimateTokens(JSON.stringify(result));
                 compactIfNeeded('automation-direct');
+                endRound(false);
                 continue;
               } catch (e) {
                 safeWrite(res, statusChunk('⚠ Direct automation creation crashed: ' + String((e && e.message) || e)), lost);
@@ -734,6 +1019,7 @@ router.post('/', async (req, res) => {
             // Last resort: free the queue slot and end the loop with a
             // truthful summary instead of burning the remaining iterations.
             safeWrite(res, statusChunk(`Automation request aborted after ${automationRetries} forced round(s).`), lost);
+            endRound(false);
             finalText += 'I could not complete the automation creation this time. Please try again or check the request wording.';
             answered = true;
             break;
@@ -768,7 +1054,95 @@ router.post('/', async (req, res) => {
               lost
             );
             forceToolChoice = true;
+            endRound(false); // described-command round text is never the answer
             continue;
+          }
+
+          // --- cascade routing decision (stage 1, no tool call) ----------------
+          // The router either answered directly (fast final) or asked to
+          // escalate: the ROUTE_TO_PRIMARY marker (or CASCADE_ESCALATE=always)
+          // re-runs this round on the primary. The router's internal reply is
+          // NEVER stored in history — the primary sees only the user context.
+          if (cascade.enabled && stage === 'route') {
+            if (cascadeService.decideNoCall(acc.content, cascade.escalate) === 'escalate') {
+              console.log(
+                `[cascade] route->primary ${cascade.escalate === 'always' ? '(escalate=always)' : '(marker)'} ` +
+                  `routerReply=${JSON.stringify(String(acc.content || '').slice(0, 120))}`
+              );
+              safeWrite(
+                res,
+                statusChunk(`🧠 ${cascade.primary.name} — heavy reasoning/coding delegated to the primary model.`),
+                lost
+              );
+              switchToPrimary(cascade.escalate === 'always' ? 'always' : 'marker');
+              endRound(false); // ROUTE_TO_PRIMARY marker text is invisible glue
+              continue;
+            }
+            // Router hallucinated an unregistered tool (e.g. {"tool":
+            // "documentation",...}) — the parser refused it; never serve the
+            // raw JSON as the final answer, let the primary handle the turn.
+            if (cascadeService.looksLikeToolAttempt(acc.content)) {
+              console.log(`[cascade] route->primary (unparseable tool attempt) routerReply=${JSON.stringify(String(acc.content || '').slice(0, 120))}`);
+              safeWrite(
+                res,
+                statusChunk(`⚠ ${cascade.router.name} produced an unrecognized tool call — delegating to ${cascade.primary.name}.`),
+                lost
+              );
+              switchToPrimary('unparseable-tool');
+              endRound(false);
+              continue;
+            }
+            // The router never executes-and-sees results (after a core-5 call
+            // the primary takes over), so a no-call reply asserting an action
+            // succeeded — "Skill removed successfully" after "remove
+            // greeting.txt" — is a fabricated confirmation that would block
+            // the real operation. Escalate: the primary re-does the work.
+            if (cascadeService.looksLikeFabricatedConfirmation(acc.content, firstUserText)) {
+              console.log(
+                `[cascade] route->primary (fabricated confirmation) routerReply=${JSON.stringify(String(acc.content || '').slice(0, 120))}`
+              );
+              safeWrite(
+                res,
+                statusChunk(`⚠ ${cascade.router.name} replied without executing a tool — delegating to ${cascade.primary.name}.`),
+                lost
+              );
+              switchToPrimary('fabricated-confirmation');
+              endRound(false);
+              continue;
+            }
+          }
+
+          // --- malformed tool-call correction (primary stage) ----------------
+          // The final answer LOOKS like a tool call (a {"tool":…} object or a
+          // fenced block) but failed to parse — malformed JSON (unbalanced
+          // quotes, stray commas). Serving the raw fragment as the answer
+          // silently SKIPS the requested action; correct it ONCE so the model
+          // re-emits valid JSON. Router-stage tool attempts never reach here
+          // (they escalate via looksLikeToolAttempt above).
+          if (!malformedCallRetried && !lost) {
+            const rawContent = String(acc.content || '');
+            const noCalls = !toolLoop.extractToolCalls(rawContent).length;
+            const toolishStart = /^\s*\{\s*"(?:tool|name|function)"\s*:/.test(rawContent);
+            const toolishFenced =
+              /```(?:json)?[\s\S]*"(?:tool|name|function)"\s*:[\s\S]*```/.test(rawContent);
+            if (noCalls && (toolishStart || toolishFenced)) {
+              malformedCallRetried = true;
+              console.log(
+                `[tool-call] malformed tool-call reply — corrective round; content=${JSON.stringify(rawContent.slice(0, 140))}`
+              );
+              agentMessages.push({ role: 'assistant', content: acc.content });
+              agentMessages.push({ role: 'user', content: MALFORMED_TOOL_MSG });
+              histTokens +=
+                historyManager.estimateTokens(acc.content) + historyManager.estimateTokens(MALFORMED_TOOL_MSG);
+              compactIfNeeded('malformed-tool');
+              safeWrite(
+                res,
+                statusChunk('⚠ Tool call could not be parsed (malformed JSON) — asking the model to re-emit it.'),
+                lost
+              );
+              endRound(false);
+              continue;
+            }
           }
 
           // --- debug visibility (step 4) --------------------------------------
@@ -781,18 +1155,99 @@ router.post('/', async (req, res) => {
             )}`
           );
 
-          // No tool call → genuine final answer; stop the loop.
+          // No tool call → genuine final answer; stop the loop. The deltas
+          // already streamed live above — close the round as FINAL so the
+          // frontend keeps the live text, and skip the end-of-request flush
+          // (ONLY when this round actually streamed; otherwise the flush
+          // remains the only way the answer reaches the client).
+          endRound(true);
+          if (roundStreamed) finalStreamedLive = true;
           finalText += acc.content;
           answered = true;
           break;
         }
 
-        // Record the model's tool-call turn as an assistant message, then the
-        // results as a user message. (This llama build's chat template enforces
-        // strict user/assistant alternation and rejects `role:"tool"` messages,
-        // so results are wrapped in a user message.) Each result is truncated
-        // ONCE at insertion (historyManager.formatToolResults) — the stored
-        // text never changes afterwards, keeping the prompt byte-stable.
+        // Cascade router-stage restriction: the router advertises ONLY the
+          // core-5 file/shell tools (routerToolsArr), and may therefore only
+          // EXECUTE those. A router-emitted call for any other registered
+          // tool — a stage-1 hallucination (e.g. delete_skill, run_skill,
+          // automations) — must not run: the primary is the only stage that
+          // may invoke non-core tools. Escalate WITHOUT executing and keep
+          // the router's internal reply out of history, exactly like the
+          // unparseable-tool-attempt path.
+          if (cascade.enabled && stage === 'route') {
+            const offRegistry = calls.find((c) => !routerToolNames.has(c.name));
+            if (offRegistry) {
+              console.log(
+                `[cascade] route->primary (off-registry tool call) routerCall=${JSON.stringify({ tool: offRegistry.name, args: offRegistry.args }).slice(0, 140)}`
+              );
+              safeWrite(
+                res,
+                statusChunk(`⚠ ${cascade.router.name} called ${offRegistry.name} — outside its core tool set; delegating to ${cascade.primary.name}.`),
+                lost
+              );
+              switchToPrimary('off-registry-tool');
+              endRound(false); // unexecuted hallucinated call — never shown as an answer
+              continue;
+            }
+          }
+
+          // --- anti-spam abort (structural stop) ----------------------------
+          // Two consecutive rounds whose calls were ALL already-skipped
+          // duplicates (or the per-request execution-round cap): freeze tool
+          // execution, tell the model to write the final answer from what it
+          // has, and after one more non-compliant round close deterministically.
+          if (frozen || execRounds >= MAX_TOOL_ROUNDS) {
+            if (frozenRounds >= 1) {
+              // The stop notice was ignored and tool calls were emitted again:
+              // deterministic close — no further LLM/execution rounds.
+              finalText =
+                'The task was stopped by the anti-repetition guard after ' +
+                execRounds +
+                ' execution round(s) of repeating or duplicate tool calls. Everything that ran is ' +
+                'shown in the tool results above; anything not listed there was not completed. ' +
+                'Please rephrase the request or ask for a specific step if something is missing.';
+              endRound(false); // raw attempt text — the deterministic close follows
+              answered = true;
+              break;
+            }
+            frozen = true;
+            frozenRounds++;
+            const why =
+              execRounds >= MAX_TOOL_ROUNDS
+                ? `reached the ${MAX_TOOL_ROUNDS}-round execution limit`
+                : 'only repeated or duplicate calls were emitted';
+            const frozenCallText = calls
+              .map((c) => JSON.stringify({ tool: c.name, args: c.args }))
+              .join('\n');
+            agentMessages.push({ role: 'assistant', content: frozenCallText });
+            agentMessages.push({
+              role: 'user',
+              content:
+                '[System] Execution stopped: ' +
+                why +
+                ', and no new work was done. No further tool calls will execute. Write your final ' +
+                'answer NOW from the results you already have — say honestly what was completed and ' +
+                'what was not.',
+            });
+            histTokens +=
+              historyManager.estimateTokens(frozenCallText) + historyManager.estimateTokens(120);
+            compactIfNeeded('anti-spam-stop');
+            safeWrite(
+              res,
+              statusChunk(`⛔ Tool loop stopped after ${execRounds} execution round(s) — ${why}; forcing the final answer.`),
+              lost
+            );
+            endRound(false); // frozen round's raw text — next round's stream replaces it
+            continue;
+          }
+
+          // Record the model's tool-call turn as an assistant message, then the
+          // results as a user message. (This llama build's chat template enforces
+          // strict user/assistant alternation and rejects `role:"tool"` messages,
+          // so results are wrapped in a user message.) Each result is truncated
+          // ONCE at insertion (historyManager.formatToolResults) — the stored
+          // text never changes afterwards, keeping the prompt byte-stable.
         const callText = calls
           .map((c) => JSON.stringify({ tool: c.name, args: c.args }))
           .join('\n');
@@ -800,56 +1255,131 @@ router.post('/', async (req, res) => {
         histTokens += historyManager.estimateTokens(callText);
 
         const results = [];
-        for (const c of calls) {
-          safeWrite(res, statusChunk('\u2699 ' + toolLabel(c.name, c.args)), lost);
-          // The model legitimately performed the creation through the normal
-          // tool path — mark the automation request settled so the final
-          // explanation is NOT mistaken for an evasion and force-fed a
-          // corrective round (the pre-fix behavior burned the iteration
-          // budget and reported "max tool steps" for a task that had
-          // actually succeeded).
-          if (c.name === 'create_automation') automationSettled = true;
-          let result;
-          const t0 = Date.now();
-          try {
-            result = await toolLoop.executeTool(c.name, c.args);
-          } catch (e) {
-            // A throwing tool must never kill the ReAct loop or strand the
-            // SSE stream mid-generation: convert to a result object so the
-            // error is fed back to the model like any other outcome.
-            result = { ok: false, error: `tool execution crashed: ${String((e && e.message) || e)}` };
-          }
-          logToolCall(c.name, c.args, result, Date.now() - t0);
-          // Strict pre-execution validation (toolLoop.validateArgs) rejects
-          // calls with missing/placeholder arguments BEFORE any side effect —
-          // surface the corrective message live so the UI shows why the call
-          // did not run; the result itself is fed back to the model, which
-          // retries with complete arguments.
-          if (result && result.invalidArgs) {
-            safeWrite(
-              res,
-              statusChunk('⚠ Tool call rejected: ' + ((result.error || 'invalid arguments').slice(0, 220))),
-              lost
-            );
-          }
-          // Dedup intercepts (exact-args ledger / consecutive-run_shell guard)
-          // also deserve a visible note: the ⚙ "Running command" line above is
-          // emitted pre-execution, so without this the UI would look like the
-          // command ran multiple times when it was actually deduplicated.
-          if (result && result.skippedDuplicate) {
-            safeWrite(
-              res,
-              statusChunk('⚠ ' + ((result.error || 'duplicate tool call skipped').slice(0, 220))),
-              lost
-            );
-          }
-          results.push({ name: c.name, result });
+        // Parallel-safe execution: independent calls of the round run
+        // concurrently (single group), dependent/same-target/share-state
+        // calls run in later groups in emission order. Results are
+        // reassembled in EMISSION order, so history messages, the dedup
+        // ledger and log lines are identical to a fully sequential run —
+        // only wall-clock time shrinks. (groupIndependent guarantees
+        // identical duplicates can never share a group, so the ledger's
+        // sequential recording stays race-free.)
+        const groups = toolLoop.groupIndependent(calls);
+        const slots = new Array(calls.length);
+        for (const group of groups) {
+          await Promise.all(
+            group.map(async (c) => {
+              const idx = calls.indexOf(c);
+              // read_file/write_file/edit_file with unusable args: recover the single
+              // existing workspace path the conversation names (see
+              // recoverFilePath). Other tools (run_shell, delete_skill,
+              // delete_file, automations) are NEVER path-inferred.
+              let inferred = false;
+              if (
+                (c.name === 'read_file' || c.name === 'write_file' || c.name === 'edit_file') &&
+                labelPath(c.args) === '?'
+              ) {
+                const recovered = recoverFilePath(messages);
+                if (recovered) {
+                  c.args = { ...(c.args || {}), path: recovered };
+                  inferred = true;
+                }
+              }
+              safeWrite(
+                res,
+                statusChunk('⚙ ' + toolLabel(c.name, c.args) + (inferred ? ' (path inferred from conversation)' : '')),
+                lost
+              );
+              // The model legitimately performed the creation through the normal
+              // tool path — mark the automation request settled so the final
+              // explanation is NOT mistaken for an evasion and force-fed a
+              // corrective round (the pre-fix behavior burned the iteration
+              // budget and reported "max tool steps" for a task that had
+              // actually succeeded).
+              if (c.name === 'create_automation') automationSettled = true;
+              let result;
+              const t0 = Date.now();
+              try {
+                result = await toolLoop.executeTool(c.name, c.args);
+              } catch (e) {
+                // A throwing tool must never kill the ReAct loop or strand the
+                // SSE stream mid-generation: convert to a result object so the
+                // error is fed back to the model like any other outcome.
+                result = { ok: false, error: `tool execution crashed: ${String((e && e.message) || e)}` };
+              }
+              logToolCall(c.name, c.args, result, Date.now() - t0);
+              // Strict pre-execution validation (toolLoop.validateArgs) rejects
+              // calls with missing/placeholder arguments BEFORE any side effect —
+              // surface the corrective message live so the UI shows why the call
+              // did not run; the result itself is fed back to the model, which
+              // retries with complete arguments.
+              if (result && result.invalidArgs) {
+                safeWrite(
+                  res,
+                  statusChunk('⚠ Tool call rejected: ' + ((result.error || 'invalid arguments').slice(0, 220))),
+                  lost
+                );
+                // Fail fast on the SAME broken emission repeated: count
+                // identical rejected calls per request; the 3rd identical
+                // reject freezes the loop (the model is not correcting
+                // itself, so further rounds only burn latency).
+                let perName = rejectedCalls.get(c.name);
+                if (!perName) {
+                  perName = new Map();
+                  rejectedCalls.set(c.name, perName);
+                }
+                const rkey = stableArgsKey(c.args);
+                perName.set(rkey, (perName.get(rkey) || 0) + 1);
+                if (perName.get(rkey) >= 3 && !frozen) {
+                  frozen = true;
+                  safeWrite(
+                    res,
+                    statusChunk('⛔ The same invalid tool call was repeated 3 times — tool loop stopped; forcing the final answer.'),
+                    lost
+                  );
+                }
+              }
+              // Dedup intercepts (exact-args ledger / consecutive-run_shell guard)
+              // also deserve a visible note: the ⚙ "Running command" line above is
+              // emitted pre-execution, so without this the UI would look like the
+              // command ran multiple times when it was actually deduplicated.
+              if (result && result.skippedDuplicate) {
+                safeWrite(
+                  res,
+                  statusChunk('⚠ ' + ((result.error || 'duplicate tool call skipped').slice(0, 220))),
+                  lost
+                );
+              }
+              slots[idx] = { name: c.name, result };
+            })
+          );
         }
+        for (const r of slots) results.push(r);
+
+        // Anti-spam streak bookkeeping: a round whose calls were ALL skips
+        // (dedup/churn/anti-spam) performs no new work — two of those in a
+        // row freezes the loop above. Any round with a real execution or a
+        // real error resets the streak (fresh feedback counts as progress).
+        const allSkipped =
+          results.length > 0 &&
+          results.every((r) => {
+            const res = r.result;
+            return res && (res.skippedDuplicate || res.skippedRedundant || res.skippedAntiSpam);
+          });
+        execRounds++;
+        if (allSkipped) dupStreak++;
+        else dupStreak = 0;
+        if (dupStreak >= 2) frozen = true;
 
         const resultsText = historyManager.formatToolResults(results);
         agentMessages.push({ role: 'user', content: resultsText });
         histTokens += historyManager.estimateTokens(resultsText);
         compactIfNeeded('tool-round');
+        // Stage-2 hand-off: tools executed — the heavy model now generates
+        // the final response from the full accumulated context.
+        if (cascade.enabled && stage === 'route') {
+          safeWrite(res, statusChunk(`🧠 ${cascade.primary.name} — tools executed, generating the final response.`), lost);
+          switchToPrimary('tools-executed');
+        }
       }
       if (!answered) {
         finalText =
@@ -859,7 +1389,7 @@ router.post('/', async (req, res) => {
     }
 
     if (!lost) {
-      if (finalText && !liveStreamed) emitTextChunks(res, finalText, lost);
+      if (finalText && !liveStreamed && !finalStreamedLive) emitTextChunks(res, finalText, lost);
       if (usage) {
         safeWrite(
           res,

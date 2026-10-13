@@ -30,8 +30,11 @@ const os = require('os');
 const path = require('path');
 
 // MUST be set before any project module is required (config/fileTools read it
-// at require time).
+// at require time). The system-prompt override file is redirected to a
+// throwaway path too, so e2e-L can exercise the override without touching
+// the real data dir.
 process.env.PLIFE_WORK_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'plife-work-'));
+process.env.SYSTEM_PROMPT_FILE = path.join(os.tmpdir(), 'plife-sysprompt-' + process.pid + '.txt');
 
 const ROOT = path.join(__dirname, '..');
 const results = [];
@@ -40,6 +43,23 @@ const t = (name, cond, detail) =>
 
 const STATE_FILE = path.join(ROOT, 'data', 'automations-state.json');
 const stateBackup = fs.readFileSync(STATE_FILE, 'utf8');
+
+// Two-stage cascade: strip role fields while the harness runs so the e2e
+// loop tests exercise the CLASSIC single-model flow deterministically
+// (cascade.resolve() re-reads the registry on every request). The original
+// file is restored on exit. If stripping fails (missing/invalid file), the
+// harness still runs — the cascade tests in cascade-tests.js cover that path.
+const MODELS_STATE_FILE = path.join(ROOT, 'data', 'models-state.json');
+const modelsStateBackup = fs.readFileSync(MODELS_STATE_FILE, 'utf8');
+try {
+  const ms = JSON.parse(modelsStateBackup);
+  (Array.isArray(ms.models) ? ms.models : []).forEach((m) => {
+    if (m) delete m.role;
+  });
+  fs.writeFileSync(MODELS_STATE_FILE, JSON.stringify(ms, null, 2) + '\n', 'utf8');
+} catch (e) {
+  console.error('loop-guard: could not strip cascade roles from models-state.json:', e.message);
+}
 
 ;(async () => {
 
@@ -93,6 +113,144 @@ function restoreState() {
     t('dedup: different content still executes', r3.ok === true, JSON.stringify(r3));
     t('dedup: file not clobbered by dup', afterDup === 'one');
 
+    // delete_file: single-file deletion strictly inside the sandbox
+    toolLoop.resetSeenCalls();
+    const P = 'scripts/__del_probe.txt';
+    await toolLoop.executeTool('write_file', { path: P, content: 'bye' });
+    toolLoop.resetSeenCalls(); // fresh request — a delete of it is legitimate
+    const d1 = await toolLoop.executeTool('delete_file', { path: P });
+    t('delete_file: removes an existing file', d1.ok === true && d1.deleted === true, JSON.stringify(d1));
+    t('delete_file: file really gone', !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, P)));
+    const d2 = await toolLoop.executeTool('delete_file', { path: P });
+    t('delete_file: identical repeat is deduped (no second attempt)', !d2.ok && d2.skippedDuplicate === true, JSON.stringify(d2));
+    const d2b = await toolLoop.executeTool('delete_file', { path: 'nope.txt' });
+    t('delete_file: missing file reports cleanly', !d2b.ok && /no such file/.test(d2b.error || ''), JSON.stringify(d2b));
+    const d3 = await toolLoop.executeTool('delete_file', { path: 'scripts' });
+    t('delete_file: directory refused (never recursive)', !d3.ok && /directory/.test(d3.error || ''), JSON.stringify(d3));
+    const d4 = await toolLoop.executeTool('delete_file', { path: '../outside.txt' });
+    t('delete_file: traversal outside workspace refused', !d4.ok, JSON.stringify(d4));
+    const d5 = await toolLoop.executeTool('delete_file', { path: '/etc/passwd' });
+    t('delete_file: absolute path outside workspace refused', !d5.ok, JSON.stringify(d5));
+
+    // file-argument normalization: alias keys (file/filepath/filename/src)
+    // and bare unkeyed strings map to `path` so the call EXECUTES instead of
+    // being rejected into a repeated-invalid retry loop
+    {
+      const D = process.env.PLIFE_WORK_ROOT;
+      fs.mkdirSync(path.join(D, 'scripts'), { recursive: true });
+      fs.writeFileSync(path.join(D, 'scripts', '__norm_probe.txt'), 'norm-probe-content');
+      fs.writeFileSync(path.join(D, 'scripts', '__norm_del.txt'), 'x');
+      toolLoop.resetSeenCalls();
+      const r1 = await toolLoop.executeTool('read_file', { file: 'scripts/__norm_probe.txt' });
+      t('arg-norm: read_file with {file:...} executes', r1.ok === true && /norm-probe-content/.test(r1.content || ''), JSON.stringify(r1).slice(0, 120));
+      toolLoop.resetSeenCalls();
+      const r2 = await toolLoop.executeTool('read_file', 'scripts/__norm_probe.txt');
+      t('arg-norm: read_file with bare string args executes', r2.ok === true && r2.path === 'scripts/__norm_probe.txt', JSON.stringify(r2).slice(0, 120));
+      toolLoop.resetSeenCalls();
+      const r3 = await toolLoop.executeTool('read_file', { filename: 'scripts/__norm_probe.txt' });
+      t('arg-norm: read_file with {filename:...} executes', r3.ok === true && r3.path === 'scripts/__norm_probe.txt', JSON.stringify(r3).slice(0, 120));
+      toolLoop.resetSeenCalls();
+      const r4 = await toolLoop.executeTool('write_file', { file: 'scripts/__norm_probe2.txt', content: 'written via alias' });
+      t('arg-norm: write_file with {file, content} executes', r4.ok === true && fs.readFileSync(path.join(D, 'scripts', '__norm_probe2.txt'), 'utf8') === 'written via alias', JSON.stringify(r4));
+      const r4b = await toolLoop.executeTool('write_file', { file: 'scripts/__norm_probe2.txt', content: 'written via alias' });
+      t('arg-norm: alias-keyed repeat dedups identically', !r4b.ok && r4b.skippedDuplicate === true, JSON.stringify(r4b));
+      toolLoop.resetSeenCalls();
+      const r5 = await toolLoop.executeTool('delete_file', { src: 'scripts/__norm_del.txt' });
+      t('arg-norm: delete_file with {src:...} executes', r5.ok === true && r5.deleted === true, JSON.stringify(r5));
+      toolLoop.resetSeenCalls();
+      const r6 = await toolLoop.executeTool('edit_file', { file: 'scripts/__norm_probe.txt', old_text: 'norm-probe-content', new_text: 'edited' });
+      t('arg-norm: edit_file with {file,...} executes', r6.ok === true && fs.readFileSync(path.join(D, 'scripts', '__norm_probe.txt'), 'utf8') === 'edited', JSON.stringify(r6));
+      const r7 = await toolLoop.executeTool('read_file', {});
+            t(
+              'arg-norm: still-empty args rejected WITH the expected format hint',
+              !r7.ok && r7.invalidArgs === true && /Expected format: {"path": "relative\/file\/path\.ext"}/.test(r7.error || ''),
+              JSON.stringify(r7)
+            );
+          }
+
+          // run_shell argument normalization: alias keys (cmd/exec/script/c/
+          // shell_command) and bare unkeyed strings map to `command` so the call
+          // EXECUTES (the gemma 4B reported failure mode — empty/aliased commands)
+          {
+            toolLoop.resetSeenCalls();
+            for (const [alias, cmd] of [
+              ['cmd', 'printf shell-norm-cmd'],
+              ['exec', 'printf shell-norm-exec'],
+              ['script', 'printf shell-norm-script'],
+              ['c', 'printf shell-norm-c'],
+              ['shell_command', 'printf shell-norm-sc'],
+            ]) {
+              const r = await toolLoop.executeTool('run_shell', { [alias]: cmd });
+              t(`arg-norm: run_shell {${alias}:...} executes`, r.ok === true && /shell-norm-/.test(String(r.stdout || '')), JSON.stringify(r).slice(0, 100));
+            }
+            toolLoop.resetSeenCalls();
+            const rs = await toolLoop.executeTool('run_shell', 'printf shell-norm-bare');
+            t('arg-norm: run_shell bare string executes', rs.ok === true && /shell-norm-bare/.test(String(rs.stdout || '')), JSON.stringify(rs).slice(0, 100));
+            const rEmpty = await toolLoop.executeTool('run_shell', {});
+            t(
+              'arg-norm: empty run_shell rejected WITH the command format hint',
+              !rEmpty.ok && rEmpty.invalidArgs === true && /Expected format: {"command": "your_shell_command_here"}/.test(rEmpty.error || ''),
+              JSON.stringify(rEmpty)
+            );
+            const rPlaceholder = await toolLoop.executeTool('run_shell', { command: 'your_shell_command_here' });
+            t('arg-norm: placeholder command still rejected (hint text never executes)', !rPlaceholder.ok && rPlaceholder.invalidArgs === true && /placeholder/.test(rPlaceholder.error || ''), JSON.stringify(rPlaceholder));
+          }
+
+    // groupIndependent: parallel-grouping contract for the batch scheduler
+    {
+      const g = toolLoop.groupIndependent;
+      const WW = (p) => ({ name: 'write_file', args: { path: p, content: 'x' } });
+      const RR = (p) => ({ name: 'read_file', args: { path: p } });
+      t('batch: independent file ops share one group', g([WW('a.txt'), WW('b.txt')]).length === 1);
+      t('batch: same-path write+read split into two groups', g([WW('a.txt'), RR('a.txt')]).length === 2);
+      t('batch: different-path read+delete stay parallel', g([RR('a.txt'), { name: 'delete_file', args: { path: 'b.txt' } }]).length === 1);
+      t('batch: run_shell serializes with everything', g([{ name: 'run_shell', args: { command: 'ls' } }, WW('a.txt')]).length === 2);
+      t('batch: write-then-run same file split (dependency order)', g([WW('run.py'), { name: 'run_shell', args: { command: 'python run.py' } }]).length === 2);
+      t('batch: dir listing splits from writes inside it', g([{ name: 'list_files', args: { path: 'scripts' } }, WW('scripts/x.sh')]).length === 2);
+      t('batch: sibling writes inside one dir stay parallel', g([WW('d/x.txt'), WW('d/y.txt')]).length === 1);
+      t('batch: automations serialize (shared state store)', g([{ name: 'create_automation', args: { name: 'a' } }, { name: 'list_automations', args: {} }]).length === 2);
+      t('batch: run_skill serializes (arbitrary code)', g([{ name: 'run_skill', args: { name: 'p' } }, WW('a.txt')]).length === 2);
+      t('batch: skill store ops serialize with each other', g([{ name: 'write_skill', args: { name: 's' } }, { name: 'delete_skill', args: { name: 't' } }]).length === 2);
+      t('batch: unknown tool is conservative (serializes)', g([{ name: 'mystery_tool', args: {} }, WW('a.txt')]).length === 2);
+      t('batch: identical duplicates never share a group', g([WW('a.txt'), WW('a.txt')]).length === 2);
+    }
+
+    // read-only list tools are exempt from the dedup ledger — a repeated
+    // list after a state change returns FRESH data, never a skip error
+    toolLoop.resetSeenCalls();
+    const la1 = await toolLoop.executeTool('list_automations', {});
+    const la2 = await toolLoop.executeTool('list_automations', {});
+    t('list_automations: repeat executes (read-only, exempt from dedup)', la1.ok === true && la2.ok === true && !la2.skippedDuplicate, JSON.stringify(la2));
+
+    // redundant-churn guard: no delete-and-recreate within one request
+    toolLoop.resetSeenCalls();
+    await toolLoop.executeTool('write_file', { path: 'scripts/__churn.txt', content: 'x' });
+    const ch1 = await toolLoop.executeTool('delete_file', { path: 'scripts/__churn.txt' });
+    t('churn: delete of file created this request is skipped', ch1.ok === false && ch1.skippedRedundant === true, JSON.stringify(ch1));
+    t('churn: the created file survives', fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, 'scripts/__churn.txt')));
+    toolLoop.resetSeenCalls(); // fresh request → the same delete is legitimate
+    const ch2 = await toolLoop.executeTool('delete_file', { path: 'scripts/__churn.txt' });
+    t('churn: same delete in a fresh request executes', ch2.ok === true && ch2.deleted === true, JSON.stringify(ch2));
+
+    toolLoop.resetSeenCalls();
+    const ca = await toolLoop.executeTool('create_automation', {
+      name: 'Churn Temp',
+      description: 'temp',
+      schedule_type: 'interval',
+      interval_minutes: 5,
+      action_type: 'script',
+      script: 'scripts/churn.sh',
+    });
+    const da = await toolLoop.executeTool('delete_automation', { id: 'churn-temp' });
+    t('churn: delete of automation created this request is skipped', ca.ok === true && da.ok === false && da.skippedRedundant === true, JSON.stringify(da));
+
+    // unit checks of the churn mapping (explicit ledger, slash normalization)
+    const uledger = [{ name: 'write_skill', args: { name: '/s1' } }];
+    t('churn: delete_skill maps to write_skill with slash normalization', toolLoop.createdEarlierInRequest('delete_skill', { name: 's1' }, uledger) !== null);
+    t('churn: unrelated delete has no churn', toolLoop.createdEarlierInRequest('delete_skill', { name: 'other' }, uledger) === null);
+    t('churn: slugifyId mirrors the store slug', toolLoop.slugifyId('Print Current Date and Time') === 'print-current-date-and-time');
+    t('churn: no churn when create failed earlier', toolLoop.createdEarlierInRequest('delete_automation', { id: 'x' }, []) === null);
+
     // Reset clears the ledger:
     toolLoop.resetSeenCalls();
     const r4 = await toolLoop.executeTool('write_file', { path: 'scripts/__dedup_probe.txt', content: 'one' });
@@ -123,6 +281,51 @@ function restoreState() {
     const sf2 = await toolLoop.executeTool('run_shell', { command: 'node -e "process.exit(3)"' });
     t('dedup: retry of a FAILED command executes (recovery)', !sf1.ok && !sf2.ok && !sf2.skippedDuplicate, JSON.stringify(sf2));
 
+    // ---- shell URL-quoting retry (the curl-&-quote dedup bug) --------------
+    // An unquoted URL with & backgrounded the fetch and the shell 'succeeded'
+    // (exit 0) on the stray assignment — the exit-0/empty-output run must NOT
+    // block the corrected quoted retry as a duplicate.
+    {
+      toolLoop.resetSeenCalls();
+      const bad = 'curl -s http://127.0.0.1:9/prices?ids=solana&vs_currencies=usd';
+      const good = 'curl -s "http://127.0.0.1:9/prices?ids=solana&vs_currencies=usd"';
+      const rBad = await toolLoop.executeTool('run_shell', { command: bad });
+      t('url-dedup: unquoted & command exits 0 but produces no output', rBad.ok === true && !(rBad.stdout || rBad.stderr), JSON.stringify(rBad));
+      const rGood = await toolLoop.executeTool('run_shell', { command: good });
+      t('url-dedup: corrected quoted retry EXECUTES (not a duplicate)', !rGood.skippedDuplicate && rGood.ok !== undefined, JSON.stringify(rGood).slice(0, 140));
+      // back-to-back identical EMPTY-output command is still subject to the
+      // guard's intent? no — an empty-output repeat re-executes (that is the
+      // fix); a repeat WITH output must still skip:
+      toolLoop.resetSeenCalls();
+      const e1 = await toolLoop.executeTool('run_shell', { command: 'echo url-ok' });
+      const e2 = await toolLoop.executeTool('run_shell', { command: 'echo "url-ok"' });
+      t('url-dedup: re-quoted command WITH output still skipped as duplicate', !e2.ok && e2.skippedDuplicate === true, JSON.stringify(e2));
+      // WITH output AND an unquoted shell operator -> the shell parsed the
+      // first run structurally differently; the corrected (quoted) retry must
+      // execute even though the first run produced output (the exact smoke
+      // failure: backgrounded curl's error JSON landed, blocking the retry):
+      toolLoop.resetSeenCalls();
+      const f1 = await toolLoop.executeTool('run_shell', { command: 'echo probe; x=1' });
+      const f2 = await toolLoop.executeTool('run_shell', { command: 'echo "probe"; x=1' });
+      t('url-dedup: quoted retry executes when first run had output AND unquoted ops', f1.ok === true && !f2.skippedDuplicate, JSON.stringify(f2).slice(0, 120));
+      // A repeated CORRECT quoted command (ops inside quotes only) is still a
+      // duplicate — successful runs are the only ones the guard records:
+      toolLoop.resetSeenCalls();
+      const g1 = await toolLoop.executeTool('run_shell', { command: 'echo "a&b"' });
+      const g2 = await toolLoop.executeTool('run_shell', { command: 'echo "a&b"' });
+      t('url-dedup: repeated correctly-quoted command still deduped', g1.ok === true && !g2.ok && g2.skippedDuplicate === true, JSON.stringify(g2).slice(0, 120));
+      t('url-dedup: helper flags unquoted &', toolLoop.shellCommandHasUnquotedOps('curl -s URL?ids=x&v=y') === true);
+      t('url-dedup: helper ignores ops inside quotes', toolLoop.shellCommandHasUnquotedOps('curl -s "URL?ids=x&v=y"') === false);
+      // expansion-aware normalization: $VAR quoted vs unquoted differ
+      toolLoop.resetSeenCalls();
+      const kq = toolLoop.normalizeShellCommandKey('curl "$URL"');
+      const ku = toolLoop.normalizeShellCommandKey('curl $URL');
+      t('url-dedup: quoted $VAR and bare $VAR are DISTINCT commands', kq !== ku, `${kq} vs ${ku}`);
+      const ku2 = toolLoop.normalizeShellCommandKey('curl "https://x/?a=1&b=2"');
+      const kq2 = toolLoop.normalizeShellCommandKey('curl https://x/?a=1&b=2');
+      t('url-dedup: quoted and bare plain URLs still compare equal', kq2 === ku2, `${kq2} vs ${ku2}`);
+    }
+
     // create_automation dedup (execute stubbed — no real state writes here):
     toolLoop.resetSeenCalls();
     const createDef = registry.find((x) => x.name === 'create_automation');
@@ -142,6 +345,24 @@ function restoreState() {
     const k1 = toolLoop.canonicalArgsKey({ b: 1, a: 2 });
     const k2 = toolLoop.canonicalArgsKey({ a: 2, b: 1 });
     t('dedup: canonical key order-insensitive', k1 === k2, k1);
+
+    // ---- anti-spam nets (chmod on .py / pre-reading logs) ------------------
+    {
+      const cp = await toolLoop.executeTool('run_shell', { command: 'chmod +x scripts/whatever.py' });
+      t('anti-spam: chmod on .py skipped', cp.ok === false && cp.skippedAntiSpam === true, JSON.stringify(cp));
+      t('anti-spam: chmod message explains the runner', /python3 runner/.test(cp.error || ''), String((cp.error || '').slice(0, 80)));
+      const multi = await toolLoop.executeTool('run_shell', { command: 'chmod 755 scripts/a.py scripts/b.py' });
+      t('anti-spam: chmod 755 on .py skipped too', multi.ok === false && multi.skippedAntiSpam === true, JSON.stringify(multi));
+      const okSh = await toolLoop.executeTool('run_shell', { command: 'chmod +x scripts/real.sh' });
+      t('anti-spam: chmod on .sh still executes (not skipped)', okSh.ok === true || (okSh.code !== undefined && !okSh.skippedAntiSpam), JSON.stringify(okSh));
+    }
+    {
+      const m1 = await toolLoop.executeTool('read_file', { path: 'logs/__never.log' });
+      t('anti-spam: missing logs/ read explains the schedule', m1.ok === false && /schedule/.test(m1.error || ''), JSON.stringify(m1));
+      toolLoop.resetSeenCalls();
+      const m2 = await toolLoop.executeTool('read_file', { path: 'src/__absent.txt' });
+      t('anti-spam: non-log missing file keeps the generic error', m2.ok === false && !/schedule/.test(m2.error || ''), JSON.stringify(m2));
+    }
   }
 
   // =========================================================================
@@ -219,7 +440,18 @@ function restoreState() {
     const acc = seq.shift();
     if (acc === undefined) throw new Error('mock exhausted — loop ran more steps than canned');
     callLog.push({ payload: opts.payload, messages: opts.payload.messages.map((m) => ({ role: m.role, content: m.content })) });
-    const p = Promise.resolve(acc);
+    // Live-stream the canned round exactly like the real upstream: content
+    // via onDelta and the reasoning trace via onReasoning. Deferred to a
+    // microtask — the REAL upstream is async (its deltas arrive after the
+    // SSE headers are open); a synchronous emit would write to the response
+    // before openSse() and crash with ERR_HTTP_HEADERS_SENT. The callbacks
+    // still fire before the round resolves, so the loop's round-boundary
+    // events always follow the text they refer to (order pinned by e2e-G).
+    const p = Promise.resolve().then(() => {
+      if (acc.reasoning && opts.onReasoning) opts.onReasoning(acc.reasoning);
+      if (acc.content && opts.onDelta) opts.onDelta(acc.content);
+      return acc;
+    });
     Object.defineProperty(p, 'position', { value: 1, enumerable: true });
     if (opts.onUsage && acc.usage) opts.onUsage(acc.usage);
     return p;
@@ -237,7 +469,7 @@ function restoreState() {
   const port = server.address().port;
 
   async function runChat(userText, canned) {
-    seq = canned.map((c) => ({ content: c.content || '', toolCalls: c.toolCalls || [], finishReason: c.finishReason || 'stop', usage: { prompt_tokens: 100, completion_tokens: 50 } }));
+    seq = canned.map((c) => ({ content: c.content || '', reasoning: c.reasoning || '', toolCalls: c.toolCalls || [], finishReason: c.finishReason || 'stop', usage: { prompt_tokens: 100, completion_tokens: 50 } }));
     callLog.length = 0;
     const res = await fetch(`http://127.0.0.1:${port}/api/chat`, {
       method: 'POST',
@@ -355,6 +587,248 @@ function restoreState() {
     t('e2e-D: no junk ? file created', !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, '?')));
   }
 
+  // ----- E) automation scripts run with the WORKSPACE ROOT as cwd: relative
+  // `logs/...` redirections land in the workspace where the agent's file tools
+  // (and the user) can inspect them, and logs/ is ensured to exist
+  {
+    const automationManager = require(path.join(ROOT, 'services', 'automationManager'));
+    toolLoop.resetSeenCalls();
+    const stamp = Date.now();
+    const probe = `scripts/__logprobe_${stamp}.sh`;
+    const logName = `__logprobe_${stamp}.log`;
+    fs.writeFileSync(path.join(process.env.PLIFE_WORK_ROOT, probe), `#!/bin/sh\ndate '+%Y-%m-%d %H:%M:%S' > logs/${logName}\necho probe-ran\n`);
+    const created = await toolLoop.executeTool('create_automation', {
+      name: 'Log Probe',
+      description: 'probe',
+      schedule_type: 'interval',
+      interval_minutes: 5,
+      action_type: 'script',
+      script: probe,
+    });
+    t('e2e-E: probe automation created', created.ok === true, JSON.stringify(created));
+    const rn = await automationManager.runNow('log-probe');
+    t('e2e-E: runNow accepted the trigger', rn.ok === true, JSON.stringify(rn));
+    let found = null;
+    for (let i = 0; i < 100 && found === null; i++) {
+      const p = path.join(process.env.PLIFE_WORK_ROOT, 'logs', logName);
+      if (fs.existsSync(p)) {
+        // shell redirection creates the file empty, then the command fills
+        // it — wait for actual content, not just the inode
+        const raw = fs.readFileSync(p, 'utf8');
+        if (raw && raw.trim()) found = raw;
+      }
+      if (found === null) await new Promise((r) => setTimeout(r, 100));
+    }
+    t('e2e-E: relative logs/ resolved to the workspace root', found !== null, found === null ? 'log file never appeared' : found.trim());
+    t('e2e-E: log content is the script output', found !== null && /\d{4}-\d{2}-\d{2}/.test(found), String(found));
+    try { fs.unlinkSync(path.join(process.env.PLIFE_WORK_ROOT, probe)); } catch {}
+    try { fs.unlinkSync(path.join(process.env.PLIFE_WORK_ROOT, 'logs', logName)); } catch {}
+  }
+
+  // ----- F) anti-spam abort: consecutive duplicate-only rounds freeze the
+  // loop and force the final answer (no more than the canned rounds run)
+  {
+    const dupCall = {
+      index: 0,
+      id: 'x1',
+      name: 'read_file',
+      arguments: '{"path":"logs/__e2e_missing.log"}',
+    };
+    const { statuses, text, steps, callLog } = await runChat('check the file logs/__e2e_missing.log for me', [
+      { toolCalls: [dupCall] }, // round 1: real (sharpened) error
+      { toolCalls: [dupCall] }, // round 2: duplicate — skipped
+      { toolCalls: [dupCall] }, // round 3: duplicate — skipped -> freeze armed
+      { toolCalls: [dupCall] }, // round 4: STILL calling -> freeze fires (⛔, no exec)
+      { content: 'No log yet — I checked and it is not there.', finishReason: 'stop' },
+    ]);
+    t('e2e-F: final answer served after the freeze', text.includes('I checked'), text.slice(0, 120));
+    t('e2e-F: anti-spam stop status shown', statuses.some((s) => s.includes('⛔')), JSON.stringify(statuses).slice(0, 700));
+    t(
+      'e2e-F: frozen round tells the model to stop calling',
+      callLog[callLog.length - 1].messages.some((m) => m.content.includes('Execution stopped')),
+      JSON.stringify(callLog[callLog.length - 1].messages.map((m) => m.content.slice(0, 60)))
+    );
+    t(
+      'e2e-F: loop did not burn extra rounds',
+      steps === 5,
+      `steps=${steps}`
+    );
+    t(
+      'e2e-F: missing-logs read carried the schedule hint',
+      statuses.some((s) => s.includes('duplicate tool call skipped')),
+      JSON.stringify(statuses).slice(0, 300)
+    );
+  }
+
+  // ----- G) live streaming: reasoning relay + round boundary events
+  // Every loop round's deltas stream to the client live; the round events
+  // tell the frontend to keep the final round's text and wipe transient
+  // tool-JSON rounds. The final answer must arrive BEFORE its round-final
+  // event and must NOT be re-emitted by the end-of-request flush.
+  {
+    const { events, text } = await runChat('live-stream check', [
+      { content: '<tools>\n{"tool":"write_file","args":{"path":"scripts/__rs_probe.txt","content":"rs"}}\n</tools>' },
+      {
+        content: 'The file is written.',
+        reasoning: 'User asked to write a file; write_file is the right tool for that.',
+      },
+    ]);
+    const idxFinalRound = events.findIndex((e) => e.type === 'round' && e.final === true);
+    const idxToolRound = events.findIndex((e) => e.type === 'round' && e.final === false);
+    const idxFinalText = events.findIndex(
+      (e) => e.choices && e.choices[0] && e.choices[0].delta && typeof e.choices[0].delta.content === 'string' && e.choices[0].delta.content.includes('The file is written')
+    );
+    const idxFirstJson = events.findIndex(
+      (e) => e.choices && e.choices[0] && e.choices[0].delta && typeof e.choices[0].delta.content === 'string' && e.choices[0].delta.content.includes('write_file')
+    );
+    const idxReasoning = events.findIndex(
+      (e) => e.choices && e.choices[0] && e.choices[0].delta && typeof e.choices[0].delta.reasoning === 'string'
+    );
+    t('e2e-G: tool round closed non-final, final round closed final', idxToolRound !== -1 && idxFinalRound !== -1 && idxToolRound < idxFinalRound, `tool@${idxToolRound} final@${idxFinalRound}`);
+    t('e2e-G: tool JSON reached the client live before its wipe event', idxFirstJson !== -1 && idxFirstJson < idxToolRound, `json@${idxFirstJson}`);
+    t('e2e-G: final answer streamed BEFORE the round-final event', idxFinalText !== -1 && idxFinalRound !== -1 && idxFinalText < idxFinalRound, `text@${idxFinalText} round@${idxFinalRound}`);
+    t('e2e-G: reasoning trace streamed before the round-final event', idxReasoning !== -1 && idxReasoning < idxFinalRound, `reasoning@${idxReasoning}`);
+    const afterFinal = events
+      .slice(idxFinalRound + 1)
+      .filter((e) => e.choices && e.choices[0] && e.choices[0].delta && typeof e.choices[0].delta.content === 'string');
+    t('e2e-G: no duplicate re-emission after the final round', afterFinal.length === 0, `after=${afterFinal.length}`);
+    const occ = (text.match(/The file is written\./g) || []).length;
+    t('e2e-G: final answer appears exactly once end-to-end', occ === 1, `occ=${occ} text=${text.slice(0, 140)}`);
+    try { fs.unlinkSync(path.join(process.env.PLIFE_WORK_ROOT, 'scripts', '__rs_probe.txt')); } catch {}
+  }
+
+  // ----- H) the reported failure mode: alias-keyed read_file args must
+  // EXECUTE (not be rejected into a 7-round retry -> anti-spam freeze)
+  {
+    const D = process.env.PLIFE_WORK_ROOT;
+    fs.mkdirSync(path.join(D, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(D, 'scripts', 'get_solana_price.py'), 'import requests\nprint("solana price")\n');
+    const { statuses, text, steps, callLog } = await runChat('can you check and refactor: scripts/get_solana_price.py', [
+      { toolCalls: [{ index: 0, id: 'h1', name: 'read_file', arguments: '{"file":"scripts/get_solana_price.py"}' }] },
+      { content: 'I checked the file — it fetches the Solana price via the CoinGecko API.', finishReason: 'stop' },
+    ]);
+    const executed = callLog.some((c) => c.messages.some((m) => m.content && m.content.includes('read_file: {"ok":true')));
+    const rejected = statuses.filter((s) => s.includes('Tool call rejected'));
+    const froze = statuses.some((s) => s.includes('⛔'));
+    t('e2e-H: alias-keyed read_file executed (not rejected)', executed, JSON.stringify(callLog.map((c) => c.messages.map((m) => String(m.content).slice(0, 60)))));
+    t('e2e-H: zero rejections for the alias call', rejected.length === 0, statuses.join(' | '));
+    t('e2e-H: no anti-spam freeze', !froze, statuses.join(' | '));
+    t('e2e-H: loop completed in exactly 2 steps', steps === 2, `steps=${steps}`);
+    t('e2e-H: status shows the real path (no "Reading file: ?")', statuses.some((s) => s === '⚙ Reading file: scripts/get_solana_price.py'), JSON.stringify(statuses));
+    t('e2e-H: final answer streamed', /I checked the file/.test(text), text.slice(0, 100));
+    try { fs.unlinkSync(path.join(D, 'scripts', 'get_solana_price.py')); } catch {}
+  }
+
+  // ----- I) fail-fast: the SAME invalid emission repeated 3 times freezes
+  // the loop immediately (previously it burned the full 7-round budget on
+  // the identical broken call, which is the reported 2-minute freeze)
+  {
+    const broken = { index: 0, id: 'i1', name: 'read_file', arguments: '{}' };
+    const { statuses, text, steps, callLog } = await runChat('check the file for me please', [
+      { toolCalls: [broken] }, // rejected (1st identical)
+      { toolCalls: [broken] }, // rejected (2nd identical)
+      { toolCalls: [broken] }, // rejected (3rd identical) -> freeze armed here
+      { toolCalls: [broken] }, // frozen round: no execution, stop note
+      { content: 'I could not read the file.', finishReason: 'stop' }, // deterministic close
+    ]);
+    const rejections = statuses.filter((s) => s.includes('Tool call rejected'));
+    const repeated = statuses.some((s) => s.includes('same invalid tool call was repeated 3 times'));
+    const executed = callLog.some((c) => c.messages.some((m) => m.content && m.content.includes('read_file: {"ok":true')));
+    t('e2e-I: all three identical calls rejected', rejections.length === 3, JSON.stringify(statuses));
+    t('e2e-I: 3rd identical emission froze the loop explicitly', repeated, JSON.stringify(statuses));
+    t('e2e-I: no call ever executed', !executed);
+    t('e2e-I: loop ended within 5 rounds (not 7)', steps === 5, `steps=${steps}`);
+    t('e2e-I: final answer served', /could not read the file/.test(text), text.slice(0, 80));
+  }
+
+  // ----- J) conversation-aware recovery: read_file with EMPTY args still
+  // works when the conversation names exactly one existing workspace file
+  {
+    const D = process.env.PLIFE_WORK_ROOT;
+    fs.mkdirSync(path.join(D, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(D, 'scripts', 'get_solana_price.py'), 'import requests\nprint("solana price")\n');
+    const { statuses, text, steps, callLog } = await runChat('can you check and refactor: scripts/get_solana_price.py', [
+      { toolCalls: [{ index: 0, id: 'j1', name: 'read_file', arguments: '{}' }] },
+      { content: 'I checked the file — it looks fine.', finishReason: 'stop' },
+    ]);
+    const executed = callLog.some((c) => c.messages.some((m) => m.content && m.content.includes('read_file: {"ok":true')));
+    const inferredStatus = statuses.some((s) => s.includes('Reading file: scripts/get_solana_price.py (path inferred from conversation)'));
+    t('e2e-J: empty-args read_file executed via conversation path', executed, JSON.stringify(callLog.map((c) => c.messages.map((m) => String(m.content).slice(0, 80)))));
+    t('e2e-J: status names the inferred path', inferredStatus, JSON.stringify(statuses));
+    t('e2e-J: zero rejections', !statuses.some((s) => s.includes('Tool call rejected')), JSON.stringify(statuses));
+    t('e2e-J: completed in 2 steps', steps === 2, `steps=${steps}`);
+    t('e2e-J: final answer streamed', /I checked the file/.test(text), text.slice(0, 100));
+    // write_file with empty args: path is inferred, but the call still must
+    // not execute without content — the rejection names ONLY content
+    const { statuses: s2, callLog: log2 } = await runChat('can you check and refactor: scripts/get_solana_price.py', [
+      { toolCalls: [{ index: 0, id: 'j2', name: 'write_file', arguments: '{}' }] },
+      { toolCalls: [{ index: 0, id: 'j3', name: 'write_file', arguments: '{"path":"scripts/get_solana_price.py","content":"print(42)"}' }] },
+      { content: 'Refactored.', finishReason: 'stop' },
+    ]);
+    const writeInferred = s2.some((s) => s === '⚙ Writing file: scripts/get_solana_price.py (path inferred from conversation)');
+    const contentOnly = s2.some((s) => s.includes('missing required argument \'content\'') && !s.includes('missing required argument \'path\''));
+    const wrote = log2.some((c) => c.messages.some((m) => m.content && m.content.includes('write_file: {"ok":true')));
+    t('e2e-J: write_file empty args infers the path in the status', writeInferred, JSON.stringify(s2));
+    t('e2e-J: write rejected for content only (path no longer the gap)', contentOnly, JSON.stringify(s2));
+    t('e2e-J: valid retry with content executes', wrote);
+    try { fs.unlinkSync(path.join(D, 'scripts', 'get_solana_price.py')); } catch {}
+  }
+
+  // ----- K) the reported gemma failure mode: run_shell with ALIAS keys must
+  // normalize+execute (no rejection loop), and EMPTY args must reject WITH
+  // the command format hint so the model can correct itself
+  {
+    const { statuses, text, steps, callLog } = await runChat('what is the current status of system resources?', [
+      { toolCalls: [{ index: 0, id: 'k1', name: 'run_shell', arguments: '{"cmd":"free -h"}' }] },
+      { content: 'Here is the current memory usage.', finishReason: 'stop' },
+    ]);
+    const executed = callLog.some((c) => c.messages.some((m) => m.content && m.content.includes('run_shell: {"ok":true')));
+    const rejected = statuses.filter((s) => s.includes('Tool call rejected'));
+    t('e2e-K: alias-keyed run_shell executed (not rejected)', executed, JSON.stringify(callLog.map((c) => c.messages.map((m) => String(m.content).slice(0, 60)))));
+    t('e2e-K: zero rejections for the alias call', rejected.length === 0, statuses.join(' | '));
+    t('e2e-K: no anti-spam freeze', !statuses.some((s) => s.includes('⛔')), statuses.join(' | '));
+    t('e2e-K: status shows the real command (no "Running command: ")', statuses.some((s) => s === '⚙ Running command: free -h'), JSON.stringify(statuses));
+    t('e2e-K: completed in exactly 2 steps', steps === 2, `steps=${steps}`);
+    t('e2e-K: final answer streamed', /memory usage/.test(text), text.slice(0, 100));
+
+    // empty payload: the rejection names the gap AND the expected shape
+    const { statuses: s2, steps: st2 } = await runChat('what is the current status of system resources?', [
+      { toolCalls: [{ index: 0, id: 'k2', name: 'run_shell', arguments: '{}' }] },
+      { content: 'I could not run the command.', finishReason: 'stop' },
+    ]);
+    const hint = s2.some(
+      (s) => s.includes("missing required argument 'command'") && s.includes('Expected format: {"command": "your_shell_command_here"}')
+    );
+    t('e2e-K: empty run_shell rejected WITH the command format hint', hint, JSON.stringify(s2));
+    t('e2e-K: empty-payload run still closed cleanly in 2 steps', st2 === 2, `steps=${st2}`);
+  }
+
+  // ----- L) persisted system-prompt override (System view): the chat router
+  // sends the OVERRIDE byte-for-byte as the system message, and falls back
+  // to the generated template when no override is set.
+  {
+    const systemPromptSvc = require(path.join(ROOT, 'services', 'systemPrompt'));
+
+    // baseline: no override -> generated template in the payload
+    await runChat('anything', [{ content: 'fine.', finishReason: 'stop' }]);
+    t('e2e-L: baseline system message is the generated template', /FILE TOOL PAYLOADS/.test(callLog[0].messages[0].content || ''), callLog[0].messages[0].content.slice(0, 40));
+
+    // set an override -> the chat payload carries it verbatim (full replace)
+    const custom = 'You are a custom prompt. Reply with exactly: override-ok';
+    systemPromptSvc.setOverride(custom);
+    await runChat('anything', [{ content: 'override-ok', finishReason: 'stop' }]);
+    const sysMsg = callLog[0].messages[0].content || '';
+    t('e2e-L: override reaches the model payload verbatim', sysMsg === custom, sysMsg.slice(0, 60));
+
+    // reset -> template again
+    systemPromptSvc.resetOverride();
+    await runChat('anything', [{ content: 'fine.', finishReason: 'stop' }]);
+    t('e2e-L: after reset the template is back in the payload', /FILE TOOL PAYLOADS/.test(callLog[0].messages[0].content || ''), callLog[0].messages[0].content.slice(0, 40));
+
+    // the real override file must not exist afterwards
+    t('e2e-L: override file cleaned up (no pollution)', !fs.existsSync(systemPromptSvc.FILE), systemPromptSvc.FILE);
+  }
+
   await new Promise((resolve) => server.close(resolve));
 
   console.log(results.join('\n'));
@@ -375,5 +849,9 @@ function restoreState() {
   // created so re-runs stay deterministic even against a live server).
   try {
     if (stateBackup) fs.writeFileSync(STATE_FILE, stateBackup, 'utf8');
+  } catch {}
+  // Restore the registry roles stripped at startup (cascade re-enables).
+  try {
+    if (modelsStateBackup) fs.writeFileSync(MODELS_STATE_FILE, modelsStateBackup, 'utf8');
   } catch {}
 });

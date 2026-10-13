@@ -8,6 +8,12 @@
  */
 const skillManager = require('../services/skillManager');
 
+// Chat mentions may carry a leading slash ("/print_datetime" — the picker's
+// old insert form or the user typing one manually). Strip it at the tool
+// boundary so the ledger, logs and the manager all see the on-disk slug
+// (skillManager also normalizes internally — belt and braces).
+const cleanSkillName = (n) => (typeof n === 'string' ? n.replace(/^\/+/, '') : n);
+
 const listSkillsTool = {
   name: 'list_skills',
   description:
@@ -33,7 +39,8 @@ const runSkillTool = {
     },
     required: ['name'],
   },
-  execute: async (args) => skillManager.runSkill(args && args.name, (args && args.args) || []),
+  execute: async (args) =>
+    skillManager.runSkill(cleanSkillName(args && args.name), (args && args.args) || []),
 };
 
 const writeSkillTool = {
@@ -57,7 +64,8 @@ const writeSkillTool = {
     required: ['name', 'description'],
   },
   execute: (args) => {
-    const r = skillManager.writeSkill(args || {});
+    const clean = { ...(args || {}), name: cleanSkillName(args && args.name) };
+    const r = skillManager.writeSkill(clean);
     return r.ok
       ? { ok: true, message: `Skill "${r.skill.name}" saved`, skill: r.skill }
       : r;
@@ -66,13 +74,15 @@ const writeSkillTool = {
 
 const deleteSkillTool = {
   name: 'delete_skill',
-  description: 'Permanently delete an installed skill by name.',
+  description:
+    'Permanently delete an installed user skill by name (removes its folder from the workspace skills/ directory). ' +
+    'User skills are not built-in tools and may be deleted on request; fails cleanly for invalid or missing skills.',
   parameters: {
     type: 'object',
     properties: { name: { type: 'string', description: 'Skill name to delete' } },
     required: ['name'],
   },
-  execute: (args) => skillManager.deleteSkill(args && args.name),
+  execute: (args) => skillManager.deleteSkill(cleanSkillName(args && args.name)),
 };
 
 module.exports = { tools: [listSkillsTool, runSkillTool, writeSkillTool, deleteSkillTool] };

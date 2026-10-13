@@ -43,6 +43,19 @@ function execute(command, timeout) {
     }
   }
 
+  // Anti-spam: `chmod +x` on a .py file is never needed — the python3 script
+  // runner does not require the executable bit. The models kept spamming it
+  // mid-task; skip it with a directive instead of executing a no-op.
+  if (/^chmod\b/.test(cmd) && /\.py(['"\s]|$)/.test(cmd)) {
+    return Promise.resolve({
+      ok: false,
+      skippedAntiSpam: true,
+      error:
+        'chmod on a .py file was NOT executed — python scripts are run by the python3 runner and ' +
+        'do not need the executable bit. Continue without it; do not call chmod again.',
+    });
+  }
+
   const t = Number.isFinite(timeout) && timeout > 0
     ? Math.min(timeout, MAX_TIMEOUT_MS)
     : DEFAULT_TIMEOUT_MS;
@@ -73,7 +86,11 @@ const shellTool = {
   parameters: {
     type: 'object',
     properties: {
-      command: { type: 'string', description: 'The shell command to run' },
+      command: {
+        type: 'string',
+        description:
+          'The shell command to run. Payload shape: {"command": "free -h"} — the command key is required; single command, one line.',
+      },
       timeout_ms: { type: 'number', description: 'Optional timeout in ms (default 60000, max 300000)' },
     },
     required: ['command'],

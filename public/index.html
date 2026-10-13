@@ -10,7 +10,7 @@
   <!-- Markdown + syntax highlighting -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css" />
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
   <link rel="stylesheet" href="/css/styles.css" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
@@ -114,6 +114,13 @@
                     d="M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6l1.4 1.4m10 10 1.4 1.4m0-12.8-1.4 1.4m-10 10-1.4 1.4M17 12a5 5 0 1 1-10 0 5 5 0 0 1 10 0z" />
                 </svg>
                 <span>Channels</span>
+              </button>
+              <button id="systemBtn" class="sidebar-tool-item" title="View and edit the active system prompt">
+                <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6" />
+                </svg>
+                <span>System</span>
               </button>
             </div>
           </div>
@@ -294,6 +301,14 @@
                     <span id="contextSummary" class="tabular-nums truncate">—</span>
                   </button>
 
+                  <!-- live generation timer: ticks every second while the agent
+                       works (queue + tool loop + generation), hidden when idle -->
+                  <div id="genTimer"
+                    class="hidden items-center gap-1 rounded-full px-3 py-1.5 text-xs font-medium border
+                           border-gray-200 dark:border-white/10 bg-white dark:bg-white/5
+                           text-gray-600 dark:text-gray-300 tabular-nums shrink-0"
+                    title="Elapsed time since this request was sent"></div>
+
                   <!-- system metrics — compact copies shown only on mobile,
                        next to the context budget (desktop keeps the header pills) -->
                   <div class="flex sm:hidden items-center gap-1.5 shrink-0">
@@ -322,6 +337,27 @@
                             text-gray-700 dark:text-gray-200">—</span>
                     </div>
                   </div>
+                </div>
+
+                <button id="reasoningToggle" title="Reasoning effort: Default — click to change"
+                  class="shrink-0 p-2 rounded-full text-gray-400 hover:text-gray-600 dark:hover:text-gray-200
+                         hover:bg-gray-100 dark:hover:bg-white/5 flex items-center gap-1">
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round"
+                      d="M12 4a4 4 0 0 0-3.6 2.2A5 5 0 0 0 5 12a5 5 0 0 0-1 9h12a5 5 0 0 0 2-9.6A5 5 0 0 0 12 4z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6M9 15h4" />
+                  </svg>
+                  <span id="reasoningLevelLabel" class="text-[10px] font-bold leading-none">Default</span>
+                </button>
+
+                <!-- reasoning effort / visibility levels -->
+                <div id="reasoningMenu" class="popover hidden absolute bottom-full left-0 mb-2 z-40 w-44 max-w-[calc(100vw-1.5rem)] p-1.5" role="listbox" aria-label="Reasoning effort">
+                  <div class="px-2 pt-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-gray-500">Reasoning effort</div>
+                  <button class="reasoning-level-item" data-level="off" type="button">Off</button>
+                  <button class="reasoning-level-item" data-level="default" type="button">Default</button>
+                  <button class="reasoning-level-item" data-level="low" type="button">Low</button>
+                  <button class="reasoning-level-item" data-level="medium" type="button">Medium</button>
+                  <button class="reasoning-level-item" data-level="high" type="button">High</button>
                 </div>
 
                 <button id="genSettingsBtn" title="Generation settings"
@@ -409,6 +445,12 @@
               <!-- attached file chips (shown above the input bar while composing) -->
               <div id="attachChips" class="hidden flex flex-wrap gap-1.5 px-1 pb-2"></div>
 
+              <!-- slash (/) skill picker: autocomplete of enabled skills while
+                   composing a message (absolute above the input bar) -->
+              <div id="skillPicker"
+                class="popover hidden absolute bottom-full left-0 mb-2 z-40 w-80 max-w-[calc(100vw-1.5rem)] p-1.5"
+                role="listbox" aria-label="Skills"></div>
+
               <!-- input bar -->
               <div id="inputBar"
                 class="flex items-end gap-2 rounded-2xl border border-gray-300 dark:border-white/15
@@ -434,7 +476,7 @@
             </div>
 
             <p class="text-center text-[11px] text-gray-400 dark:text-gray-600 mt-2">
-              Enter to send · Shift+Enter for new line · plife may make mistakes.
+              Enter to send · Shift+Enter for new line · Type <span class="font-semibold">/</span> for skills · plife may make mistakes.
             </p>
           </div>
         </div>
@@ -557,6 +599,12 @@
             </svg>
             <span>Add model</span>
           </button>
+          <button id="templatesAddBtn" class="fe-action-btn hidden" title="Create a new launch template">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+            </svg>
+            <span>New template</span>
+          </button>
           <button id="modelsRefresh" class="fe-btn-back" title="Refresh models">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round"
@@ -564,16 +612,43 @@
             </svg>
             <span>Refresh</span>
           </button>
+          <button id="templatesRefresh" class="fe-btn-back hidden" title="Refresh templates">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M4 4v6h6M20 20v-6h-6M20 9a8 8 0 0 0-14.5-3M4 15a8 8 0 0 0 14.5 3" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+        <!-- tab bar: Models | Templates -->
+        <div class="mm-tabs shrink-0 px-4 sm:px-6 max-w-3xl mx-auto w-full">
+          <div class="mm-tabbar" role="tablist" aria-label="Model management">
+            <button id="modelsTabBtn" class="mm-tab active" role="tab" aria-selected="true" title="Model endpoints">Models</button>
+            <button id="templatesTabBtn" class="mm-tab" role="tab" aria-selected="false" title="llama-server launch templates">Templates</button>
+          </div>
         </div>
         <div class="px-4 sm:px-6 py-2.5 max-w-3xl mx-auto shrink-0 w-full">
-          <p class="text-[13px] text-gray-500 dark:text-gray-400">
+          <p id="modelsExplainer" class="text-[13px] text-gray-500 dark:text-gray-400">
             Configure one or more LLM endpoints. The <strong>active</strong> model is used for the
-            next chat message. Add a local llama.cpp server (endpoint <code class="sc-code">http://127.0.0.1:PORT</code>)
-            or a remote OpenAI-compatible endpoint with an API key.
+            next chat message. Endpoints are grouped into <strong>Cloud / Online APIs</strong>
+            (remote OpenAI-compatible providers), <strong>Local Models</strong> (llama.cpp servers
+            like <code class="sc-code">http://127.0.0.1:PORT</code>), and the
+            <strong>Two-Stage Cascading (Hybrid)</strong> (fast router + heavy primary). Sections
+            collapse — click a header to toggle.
+          </p>
+          <p id="templatesExplainer" class="hidden text-[13px] text-gray-500 dark:text-gray-400">
+            Launch templates set the <code class="sc-code">llama-server</code> flags used when p-agent generates a model's
+            systemd unit on launch. Assign a template in a model's editor; the flags are applied the
+            next time that server is started. <code class="sc-code">&lt;model-file&gt;</code> in a template is replaced with the
+            model's identifier. The <strong>Default</strong> template is built in — its flags are editable, but it
+            cannot be deleted.
           </p>
         </div>
         <!-- body: model cards -->
         <div id="modelsList" class="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
+        </div>
+        <!-- body: template cards -->
+        <div id="templatesList" class="hidden flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
         </div>
       </main><!-- /modelsView -->
 
@@ -607,6 +682,22 @@
               <input id="modelCtx" type="number" min="1" max="1000000" step="1" value="8192" autocomplete="off" inputmode="numeric" />
             </div>
             <div class="modal-field">
+              <label for="modelRole">Cascade role <span class="field-hint">(two-stage hybrid — local llama.cpp endpoints only)</span></label>
+              <select id="modelRole">
+                <option value="">None — standalone model</option>
+                <option value="router">Router — fast stage-1 (intent + tool calls, e.g. 1.5B)</option>
+                <option value="primary">Primary — heavy stage-2 (final answers, e.g. 7B+)</option>
+              </select>
+              <span class="field-note">Router + Primary pair forms the Two-Stage Cascade section. Assigning a role moves the model out of Local/Cloud into the cascade group.</span>
+            </div>
+            <div class="modal-field">
+              <label for="modelTemplate">Launch template <span class="field-hint">(flags applied when this endpoint's llama-server unit is generated on start)</span></label>
+              <select id="modelTemplate">
+                <option value="">Default</option>
+              </select>
+              <span class="field-note">Manage templates in the <strong>Templates</strong> tab. Models without an assigned template keep any existing handcrafted systemd unit untouched.</span>
+            </div>
+            <div class="modal-field">
               <label for="modelApiKey">API key <span class="field-hint">(optional, for remote endpoints)</span></label>
               <input id="modelApiKey" type="password" placeholder="sk-… (leave blank to keep existing)" autocomplete="off" />
             </div>
@@ -618,6 +709,40 @@
           </form>
         </div>
       </div><!-- /modelModal -->
+
+      <!-- ===== Launch template editor modal ===== -->
+      <div id="templateModal" class="modal-backdrop hidden">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="templateModalTitle">
+          <div class="modal-head">
+            <h3 id="templateModalTitle" class="modal-title">Launch template</h3>
+            <button id="templateModalClose" class="modal-close" title="Close">&times;</button>
+          </div>
+          <form id="templateForm" class="modal-body">
+            <input type="hidden" id="templateId" />
+            <div class="modal-field">
+              <label for="templateName">Name</label>
+              <input id="templateName" required placeholder="e.g. Fast CPU defaults" autocomplete="off" />
+            </div>
+            <div class="modal-field">
+              <label for="templateDesc">Description <span class="field-hint">(optional)</span></label>
+              <input id="templateDesc" placeholder="What is this template tuned for?" autocomplete="off" />
+            </div>
+            <div class="modal-field">
+              <label for="templateArgs">llama-server flags <span class="field-hint">(whitespace-separated; &lt;model-file&gt; = the model's identifier)</span></label>
+              <textarea id="templateArgs" rows="10" required spellcheck="false"
+                placeholder="--alias &lt;model-file&gt;&#10;-fa 1 --jinja&#10;-c 16384 -np 1&#10;-b 512 -ub 512&#10;-t 6 -tb 2&#10;--cache-type-k f16 --cache-type-v f16&#10;--cache-reuse 256"
+                class="tpl-args-input"></textarea>
+              <span class="field-note" id="templateLockedNote">Built-in template — <code>-m</code>, <code>--host</code> and <code>--port</code> are always derived from the model entry and cannot be set here. Name and deletion are locked for the built-in.</span>
+              <span id="templateBuiltinBadge"></span>
+            </div>
+            <p id="templateFormError" class="modal-error hidden"></p>
+            <div class="modal-actions">
+              <button type="button" id="templateFormCancel" class="skill-cancel">Cancel</button>
+              <button type="submit" id="templateFormSubmit" class="skill-danger save">Save template</button>
+            </div>
+          </form>
+        </div>
+      </div><!-- /templateModal -->
 
     <!-- ===== Automations Management view ===== -->
       <main id="automationsView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -729,7 +854,46 @@
         </div>
       </div><!-- /automationModal -->
 
-    <!-- ===== Channels view ===== -->
+      <!-- ===== System view (system prompt editor) ===== -->
+      <main id="systemView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
+        <!-- top bar: back to chat + title + refresh -->
+        <div class="fe-topbar shrink-0">
+          <button id="systemBackChat" class="fe-btn-back" title="Back to chat">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            <span>Chat</span>
+          </button>
+          <div class="fe-view-title">System</div>
+          <span id="systemSourceBadge" class="sys-badge sys-ov hidden" title="A custom system prompt is active — it replaces the built-in template">custom</span>
+          <button id="systemRefresh" class="fe-btn-back" title="Reload the prompt from the server">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M4 4v6h6M20 20v-6h-6M20 9a8 8 0 0 0-14.5-3M4 15a8 8 0 0 0 14.5 3" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+        <div class="flex-1 flex flex-col min-h-0 px-4 sm:px-6 py-3 max-w-4xl mx-auto w-full gap-2.5">
+          <p class="text-[13px] text-gray-500 dark:text-gray-400">
+            This is the exact system prompt sent to the model on every chat turn. Edit it and
+            <strong>Save Changes</strong> to replace the built-in template with your custom prompt
+            (applies to new chat turns — the currently open chat picks it up on its next turn).
+            <strong>Reset to Default</strong> restores the generated template.
+          </p>
+          <div class="sys-editbox flex flex-col min-h-0">
+            <textarea id="systemPromptText" class="sys-prompt-textarea" spellcheck="false"
+              placeholder="Loading system prompt…" aria-label="System prompt"></textarea>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 shrink-0">
+            <button id="systemSaveBtn" class="sys-btn sys-save">💾 Save Changes</button>
+            <button id="systemResetBtn" class="sys-btn sys-reset">↺ Reset to Default</button>
+            <span id="systemSaveState" class="text-xs text-gray-400 dark:text-gray-500"></span>
+          </div>
+        </div>
+      </main>
+
+      <!-- ===== Channels view ===== -->
       <main id="channelsView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
         <!-- top bar: back to chat + title + refresh -->
         <div class="fe-topbar shrink-0">

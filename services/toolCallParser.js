@@ -15,10 +15,12 @@
  *    results, user messages and retrieved text are NEVER parsed (they can
  *    contain injected tags) — the route guarantees this by only calling
  *    parseFallbackToolCall(acc.content, …).
- *  - The tool name must EXACTLY match a registered tool. Both key shapes are
- *    accepted: OpenAI/Qwen { name, arguments } and the plife contract
- *    { tool, args } (arguments/args interchangeable; arguments may be an
- *    object or a JSON string; missing args → {}).
+ *  - The tool name must EXACTLY match a registered tool. Key shapes accepted:
+ *    OpenAI/Qwen { name, arguments } and its echoed variants
+ *    {"function": <name>, "arguments": {...}} / {"function": {"name": …,
+ *    "arguments": …}}, plus the plife contract { tool, args } (arguments/args
+ *    interchangeable; arguments may be an object or a JSON string; missing
+ *    args → {}).
  *  - The call then goes through the exact same execution path as a native
  *    call (toolLoop.executeTool → validateArgs), so schema checks,
  *    placeholder rejection, dedup and side-effect guards all apply.
@@ -104,16 +106,33 @@ function findJsonFragments(text) {
 }
 
 /**
- * One call object. Accepts the OpenAI/Qwen2.5 shape { name, arguments } and
- * the plife contract { tool, args }, keys interchangeable; `arguments` may
- * be an object or a JSON string; a missing args key defaults to {}. Null
- * when invalid (no exact registered name, or unparseable args).
+ * One call object. Accepts the OpenAI/Qwen2.5 shapes { name, arguments } and
+ * its echoed variants {"function": <name>, "arguments": {...}} /
+ * {"function": {"name": …, "arguments": …}}, plus the plife contract
+ * { tool, args }, keys interchangeable; `arguments` may be an object or a
+ * JSON string; a missing args key defaults to {}. Null when invalid (no
+ * exact registered name, or unparseable args).
  */
 function validateCallObject(o, allowedNames) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
-  const name = (typeof o.name === 'string' && o.name) || (typeof o.tool === 'string' && o.tool) || '';
+  // OpenAI-native wrapper echo: {"function": {"name": …, "arguments": …}}.
+  const fnObj =
+    o.function && typeof o.function === 'object' && !Array.isArray(o.function)
+      ? o.function
+      : null;
+  const name =
+    (typeof o.name === 'string' && o.name) ||
+    (typeof o.tool === 'string' && o.tool) ||
+    (typeof o.function === 'string' && o.function) ||
+    (fnObj && typeof fnObj.name === 'string' && fnObj.name) ||
+    '';
   if (!name || !allowedNames.has(name)) return null; // exact registered name
-  let args = o.arguments !== undefined ? o.arguments : o.args;
+  let args =
+    fnObj && fnObj.arguments !== undefined
+      ? fnObj.arguments
+      : o.arguments !== undefined
+        ? o.arguments
+        : o.args;
   if (args === undefined) args = {};
   if (typeof args === 'string') {
     try {

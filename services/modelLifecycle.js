@@ -39,11 +39,14 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execFile } = require('child_process');
 const config = require('../config');
 const modelManager = require('./modelManager');
 const requestQueue = require('./requestQueue');
+const templateStore = require('./templateStore');
 const toolLoop = require('./toolLoop');
 const historyManager = require('./historyManager');
+const cascadeService = require('./cascade');
 
 // ---------------------------------------------------------------- state
 /** id -> { lifecycle, since, phase, detail, online, busy, memory, op, opError } */
@@ -450,10 +453,17 @@ async function warmup(id) {
 function warmComplete(m) {
   return new Promise((resolve) => {
     const timeoutMs = Number(config.warmupTimeoutMs) || 300000;
-    const systemPrompt = toolLoop.buildSystemPrompt(config.llamaSystemPrompt);
-    // ALL tools, always — exactly what every real request sends (sorted by
-    // name, serialized identically), so the warm-up cache always matches.
-    const tools = toolLoop.toOpenAITools();
+    // Cascade-aware warm-up: the router stage gets its OWN system prompt
+    // (agent prompt + routing addendum). The warm-up must prefill EXACTLY
+    // the prefix real requests send per role, or the KV cache misses.
+    const systemPrompt =
+      m && m.role === 'router'
+        ? cascadeService.routerSystemPrompt(config.llamaSystemPrompt)
+        : toolLoop.buildSystemPrompt(config.llamaSystemPrompt);
+    // Role-aware tools: routers get the core 5 (same array every real router
+    // request sends), everything else gets ALL tools — byte-stable either way,
+    // so the warm-up cache always matches.
+    const tools = m && m.role === 'router' ? cascadeService.routerTools() : toolLoop.toOpenAITools();
     const payload = {
       model: m.model,
       messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: 'ping' }],
@@ -547,6 +557,44 @@ async function eject(id) {
   if (u.code === 404 || u.code === 405 || u.code === 501) {
     unloadCapCache.set(String(m.endpoint), { knownAt: Date.now(), unload: false });
 
+    // Never kill the ACTIVE model mid-request: refuse while a task is
+    // processing or queued on it.
+    try {
+      const active = modelManager.getActiveModel && modelManager.getActiveModel();
+      if (active && active.id === m.id) {
+        const slots = await httpGetJson(`${rootUrl(m.endpoint)}/slots`, { apiKey });
+        const list = JSON.parse(slots.body);
+        if (
+          Array.isArray(list) &&
+          list.some((s) => s && (s.is_processing === true || Number(s.id_task) > 0 || Number(s.task_id) > 0))
+        ) {
+          return { ok: false, code: 409, error: 'A request is currently processing on the active model — wait for it to finish before ejecting.' };
+        }
+      }
+    } catch { /* probe best-effort */ }
+
+    // Tier 3 (strongest): the model runs as a p-agent-managed llama-<id>.service
+    // unit -> stop it; the process terminates and ALL its memory is released.
+    // Hand-run servers without a unit file fall through to Tier 2/degraded.
+    const unit = cascadeService.unitNameFor(m);
+    try {
+      if (fs.statSync(unitFilePath(m)).isFile()) {
+        const r = await systemctlUser(['stop', unit]);
+        const missing = /not.*found|No such file|does not exist/i.test(r.stderr);
+        if (r.ok || missing) {
+          setLifecycle(id, 'unloaded', { detail: 'llama-server unit stopped — weights freed from memory' });
+          return {
+            ok: true,
+            unloaded: true,
+            stoppedUnit: unit,
+            detail: `${unit} stopped — process terminated, memory released. Reload it from the Models panel (Load) when needed.`,
+          };
+        }
+        setLifecycle(id, 'error', { detail: `could not stop ${unit}` });
+        return { ok: false, code: 502, error: `could not stop ${unit}: ${(r.stderr || r.stdout || '').trim()}` };
+      }
+    } catch { /* no unit file for this model */ }
+
     // Tier 2: erase the KV caches (frees context memory; needs --slot-save-path).
     const slots = await httpGetJson(`${rootUrl(m.endpoint)}/slots`, { apiKey });
     let cleared = 0;
@@ -589,11 +637,278 @@ async function eject(id) {
   return { ok: false, code: 502, error: `unload failed: HTTP ${u.code} ${String(u.body).slice(0, 200)}` };
 }
 
+// ---------------------------------------------------------------- launch
+// Local llama.cpp servers run as systemd USER units (llama-<model-id>.service,
+// see cascade.unitNameFor), so they live OUTSIDE this agent's memory cgroup,
+// restart automatically on crash, and can be managed from p-agent itself.
+// launch()/ensureCascadeModels() give p-agent full lifecycle control: check
+// /health first (idempotent), start the unit, then poll until the model
+// answers — bounded, never spinning.
+//
+// Unit generation: when a model has a launch template assigned (or no unit
+// file exists yet), the unit is GENERATED from the template — the template's
+// llama-server flags + the model's entry-derived -m/--host/--port, with the
+// <model-file> placeholder substituted. Handcrafted units for models WITHOUT
+// an assigned template are preserved untouched, so existing tuned cascade
+// units keep their flags until a template is explicitly assigned.
+
+const SYSTEMD_USER_DIR = path.join(os.homedir(), '.config', 'systemd', 'user');
+
+/** Absolute path of the llama-server binary (config.llamaCppDir first). */
+function resolveLlamaServerBin() {
+  const candidates = [
+    config.llamaCppDir && path.join(config.llamaCppDir, 'build', 'bin', 'llama-server'),
+    path.join(os.homedir(), 'llama.cpp', 'build', 'bin', 'llama-server'),
+    '/home/openclaw/llama.cpp/build/bin/llama-server',
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try { if (fs.statSync(c).isFile()) return c; } catch { /* next */ }
+  }
+  return candidates[0];
+}
+
+/**
+ * Absolute model-file path for a registry entry: absolute model strings are
+ * used as-is; otherwise the usual model search (~/models first, then the
+ * work root). Falls back to ~/models/<basename> when nothing exists on disk
+ * so llama-server's own error message reports the missing file.
+ */
+function resolveModelFilePath(m) {
+  const modelStr = String(m.model || m.modelId || '');
+  if (!modelStr) return null;
+  if (path.isAbsolute(modelStr)) return modelStr;
+  const base = path.basename(modelStr);
+  const candidates = [
+    path.join(os.homedir(), 'models', base),
+    path.join(config.workRoot, 'models', base),
+    path.join(config.workRoot, base),
+  ];
+  for (const c of candidates) {
+    try { if (fs.statSync(c).isFile()) return c; } catch { /* next */ }
+  }
+  return candidates[0];
+}
+
+/** systemd ExecStart quoting: plain tokens pass through, anything else is
+ * double-quoted with $, backslash, backtick and quote escaped. */
+function systemdEscape(arg) {
+  const s = String(arg);
+  if (/^[A-Za-z0-9_\-./:=,]+$/.test(s)) return s;
+  return '"' + s.replace(/["\\$`]/g, '\\$&') + '"';
+}
+
+/**
+ * Render the full systemd user unit for a model from its launch template.
+ * Order: template args (with <model-file> substitution) first, then the
+ * entry-derived -m/--port plus the fixed bind --host 0.0.0.0 — llama.cpp's
+ * last-wins parsing guarantees the derived values win over any template
+ * accident. 0.0.0.0 (not 127.0.0.1) so external tools like llama-ui on other
+ * interfaces can reach the server; the p-agent health probes still use the
+ * registry endpoint (loopback works for any bind).
+ */
+function buildUnitFile(m, template) {
+  const bin = resolveLlamaServerBin();
+  const modelStr = String(m.model || m.modelId || '');
+  const modelPath = resolveModelFilePath(m);
+  let args = (template && Array.isArray(template.args) ? template.args : [])
+    .map((a) => String(a).replace(/<model-file>/g, modelStr));
+  if (modelPath) args = args.concat(['-m', modelPath]);
+  args = args.concat(['--host', '0.0.0.0']);
+  let port = '';
+  try { port = String(new URL(m.endpoint).port || ''); } catch { /* no port */ }
+  if (port) args = args.concat(['--port', port]);
+  const rendered = [bin].concat(args).map(systemdEscape).join(' ');
+  const desc = `${m.name || m.id} (${modelStr}) - p-agent launch template "${template ? template.name : 'Default'}"`;
+  return [
+    '[Unit]',
+    `Description=${desc}`,
+    'After=local-fs.target',
+    '',
+    '[Service]',
+    'Type=simple',
+    `ExecStart=${rendered}`,
+    'Restart=on-failure',
+    'RestartSec=3',
+    'TimeoutStopSec=20',
+    '',
+    '[Install]',
+    'WantedBy=default.target',
+    '',
+  ].join('\n');
+}
+
+/** systemd user unit file path for a model (cascade.unitNameFor + dir). */
+function unitFilePath(m) {
+  return path.join(SYSTEMD_USER_DIR, cascadeService.unitNameFor(m));
+}
+
+/** Run a systemctl --user command; resolves { ok, code, stdout, stderr }. */
+function systemctlUser(args) {
+  return new Promise((resolve) => {
+    execFile('systemctl', ['--user', ...args], { timeout: 30000 }, (err, stdout, stderr) => {
+      resolve({
+        ok: !err,
+        code: err ? (err.code === null ? 1 : err.code) : 0,
+        stdout: String(stdout || ''),
+        stderr: String(stderr || ''),
+      });
+    });
+  });
+}
+
+/**
+ * Start a local model's llama-server via its systemd user unit and wait
+ * (bounded) until its /health answers. Idempotent: returns immediately when
+ * the endpoint is already online. Resolves { ok, already|started, unit,
+ * detail|error } — never throws.
+ */
+async function launch(id, { waitMs = 120000 } = {}) {
+  const m = modelManager.getModel(id);
+  if (!m) return { ok: false, code: 404, error: `model not found: ${id}` };
+  if (!isLocal(m)) {
+    return {
+      ok: false,
+      code: 400,
+      error: 'Launch applies to local llama.cpp endpoints only (remote models have no local server to start).',
+    };
+  }
+  const apiKey = modelManager.resolveApiKey(id);
+  const st = await modelManager.probeStatus(m.endpoint, apiKey);
+  if (st === 'online') {
+    return { ok: true, already: true, id, detail: `${id} already online at ${m.endpoint}` };
+  }
+  const unit = cascadeService.unitNameFor(m);
+  // Template-driven unit generation (see the section header): a model with
+  // an assigned template, or one that has no unit file yet, gets its unit
+  // (re)generated from the template before starting.
+  const templateId = String(m.templateId || '');
+  const unitFile = unitFilePath(m);
+  let unitExists = false;
+  let existing = '';
+  try { existing = fs.readFileSync(unitFile, 'utf8'); unitExists = true; } catch { /* first launch */ }
+  // Regeneration policy: assigned template, missing unit, OR a stale
+  // AUTO-GENERATED unit (recognized by the "p-agent launch template" marker
+  // in its Description). Auto-generated units are re-rendered from the
+  // CURRENT derivation so flag changes (e.g. the --host 0.0.0.0 bind) reach
+  // already-generated units on the next Load. Handcrafted units carry no
+  // marker and are preserved untouched (tuned flags survive).
+  const isGenerated = /p-agent launch template/.test(existing);
+  const fresh = templateId || !unitExists || (unitExists && isGenerated);
+  if (fresh) {
+    const template = templateStore.resolve(templateId);
+    if (!template) {
+      return { ok: false, code: 400, error: `launch template not found: ${templateId}` };
+    }
+    try {
+      const rendered = buildUnitFile(m, template);
+      if (!unitExists || existing !== rendered) {
+        fs.mkdirSync(SYSTEMD_USER_DIR, { recursive: true });
+        fs.writeFileSync(unitFile, rendered, 'utf8');
+        console.log(`[models] generated ${unit} from template "${template.name}"`);
+        const dr = await systemctlUser(['daemon-reload']);
+        if (!dr.ok) {
+          return {
+            ok: false,
+            code: 502,
+            error: `could not reload systemd after writing ${unit}: ${(dr.stderr || dr.stdout || '').trim() || `systemctl exited ${dr.code}`}`,
+          };
+        }
+      }
+    } catch (err) {
+      return { ok: false, code: 502, error: `could not write ${unitFile}: ${err.message}` };
+    }
+  }
+  const r = await systemctlUser(['start', unit]);
+  if (!r.ok) {
+    return {
+      ok: false,
+      code: 502,
+      error: `could not start ${unit}: ${(r.stderr.trim() || r.stdout.trim() || `systemctl exited ${r.code}`)}`,
+    };
+  }
+  const deadline = Date.now() + waitMs;
+  let last = st;
+  while (Date.now() < deadline) {
+    // A multi-GB GGUF takes a while to load — poll, don't spin.
+    await new Promise((res) => setTimeout(res, 2000));
+    last = await modelManager.probeStatus(m.endpoint, apiKey);
+    if (last === 'online') {
+      console.log(`[models] ${unit} online at ${m.endpoint}`);
+      return { ok: true, started: true, id, unit, detail: `${unit} started — server online at ${m.endpoint}` };
+    }
+  }
+  return {
+    ok: false,
+    code: 502,
+    error: `${unit} started but ${m.endpoint} did not answer within ${Math.round(waitMs / 1000)}s (last probe: ${last})`,
+  };
+}
+
+/**
+ * Ensure the two-stage cascade pair is running (parallel), or the active
+ * model when no cascade is configured. Used at boot and by
+ * POST /api/models/launch (no id). Never throws — one result per model.
+ */
+async function ensureCascadeModels() {
+  const c = cascadeService.resolve();
+  const ids = c.enabled ? [c.router.id, c.primary.id] : [];
+  if (!ids.length) {
+    const a = modelManager.getActiveModel();
+    if (a && a.id) ids.push(a.id);
+  }
+  return Promise.all(ids.map((id) => launch(id, { waitMs: 120000 })));
+}
+
+/**
+ * Stop the cascade pair: stop the router+primary systemd USER units, freeing
+ * their llama-server RAM (the process exit IS the eject — no HTTP unload
+ * dance needed). Unit names come from the CURRENT role assignments via
+ * cascade.unitNameFor (llama-router.service / llama-primary.service; any
+ * future role-based naming follows along). When no cascade is enabled the
+ * classic pair of names is still attempted so stale units from an older
+ * config do not survive. Idempotent: stopping an already-inactive unit is a
+ * successful no-op; a missing unit is reported as skipped, not an error.
+ */
+async function stopCascadeModels() {
+  const c = cascadeService.resolve();
+  const units =
+    c.enabled
+      ? [cascadeService.unitNameFor(c.router), cascadeService.unitNameFor(c.primary)]
+      : ['llama-router.service', 'llama-primary.service'];
+  const results = await Promise.all(
+    units.map(async (unit) => {
+      const r = await systemctlUser(['stop', unit]);
+      const missing = /not.*found|No such file|does not exist/i.test(r.stderr);
+      const ok = r.ok || missing;
+      if (!ok) console.log(`[models] stop ${unit} failed: ${(r.stderr || r.stdout || '').trim()}`);
+      return {
+        unit,
+        ok,
+        skipped: missing,
+        detail: r.ok ? 'stopped' : missing ? 'unit not installed — nothing to stop' : (r.stderr || r.stdout || '').trim() || `systemctl exited ${r.code}`,
+      };
+    })
+  );
+  // Reflect the freed servers in the lifecycle map (the next status sweep
+  // confirms via /health probes anyway).
+  for (const m of [c.router, c.primary]) {
+    if (m && m.id) setLifecycle(m.id, 'unloaded', { detail: 'cascade server stopped — weights freed from memory' });
+  }
+  return { ok: results.every((x) => x.ok), results };
+}
+
 module.exports = {
   getStatuses,
   getStatus,
   warmup,
   eject,
+  launch,
+  ensureCascadeModels,
+  stopCascadeModels,
   probeUnloadCapability,
   isLocal,
+  buildUnitFile,
+  resolveModelFilePath,
+  resolveLlamaServerBin,
+  unitFilePath,
 };

@@ -64,6 +64,12 @@ function skillDir(name) {
 function safeName(name) {
   return typeof name === 'string' && NAME_RE.test(name) && name !== '.' && name !== '..';
 }
+// Chat mentions may carry a leading slash ("/print_datetime" — the old picker
+// form or a user typing the slash themselves). Normalize to the on-disk slug
+// BEFORE validation/lookups so every entry point tolerates the slash form.
+function normalizeName(name) {
+  return typeof name === 'string' ? name.replace(/^\/+/, '') : name;
+}
 function safeEntry(entry) {
   return typeof entry === 'string' && ENTRY_RE.test(entry);
 }
@@ -207,6 +213,7 @@ function listSkills() {
 
 /** Load a single skill (full object + body) or null if missing/name-less. */
 function loadSkill(name) {
+  name = normalizeName(name);
   if (!safeName(name)) return null;
   ensureRoot();
   const meta = readMeta(skillDir(name));
@@ -226,6 +233,7 @@ function loadSkill(name) {
 
 /** Enable/disable a skill; persists the state. Unknown name → error. */
 function setEnabled(name, enabled) {
+  name = normalizeName(name);
   if (!safeName(name)) return { ok: false, error: 'invalid skill name' };
   if (!loadSkill(name)) return { ok: false, error: `skill not found: ${name}` };
   const state = loadState();
@@ -244,9 +252,21 @@ function setEnabled(name, enabled) {
  * Metadata is written to SKILL.md frontmatter; provided files are (over)written.
  */
 function writeSkill(body) {
-  const name = body && body.name;
+  const name = normalizeName(body && body.name);
   if (!safeName(name)) return { ok: false, error: 'invalid skill name (use letters, digits, dots, dashes, underscores)' };
-  const entry = safeEntry(body.entry) ? body.entry : DEFAULT_ENTRY;
+  const files = body && typeof body.files === 'object' && body.files ? body.files : {};
+  // Entry resolution: an explicit entry wins; otherwise derive it from the
+  // files map so a skill authored with ONLY run.py (or run.sh) — the common
+  // agent-written shape — gets a working entry instead of the run.js default
+  // that crashes run_skill with "Cannot find module …/run.js".
+  const explicitEntry = safeEntry(body.entry) ? body.entry : null;
+  let entry = explicitEntry || DEFAULT_ENTRY;
+  if (!explicitEntry) {
+    const runFiles = Object.keys(files)
+      .filter((f) => f === 'run.js' || f === 'run.py' || f === 'run.sh')
+      .sort();
+    if (runFiles.length === 1) entry = runFiles[0];
+  }
   const instructions = typeof body.instructions === 'string'
     ? body.instructions
     : typeof body.body === 'string' ? body.body : '';
@@ -269,7 +289,6 @@ function writeSkill(body) {
   // Managed metadata files must not be clobbered through the free-form files map.
   try { fs.unlinkSync(path.join(dir, LEGACY_FILE)); } catch { /* none */ }
 
-  const files = body && typeof body.files === 'object' && body.files ? body.files : {};
   for (const [fname, content] of Object.entries(files)) {
     if (!safeEntry(fname) || fname === META_FILE || fname === LEGACY_FILE) {
       return { ok: false, error: `invalid or managed file name: ${fname}` };
@@ -282,6 +301,7 @@ function writeSkill(body) {
 
 /** Permanently delete a skill folder. */
 function deleteSkill(name) {
+  name = normalizeName(name);
   if (!safeName(name)) return { ok: false, error: 'invalid skill name' };
   ensureRoot();
   const dir = skillDir(name);
@@ -300,21 +320,47 @@ function deleteSkill(name) {
 /**
  * Execute a skill's entry script in a bounded child process.
  * args: string[] passed to the script; opts: { timeoutMs }.
+ * The interpreter is picked from the entry extension (.py → python3,
+ * .sh → sh, everything else → node). If the entry declared in SKILL.md is
+ * missing on disk (e.g. a skill authored with only run.py whose metadata
+ * still says run.js), it falls back to the run.* script that exists and
+ * otherwise returns a clean error — never an opaque node loader crash.
  */
 function runSkill(name, args = [], opts = {}) {
+  name = normalizeName(name);
   return new Promise((resolve) => {
     const skill = loadSkill(name);
     if (!skill) return resolve({ ok: false, error: `skill not found: ${name}` });
     if (!safeEntry(skill.entry)) return resolve({ ok: false, error: `invalid entry file: ${skill.entry}` });
 
     const dir = skillDir(name);
-    const entry = path.join(dir, skill.entry);
+    let entryName = skill.entry;
+    if (!isFile(path.join(dir, entryName))) {
+      for (const cand of ['run.py', 'run.sh', 'run.js']) {
+        if (isFile(path.join(dir, cand))) { entryName = cand; break; }
+      }
+      if (entryName === skill.entry) {
+        let listing = [];
+        try { listing = fs.readdirSync(dir); } catch { /* unreadable */ }
+        return resolve({
+          ok: false,
+          error: `entry file ${skill.entry} not found in skill "${name}" (folder has: ${listing.join(', ') || 'nothing'})`,
+        });
+      }
+    }
+    const entry = path.join(dir, entryName);
     const timeoutMs = Number(opts && opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 20000;
     const argv = Array.isArray(args) ? args.map(String) : [];
 
     let child;
     try {
-      child = spawn(process.execPath, [entry, ...argv], { cwd: dir });
+      if (/\.py$/.test(entryName)) {
+        child = spawn('python3', [entry, ...argv], { cwd: dir, env: { ...process.env, WORKSPACE_ROOT: config.workRoot } });
+      } else if (/\.sh$/.test(entryName)) {
+        child = spawn('sh', [entry, ...argv], { cwd: dir, env: { ...process.env, WORKSPACE_ROOT: config.workRoot } });
+      } else {
+        child = spawn(process.execPath, [entry, ...argv], { cwd: dir, env: { ...process.env, WORKSPACE_ROOT: config.workRoot } });
+      }
     } catch (e) {
       return resolve({ ok: false, error: e && e.message ? e.message : String(e) });
     }

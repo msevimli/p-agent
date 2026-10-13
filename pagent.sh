@@ -6,6 +6,9 @@
 #                          scheduler all boot with server.js)
 #   ./pagent.sh --stop     gracefully stop the server (and remove the PID file)
 #   ./pagent.sh --status   show PID / uptime / health
+#   ./pagent.sh --models <start|stop|status>
+#                           manage the two-stage cascade llama.cpp servers
+#                           (llama-router on :8081, llama-primary on :8080)
 #   ./pagent.sh --help     this text
 #
 # State: PID in data/pagent.pid, logs in data/pagent.log (both gitignored).
@@ -43,6 +46,11 @@ ${C_BOLD}pagent.sh${C_RESET} — unified lifecycle manager for p-agent (port ${P
   ${C_GREEN}--stop${C_RESET}    stop the server gracefully (SIGTERM, then SIGKILL if needed),
           clean up the PID file
   ${C_GREEN}--status${C_RESET}  show PID, uptime, port and health status
+  ${C_GREEN}--models${C_RESET}  manage the cascade model servers:
+          start  — start llama-router (:8081) + llama-primary (:8080) units
+                   and wait until both answer /health (up to 120s)
+          stop   — stop both model units
+          status — unit state + /health per port
   ${C_GREEN}--help${C_RESET}    this help
 
 State: data/pagent.pid · Logs: data/pagent.log
@@ -70,6 +78,61 @@ fmt_uptime() {
   [ "$h" -gt 0 ] && out="${out}${h}h "
   [ "$m" -gt 0 ] && out="${out}${m}m "
   printf '%s%ss' "$out" "$s"
+}
+
+# --- cascade model servers (systemd user units managed by p-agent) ---------
+MODEL_UNITS="llama-router.service llama-primary.service"
+MODEL_PORTS="8081 8080"
+
+port_healthy() { curl -sf -m 2 "http://127.0.0.1:${1}/health" >/dev/null 2>&1; }
+
+models_start() {
+  local u
+  for u in $MODEL_UNITS; do
+    if ! systemctl --user status "$u" >/dev/null 2>&1; then
+      warn "unit $u not found — skipped (expected $MODEL_UNITS)"
+      continue
+    fi
+    systemctl --user start "$u"
+  done
+  info "waiting for model servers to answer /health (up to 120s)…"
+  local i p all
+  for i in $(seq 1 60); do
+    all=1
+    for p in $MODEL_PORTS; do port_healthy "$p" || { all=0; break; }; done
+    [ "$all" -eq 1 ] && break
+    sleep 2
+  done
+  for p in $MODEL_PORTS; do
+    if port_healthy "$p"; then ok "  :${p} — online"
+    else err "  :${p} — NOT answering after 120s"; fi
+  done
+}
+
+models_stop() {
+  for u in $MODEL_UNITS; do systemctl --user stop "$u" 2>/dev/null || true; done
+  ok "model units stopped (router :8081, primary :8080)."
+}
+
+models_status() {
+  local u act p
+  for u in $MODEL_UNITS; do
+    act="$(systemctl --user is-active "$u" 2>/dev/null || echo 'missing')"
+    info "${u}: ${act}"
+  done
+  for p in $MODEL_PORTS; do
+    if port_healthy "$p"; then ok "  :${p} — /health OK"
+    else warn "  :${p} — no /health response"; fi
+  done
+}
+
+cmd_models() {
+  case "${1:-status}" in
+    start) models_start ;;
+    stop)  models_stop ;;
+    status) models_status ;;
+    *) err "unknown --models action: ${1:-} (start|stop|status)"; exit 2 ;;
+  esac
 }
 
 # -------------------------------------------------------------------- start
@@ -136,6 +199,15 @@ cmd_start() {
       ok "p-agent is up — PID ${pid}, http://localhost:${PORT} (${i}s to first healthy response)"
       ok "PID file: data/pagent.pid · Logs: data/pagent.log"
       info "Telegram channel and automations scheduler confirm via --status."
+      # Two-stage cascade model servers: fire the systemd units in the
+      # background — p-agent's own boot hook waits for /health and warms the
+      # prefixes, so this never blocks --start.
+      if command -v systemctl >/dev/null 2>&1; then
+        for u in $MODEL_UNITS; do
+          systemctl --user status "$u" >/dev/null 2>&1 && systemctl --user start "$u" 2>/dev/null || true
+        done
+        info "model units started (router :8081, primary :8080) — './pagent.sh --models status' to check."
+      fi
       exit 0
     fi
     if ! is_pid_alive "$pid"; then
@@ -258,6 +330,7 @@ case "${1:-}" in
   --start) cmd_start ;;
   --stop)  cmd_stop ;;
   --status) cmd_status ;;
+  --models) shift 2>/dev/null || true; cmd_models "${1:-status}" ;;
   --help|-h|"") usage ;;
   *) err "unknown argument: ${1:-}"; usage; exit 2 ;;
 esac

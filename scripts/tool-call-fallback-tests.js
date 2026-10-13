@@ -17,6 +17,8 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 
 // ---------------------------------------------------------------------------
 // Mocks — MUST be installed before routes/chat.js is required (the route
@@ -35,6 +37,24 @@ let completeCalls = 0;
 
 const realLog = console.log.bind(console);
 console.log = (...a) => { logLines.push(a.join(' ')); };
+
+// Two-stage cascade: strip role fields for the run so these loop tests
+// exercise the CLASSIC single-model flow deterministically. The chat route
+// re-resolves the cascade from data/models-state.json on EVERY request, so a
+// live router/primary pair makes invalid/unknown tool attempts escalate to a
+// second completion and breaks the "single completion — no retry" assertions
+// (T6/T7). The original file is restored in the runner's finally below; a
+// live server re-reads it after that and the cascade re-enables. If stripping
+// fails (missing/invalid file) the harness still runs.
+const MODELS_STATE_FILE = path.join(__dirname, '..', 'data', 'models-state.json');
+const modelsStateBackup = fs.readFileSync(MODELS_STATE_FILE, 'utf8');
+try {
+  const ms = JSON.parse(modelsStateBackup);
+  (Array.isArray(ms.models) ? ms.models : []).forEach((m) => { if (m) delete m.role; });
+  fs.writeFileSync(MODELS_STATE_FILE, JSON.stringify(ms, null, 2) + '\n', 'utf8');
+} catch (e) {
+  realLog('tool-fallback-tests: could not strip cascade roles from models-state.json:', e && e.message);
+}
 
 llamaClient.complete = async (opts) => {
   completeCalls++;
@@ -380,6 +400,114 @@ test('T19 <tools> arguments arriving as a JSON string parse and execute', async 
   assert.deepStrictEqual(executed, [{ name: 'run_shell', args: { command: 'hostname' } }]);
 });
 
+test('T20 OpenAI-echo shape {"function": <name>, "arguments": {...}} in a json fence executes (run_skill regression)', async () => {
+  // The model echoes the OpenAI tools serialization (function: {name,
+  // arguments}) back as {"function": "run_skill", "arguments": {...}} — this
+  // used to be rejected by both parsers ("unrecognized tool call").
+  queue = [
+    acc('```json\n{"function": "run_skill", "arguments": {"name": "print_datetime"}}\n```'),
+    acc('Done.'),
+  ];
+  await runRequest([user('run the print_datetime skill')]);
+  assert.deepStrictEqual(executed, [{ name: 'run_skill', args: { name: 'print_datetime' } }]);
+});
+
+test('T21 OpenAI wrapper echo {"function": {"name": …, "arguments": …}} in a tag executes', async () => {
+  queue = [
+    acc('<tools>\n{"function": {"name": "list_skills", "arguments": {}}}\n</tools>'),
+    acc('ok'),
+  ];
+  await runRequest([user('list skills')]);
+  assert.deepStrictEqual(executed, [{ name: 'list_skills', args: {} }]);
+});
+
+test('T22 extractor: bare flattened OpenAI {"function":...} object fires only with an arguments key', () => {
+  // fenced variant through the extractor too
+  assert.deepStrictEqual(
+    toolLoop.extractToolCalls('```json\n{"function": "run_skill", "arguments": {"name": "x"}}\n```'),
+    [{ tool: 'run_skill', args: { name: 'x' } }]
+  );
+  // bare object in prose with arguments key fires
+  assert.deepStrictEqual(
+    toolLoop.extractToolCalls('Run {"function": "run_skill", "arguments": {"name": "print_datetime"}} now.'),
+    [{ tool: 'run_skill', args: { name: 'print_datetime' } }]
+  );
+  // bare name MENTION without arguments is not a call
+  assert.deepStrictEqual(toolLoop.extractToolCalls('maybe use {"function": "run_skill"} here.'), []);
+  // unknown names inside the function key never fire
+  assert.deepStrictEqual(
+    toolLoop.extractToolCalls('```json\n{"function": "no_such_tool", "arguments": {}}\n```'),
+    []
+  );
+});
+
+test('T23 delete_skill is registered, schema-gated, and executes through the loop', async () => {
+  const tools = require('../tools');
+  const t = tools.find((x) => x.name === 'delete_skill');
+  assert.ok(t, 'delete_skill must be in the registry');
+  assert.ok(t.parameters && t.parameters.required && t.parameters.required.includes('name'), 'name argument required');
+  assert.strictEqual(tools.filter((x) => x.name === 'delete_skill').length, 1, 'exactly one registration');
+  // The real executeTool enforces the schema (the T-series mock bypasses it,
+  // so validateArgs is asserted directly here):
+  assert.strictEqual(toolLoop.validateArgs('delete_skill', {}).ok, false, 'missing name rejected by validateArgs');
+  assert.strictEqual(toolLoop.validateArgs('delete_skill', { name: 'temp_skill' }).ok, true, 'valid name accepted');
+  // dispatch: a proper call parses and executes exactly once through the loop
+  queue = [acc('```json\n{"tool": "delete_skill", "args": {"name": "temp_skill"}}\n```'), acc('done')];
+  await runRequest([user('delete temp_skill')]);
+  assert.deepStrictEqual(executed, [{ name: 'delete_skill', args: { name: 'temp_skill' } }]);
+});
+
+test('T24 delete_file parses and dispatches (file deletion is a core tool)', async () => {
+  queue = [acc('```json\n{"tool": "delete_file", "args": {"path": "notes.txt"}}\n```'), acc('ok')];
+  await runRequest([user('remove notes.txt')]);
+  assert.deepStrictEqual(executed, [{ name: 'delete_file', args: { path: 'notes.txt' } }]);
+});
+
+test('T25 multi-call round: all calls dispatched in emission order', async () => {
+  queue = [
+    acc('```json\n{"tool": "write_file", "args": {"path": "a.txt", "content": "A"}}\n```\n```json\n{"tool": "write_file", "args": {"path": "b.txt", "content": "B"}}\n```'),
+    acc('both files created'),
+  ];
+  await runRequest([user('write two files a.txt and b.txt')]);
+  assert.deepStrictEqual(executed, [
+    { name: 'write_file', args: { path: 'a.txt', content: 'A' } },
+    { name: 'write_file', args: { path: 'b.txt', content: 'B' } },
+  ]);
+});
+
+test('T26 mixed round with a shell call: shell serializes, order preserved', async () => {
+  queue = [
+    acc('```json\n{"tool": "write_file", "args": {"path": "a.txt", "content": "A"}}\n```\n```json\n{"tool": "run_shell", "args": {"command": "ls a.txt"}}\n```'),
+    acc('done'),
+  ];
+  await runRequest([user('create a.txt and list it')]);
+  assert.deepStrictEqual(executed, [
+    { name: 'write_file', args: { path: 'a.txt', content: 'A' } },
+    { name: 'run_shell', args: { command: 'ls a.txt' } },
+  ]);
+});
+
+test('T27 malformed tool-call final answer gets one corrective round, then executes', async () => {
+  queue = [
+    // Malformed JSON: unbalanced quote after "content" — the parser refuses
+    // it, so the reply would previously be streamed raw as the final answer.
+    acc('```json\n{"tool": "write_file", "args": {"path": "x.txt", "content:"broken"}}\n```'),
+    acc('```json\n{"tool": "write_file", "args": {"path": "x.txt", "content": "fixed"}}\n```'),
+    acc('file written'),
+  ];
+  await runRequest([user('create x.txt with the word fixed')]);
+  assert.deepStrictEqual(executed, [{ name: 'write_file', args: { path: 'x.txt', content: 'fixed' } }]);
+});
+
+test('T28 second malformed reply is served (correction bounded at once)', async () => {
+  queue = [
+    acc('```json\n{"tool": "write_file", "args": {"path": "x.txt", "content:"broken"}}\n```'),
+    acc('```json\n{"tool": "write_file", "args": {"path": "x.txt", "content:"still-broken"}}\n```'),
+  ];
+  await runRequest([user('create x.txt')]);
+  assert.deepStrictEqual(executed, [], 'no call may execute from a malformed-only exchange');
+});
+
 // --- step 3: guard retry ------------------------------------------------------
 
 test('G1 shell-block reply + live-data request → ONE retry with tool_choice:"required" and the stable instruction', async () => {
@@ -453,5 +581,15 @@ test('D1 [llm-no-call] debug line carries finish_reason and the first 300 chars 
     }
   }
   realLog(`\n${pass}/${pass + fail} tool-call fallback tests passed (all mocked, no llama-server).`);
-  process.exit(fail ? 1 : 0);
-})();
+  process.exitCode = fail ? 1 : 0;
+})().catch((e) => {
+  realLog('harness crashed:', (e && e.stack) || e);
+  process.exitCode = 1;
+}).finally(() => {
+  // Restore the cascade roles stripped at startup (cascade re-enables).
+  try {
+    if (modelsStateBackup) fs.writeFileSync(MODELS_STATE_FILE, modelsStateBackup, 'utf8');
+  } catch (e) {
+    realLog('tool-fallback-tests: could not restore models-state.json:', e && e.message);
+  }
+});

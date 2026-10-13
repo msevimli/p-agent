@@ -57,14 +57,16 @@ p-agent/
 │   ├── health.js             #   GET /api/health — server + model status
 │   ├── chat.js               #   POST /api/chat — agentic tool loop + SSE proxy
 │   ├── sessions.js            #   /api/sessions CRUD (JSON persistence)
-│   ├── models.js              #   /api/models CRUD, activate, status/warmup/eject
+│   ├── models.js              #   /api/models CRUD, activate, status/warmup, /:id/load,eject
+│   ├── templates.js           #   /api/models/templates — launch-template CRUD
 │   ├── automations.js         #   /api/automations CRUD, run, logs
 │   ├── skills.js             #   /api/skills CRUD, toggle, run
 │   ├── library.js            #   /api/library CRUD + upload (raw body)
 │   ├── channels.js           #   /api/channels — Telegram config/status/toggle
 │   ├── fs.js                 #   /api/fs/list, /api/fs/read (file explorer)
 │   ├── queue.js              #   GET /api/queue — LLM queue stats
-│   └── system.js             #   GET /api/system/metrics — RAM/CPU (os module)
+│   ├── system.js             #   GET /api/system/metrics — RAM/CPU (os module)
+│   └── systemPrompt.js       #   GET/POST/DELETE /api/system/prompt — prompt override
 │
 ├── services/                 # business logic (no HTTP)
 │   ├── llamaClient.js        # payload build, streaming client, SSE parse,
@@ -79,8 +81,11 @@ p-agent/
 │   ├── sessionStore.js       # session persistence (data/sessions.json)
 │   ├── modelManager.js       # model registry, active-model resolution,
 │   │                         #   writeDotEnvVar (.env key management)
-│   ├── modelLifecycle.js     # per-model lifecycle (unloaded/loading/ready/error),
-│   │                         #   status probes, warm-up / eject operations
+│   ├── modelLifecycle.js     # lifecycle state, status probes, warm-up/eject + systemd
+│   │                         #   template-unit generation (launch templates, 0.0.0.0 bind)
+│   ├── templateStore.js      # launch templates (llama-server flag sets, CRUD + validation)
+│   ├── cascade.js            # two-stage cascade orchestration (router → primary units)
+│   ├── systemPrompt.js       # system-prompt override persistence (data/system-prompt.txt)
 │   ├── skillManager.js       # SKILL.md registry, run/validate/migrate
 │   └── automationManager.js  # cron/interval engine, script/skill/prompt actions
 │
@@ -105,6 +110,7 @@ p-agent/
 │   ├── automations-state.json#   automations + logs (bounded 20)
 │   ├── skills-state.json     #   skill enabled/disabled state
 │   ├── channels-state.json   #   telegram metadata (enabled, whitelist, lastError)
+│   ├── system-prompt.txt     #   system prompt override (Tools → System panel, optional)
 │   ├── library-index.json    #   library file metadata
 │   ├── pagent.pid            #   daemon PID file (written by pagent.sh)
 │   ├── pagent.log            #   daemon boot/run logs (written by pagent.sh)
@@ -172,6 +178,20 @@ p-agent/
   answer or `toolMaxIterations` (default 10). `type:"status"` SSE events
   stream tool activity (”⚙ Running command: …”) live, and dedup intercepts
   surface as explicit ”⚠ duplicate … skipped” events.
+  **Reasoning relay:** reasoning-capable models stream their thinking
+  separately — llama.cpp/OpenRouter `reasoning_content` deltas (and locally
+  emitted ` thinking... ` / `.../thinking` tags) are extracted every round and
+  relayed as `type:"reasoning"` SSE events distinct from the answer text;
+  round boundaries wipe the trace buffer so each round's thinking stays
+  attributted. The client renders a collapsible "Thinking…" panel, splits
+  ` thinking... ` tags itself, auto-collapses at the first answer token, and a
+  global visibility toggle (compose toolbar) hides all panels without
+  stopping the trace collection (state: `localStorage` `pagent.showReasoning`
+  legacy key; see the reasoning controller below).
+  **System-prompt override:** every turn consults
+  `services/systemPrompt.getOverride()` — a persisted
+  `data/system-prompt.txt` (Tools → System panel) REPLACES the generated
+  template byte-for-byte on both the tool path and the tool-less path.
   **Empty-stream fallback:** if a tools-enabled completion ends in an empty
   stream (some providers/models cannot carry the tools array — e.g.
   qwen-2.5-7b via OpenRouter/Phala), the request is re-run WITHOUT the tools
@@ -209,6 +229,26 @@ p-agent/
   type-coerced, non-empty and free of placeholder tokens; an invalid call is
   rejected with a corrective `invalidArgs` error (never executed, never
   recorded in the ledger) and surfaces live as a “Tool call rejected” event.
+  The rejection names the missing key AND the expected shape
+  (`Expected format: {"path": …}` / `{"command": "your_shell_command_here"}`
+  — the hint's own placeholder text is itself caught by the placeholder gate,
+  so the example can never execute as a real command).
+  **Argument normalization (pre-validation):** small models emit the right
+  value under the wrong key or as a bare unkeyed string. `normalizeFileToolArgs`
+  maps `file`/`filepath`/`file_path`/`filename`/`src`/`target` and bare strings
+  → `path` (file tools); `normalizeShellToolArgs` maps
+  `cmd`/`exec`/`script`/`c`/`shell_command` and bare strings → `command`
+  (run_shell). Normalized args feed the ledger/guards, so an alias-keyed
+  repeat of the same command is recognized as the same command. Status labels
+  resolve the same aliases (`labelPath`/`labelCommand` in routes/chat.js), so
+  the feed shows the real path/command pre-execution.
+  **Anti-loop safeguards:** the same invalid call repeated 3× in one request
+  fails fast and forces the final answer instead of looping;
+  `MAX_TOOL_ROUNDS=7` caps spam loops; conversation-based path recovery is
+  whitelisted to read_file/write_file/edit_file ONLY — never inferred for
+  run_shell, delete_file, skills, or automations (exactly one unique
+  workRoot-resolving candidate, non-URL, real content still required for
+  writes/edits).
 
 - **Channels & Loopback** (`services/telegramBot.js` + `services/chatLoopback.js`
   + `routes/channels.js`): Telegram long-polls `getUpdates` (no new
@@ -303,12 +343,42 @@ p-agent/
   between polls — a slot-state mutation detector + 2-probe debounce covers
   both, and the request queue is the exact in-flight signal for the active
   model. Warm-up runs a `max_tokens=1` completion through the queue against a
-  SPECIFIC endpoint (not the active one). Eject is capability-tiered: true
-  unload via the model-router `POST /models/unload` (200/204), degraded
-  KV-cache erase (`POST /slots/:id?action=erase`, needs `--slot-save-path`),
-  or an honest `degraded:true` response stating the weights stayed resident
-  (non-router llama-server answers 404 on `/models/unload`). Remote endpoints
-  reject warm-up/eject with 400 — there are no local weights to manage.
+  SPECIFIC endpoint (not the active one).
+  **Load / Eject (systemd units):** `POST /api/models/:id/load` derives a
+  systemd *user unit* `~/.config/systemd/user/llama-<id>.service` from the
+  model's launch template (`services/templateStore.js` + Templates tab; flags
+  validated: `-m`/`--host`/`--port` may not appear in templates), resolves the
+  GGUF path (config → `~/llama.cpp` → `/home/openclaw/llama.cpp`), and always
+  appends `-m <path> --host 0.0.0.0` LAST — llama.cpp's last-wins parsing
+  makes the bind authoritative over any template arg, and loopback health
+  probes still work against 0.0.0.0. Auto-generated units carry a
+  `p-agent launch template` marker in their Description: on the next Load they
+  are re-rendered whenever the derivation changed (self-healing flag fixes),
+  while hand-crafted units without the marker are preserved untouched.
+  Activating a model (`POST /api/models/:id/activate`) also queues a
+  background warm-up (warm-on-activate). **Eject is tiered:** native unload
+  via the model-router `POST /models/unload` (200/204) → an active-model busy
+  guard (probe `/slots`; any in-flight request → 409, never kill mid-request)
+  → **systemd unit-stop** (`systemctl --user stop llama-<id>.service` —
+  process terminates, ALL memory freed; the tier that actually works on this
+  llama.cpp build) → honest `{ok:true, unloaded:false, degraded:true}` for
+  hand-run servers with no unit (weights stayed resident — never claimed
+  otherwise). Remote endpoints reject warm-up/eject/load with 400 — there are
+  no local weights to manage.
+  **Reasoning levels:** the 5-level controller (Off/Default/Low/Medium/High)
+  rides every `/api/chat` body as `reasoningLevel`; routes/chat.js threads it
+  onto the shared `gen` object so every `buildChatPayload` call site
+  (plain/tool-loop/cascade) inherits it from one line. Mapping in
+  `llamaClient.buildChatPayload` (opts-layer wins, then gen-layer):
+  `off` → `reasoning_effort:"none"` (this llama.cpp build natively erases the
+  chat-template kwarg = thinking disabled); `low|medium|high` →
+  `reasoning_effort` + (loopback endpoints only) Anthropic-style
+  `thinking:{type:"enabled", budget_tokens: 1024|4096|16384}` which
+  server-chat.cpp maps to `thinking_budget_tokens`; `default`/unknown →
+  dropped entirely. The parameters touch the PAYLOAD ONLY — never the prompt —
+  so the KV prefix is byte-stable across levels (tested), except caps-style
+  templates that bake effort into their own rendering (one-time prefill after
+  a level switch). Cloud endpoints never get the `thinking` field.
 
 - **Automations Engine** (`services/automationManager.js` +
   `routes/automations.js`): dependency-free 5-field cron engine with
@@ -320,13 +390,19 @@ p-agent/
 
 - **Frontend** (`public/`): single-page vanilla JS app with a sidebar
   (SESSIONS accordion + TOOLS: File Explorer, Skills, Models, Automations,
-  Library, Channels), streaming chat with Markdown/highlight rendering,
-  generation settings + context-budget popovers, stop-generation via
-  AbortController, per-message ⚡ duration/token badges, library grid tiles
-  with inline delete-confirm state machine, a channels panel (token,
-  whitelist, toggle, test-connection, live status meta), the header model
-  lifecycle badge (color-coded dot, amber spinner while loading, warm-up /
-  eject dropdown with memory footprint), and a system resource monitor
+  Library, Channels, System), streaming chat with Markdown/highlight
+  rendering, per-message collapsible **Thinking…** panels (live reasoning
+  stream, auto-collapse on answer, global visibility toggle + 5-level
+  effort dropdown in the compose toolbar, `localStorage`
+  `pagent.reasoningLevel`), generation settings + context-budget popovers,
+  stop-generation via AbortController, per-message ⚡ duration/token badges,
+  library grid tiles with inline delete-confirm state machine, a channels
+  panel (token, whitelist, toggle, test-connection, live status meta), the
+  Models panel with category sections, per-model **Load/Eject** buttons and
+  a Templates tab, the header model lifecycle badge (color-coded dot, amber
+  spinner while loading, warm-up / eject dropdown with memory footprint),
+  the **System** view (full-size mono system-prompt editor with Save /
+  Reset-to-default, custom badge), and a system resource monitor
   (RAM/CPU circular gauges, 5s poll, delta-based CPU percentage). No build
   pipeline.
 
@@ -336,12 +412,16 @@ p-agent/
    (after whitelist auth) and the CLI loop through `chatLoopback`/`streamChat`
    into the same endpoint, each replaying its persisted session history.
 2. **Payload build** (`routes/chat.js` → `services/llamaClient.js`): the
-   system prompt (`toolLoop.buildSystemPrompt` = short base + compact tool-call
-   instructions; NO embedded tool schema — that duplicated ~3,400 tokens and
-   is dropped) is prepended; the FULL 16-tool array (name-sorted, identical
-   serialization on every request — stable, warm-up-compatible prefix) is
-   attached; `cache_prompt: true` tells llama.cpp to reuse its KV cache for
-   the stable prefix; attachments are inlined into the last user message.
+   system prompt — the per-turn override from `data/system-prompt.txt` when
+   set (Tools → System), else `toolLoop.buildSystemPrompt` (short base +
+   compact tool-call instructions; NO embedded tool schema — that duplicated
+   ~3,400 tokens and is dropped) — is prepended; the FULL 16-tool array
+   (name-sorted, identical serialization on every request — stable,
+   warm-up-compatible prefix) is attached; `cache_prompt: true` tells
+   llama.cpp to reuse its KV cache for the stable prefix; the selected
+   `reasoningLevel` is mapped to `reasoning_effort` / `thinking.budget_tokens`
+   (payload-only, NEVER prompt bytes — KV-prefix-stable, see Local LLM
+   Integration); attachments are inlined into the last user message.
    Dynamic content (dates, request ids, session ids) is NEVER part of the
    prefix — only the per-turn tail is new, so the second message of a
    conversation re-evaluates just the new message + last reply. Every

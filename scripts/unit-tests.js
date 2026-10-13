@@ -313,6 +313,65 @@ console.log('--- 7. prefix hash ------------------------------------------------
   check('mid-process hash change logs a warning', warned);
 }
 
+// ---------------------------------------------------------------------------
+// 6. reasoning-trace streaming parser (llamaClient vs a FAKE upstream)
+// ---------------------------------------------------------------------------
+console.log('--- 6. reasoning-trace parsing -----------------------------------');
+{
+  const http = require('http');
+  const llamaClient = require('../services/llamaClient');
+
+  const srv = http.createServer((req, res) => {
+    if (req.url.includes('/slots')) {
+      // Slot-liveness supervisor: report a busy slot so it never aborts the
+      // stream on silence (the fake stream races ahead of the poll timer).
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id_slot: 0, state: 1, idle: false }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const ev = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    // OpenAI-compatible chunk shapes in realistic order: content, then the
+    // provider-specific reasoning fields (llama.cpp distills / OpenRouter /
+    // GLM-style) interleaved, usage last.
+    ev({ choices: [{ delta: { role: 'assistant', content: 'Hel' } }] });
+    ev({ choices: [{ delta: { reasoning_content: 'Let me think' } }] });
+    ev({ choices: [{ delta: { reasoning: [' step', ' by', ' step'] } }] });
+    ev({ choices: [{ delta: { content: 'lo' } }] });
+    ev({ choices: [{ delta: { reasoning_text: ' glm-style' } }] });
+    ev({ choices: [{ delta: { content: ' world' } }] });
+    ev({ choices: [], usage: { prompt_tokens: 4, completion_tokens: 5 } });
+    res.end('data: [DONE]\n\n');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+
+  const deltas = [];
+  const reasoning = [];
+  const acc = await llamaClient.complete({
+    payload: {
+      messages: [{ role: 'system', content: 's' }, { role: 'user', content: 'hi' }],
+      model: 'fake',
+      stream: true,
+    },
+    target: { baseUrl: `http://127.0.0.1:${port}`, model: 'fake' },
+    onDelta: (d) => deltas.push(d),
+    onReasoning: (r) => reasoning.push(r),
+  });
+
+  check('reasoning: content deltas joined', acc.content === 'Hello world', JSON.stringify(acc.content));
+  check(
+    'reasoning: all provider shapes captured (reasoning_content + reasoning[] + reasoning_text)',
+    acc.reasoning === 'Let me think step by step glm-style',
+    JSON.stringify(acc.reasoning)
+  );
+  check('reasoning: onReasoning fired per reasoning delta', reasoning.length === 3 && reasoning.join('') === acc.reasoning, JSON.stringify(reasoning));
+  check('reasoning: onDelta still fires per content delta', deltas.length === 3 && deltas.join('') === 'Hello world', JSON.stringify(deltas));
+  check('reasoning: array reasoning tokens joined in order', reasoning[1] === ' step by step', JSON.stringify(reasoning[1]));
+
+  await new Promise((r) => srv.close(r));
+}
+
 console.log('');
 console.log(`${checks} checks, ${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

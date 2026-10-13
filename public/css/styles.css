@@ -214,7 +214,27 @@ html.dark .popover {
   background: #1e1f20;
   color: #e5e7eb;
   border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
+
+/* Slash (/) skill picker items (compose area autocomplete). */
+.skill-picker-item {
+  display: flex; align-items: baseline; gap: 0.55rem;
+  padding: 0.42rem 0.55rem; border-radius: 0.5rem; cursor: pointer;
+  font-size: 0.8rem; color: #374151; transition: background 0.1s;
+}
+html.dark .skill-picker-item { color: #d1d5db; }
+.skill-picker-item.active { background: rgba(37, 99, 235, 0.12); color: #111827; }
+html.dark .skill-picker-item.active { background: rgba(59, 130, 246, 0.24); color: #fff; }
+.skill-picker-name {
+  flex-shrink: 0; font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.skill-picker-desc {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 0.72rem; color: #6b7280;
+}
+html.dark .skill-picker-desc { color: #9ca3af; }
 @keyframes popoverIn {
   from { opacity: 0; transform: translateY(4px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -669,6 +689,41 @@ html.dark .model-set-active:hover { background: #2563eb; }
 .model-set-active.active { background: #10b981; cursor: default; }
 html.dark .model-set-active.active { background: #10b981; }
 .model-edit-del { display: flex; gap: 0.35rem; }
+/* Reasoning display toggle: body.no-reasoning hides every thinking panel
+   (live + history) without DOM surgery; toggling back restores them.
+   #reasoningToggle.on = amber brain icon when reasoning is shown. */
+body.no-reasoning .reasoning { display: none; }
+#reasoningToggle { transition: color 0.15s; }
+#reasoningToggle.on { color: #f59e0b; }
+html.dark #reasoningToggle.on { color: #fbbf24; }
+/* Reasoning effort menu items (#reasoningMenu popover) */
+.reasoning-level-item {
+  display: block; width: 100%; text-align: left;
+  padding: 0.4rem 0.6rem; border-radius: 0.45rem;
+  font-size: 0.8rem; font-weight: 500; color: #374151;
+  background: transparent; border: none; cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.reasoning-level-item:hover { background: rgba(59,130,246,0.08); color: #1f2937; }
+.reasoning-level-item.active { background: rgba(59,130,246,0.12); color: #2563eb; font-weight: 700; }
+html.dark .reasoning-level-item { color: #d1d5db; }
+html.dark .reasoning-level-item:hover { background: rgba(255,255,255,0.06); color: #f9fafb; }
+html.dark .reasoning-level-item.active { background: rgba(59,130,246,0.2); color: #60a5fa; }
+.model-load, .model-eject {
+  border: 1px solid; border-radius: 0.45rem; padding: 0.3rem 0.6rem;
+  cursor: pointer; font-size: 0.76rem; font-weight: 600;
+  background: transparent; transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+.model-load { color: #059669; border-color: rgba(5,150,105,0.45); }
+.model-load:hover { background: rgba(5,150,105,0.12); color: #047857; }
+.model-eject { color: #d97706; border-color: rgba(217,119,6,0.45); }
+.model-eject:hover { background: rgba(217,119,6,0.12); color: #b45309; }
+html.dark .model-load { color: #34d399; border-color: rgba(52,211,153,0.4); }
+html.dark .model-load:hover { background: rgba(52,211,153,0.14); color: #6ee7b7; }
+html.dark .model-eject { color: #fbbf24; border-color: rgba(251,191,36,0.4); }
+html.dark .model-eject:hover { background: rgba(251,191,36,0.14); color: #fcd34d; }
+.model-load:disabled, .model-eject:disabled { opacity: 0.55; cursor: wait; }
+.model-load[hidden], .model-eject[hidden] { display: none; }
 .model-edit, .model-del {
   border: none; background: transparent; border-radius: 0.45rem; padding: 0.3rem 0.55rem;
   cursor: pointer; font-size: 0.76rem; font-weight: 600; transition: background 0.15s, color 0.15s;
@@ -806,18 +861,35 @@ html.dark .auto-logs-toggle { color: #9ca3af; }
 .auto-logs-toggle:hover, .auto-logs-toggle.open { background: rgba(128,128,128,0.12); color: #111827; }
 html.dark .auto-logs-toggle:hover, html.dark .auto-logs-toggle.open { color: #fff; }
 
-/* automation modal: selects + textareas + hint text */
-.modal-field select.modal-select,
-.modal-field select#autoSkill {
+/* automation/model modals: selects + textareas + hint text.
+   Generalized to .modal-field select — every modal <select> (automation
+   skill, cascade role, launch template, …) shares the themed look, so a new
+   field can never fall back to the native bright appearance again. */
+.modal-field select,
+#modelModal select {
   width: 100%; border: 1px solid #d1d5db; border-radius: 0.55rem; padding: 0.5rem 0.7rem;
-  font-size: 0.86rem; color: #111827; background: #fff; outline: none;
-  transition: border-color 0.15s;
+  font-size: 0.86rem; color: #111827; background-color: #fff; outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  appearance: none; -webkit-appearance: none;
+  /* custom chevron (light theme) */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
+  background-size: 0.9em;
+  padding-right: 2.2rem;
 }
-html.dark .modal-field select.modal-select,
-html.dark .modal-field select#autoSkill {
-  border-color: rgba(255,255,255,0.15); color: #f3f4f6; background: #131314;
+html.dark .modal-field select,
+html.dark #modelModal select {
+  border-color: rgba(255,255,255,0.15); color: #f3f4f6; background-color: #131314;
+  /* lighter chevron for the dark theme */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
-.modal-field select:focus { border-color: #2563eb; }
+html.dark .modal-field select,
+html.dark #modelModal select { color-scheme: dark; } /* dark native option popup */
+.modal-field select:focus,
+#modelModal select:focus {
+  border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.12);
+}
 .modal-field textarea {
   width: 100%; border: 1px solid #d1d5db; border-radius: 0.55rem; padding: 0.5rem 0.7rem;
   font-size: 0.86rem; color: #111827; background: #fff; outline: none;
@@ -884,6 +956,214 @@ html.dark .modal-error { color: #f87171; }
 html.dark .skill-danger.save { background: #3b82f6; }
 html.dark .skill-danger.save:hover { background: #2563eb; }
 .model-busy { opacity: 0.6; pointer-events: none; }
+
+/* ==================================================================
+   Models panel: category sections (Cloud / Local / Two-Stage Cascade)
+   ================================================================== */
+.model-section { margin-bottom: 1.1rem; }
+.model-section .section-body-inner { padding-top: 0.6rem; }
+.model-section-empty { padding: 0.3rem 0.35rem 0.7rem; font-size: 0.8rem; line-height: 1.55; }
+
+/* Header: reuses the sidebar accordion classes (.section-header/.section-body)
+   for the collapse animation; this block (later in the file) restyles the
+   header for the models panel and MUST keep the .open chevron behavior. */
+.model-section-header {
+  width: 100%; display: flex; align-items: center; gap: 0.55rem;
+  padding: 0.62rem 0.8rem; border-radius: 0.7rem; border: 1px solid #e5e7eb;
+  background: #f9fafb; font-size: 0.82rem; font-weight: 700;
+  letter-spacing: 0.02em; text-transform: none; color: #374151; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+html.dark .model-section-header {
+  background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.12); color: #e5e7eb;
+}
+.model-section-header:hover { background: rgba(128,128,128,0.1); border-color: #c7d2fe; }
+html.dark .model-section-header:hover { border-color: rgba(147,197,253,0.4); }
+
+/* Per-category accent: colored left rail so the three groups read at a glance. */
+.cat-cloud .model-section-header { border-left: 3px solid #3b82f6; }
+html.dark .cat-cloud .model-section-header { border-left-color: #60a5fa; }
+.cat-local .model-section-header { border-left: 3px solid #10b981; }
+html.dark .cat-local .model-section-header { border-left-color: #34d399; }
+.cat-cascade .model-section-header { border-left: 3px solid #8b5cf6; }
+html.dark .cat-cascade .model-section-header { border-left-color: #a78bfa; }
+
+.ms-icon { flex-shrink: 0; font-size: 1rem; line-height: 1; }
+.ms-title { flex: 1; text-align: left; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ms-count {
+  flex-shrink: 0; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.05em;
+  padding: 0.12rem 0.55rem; border-radius: 9999px; background: rgba(128,128,128,0.14); color: #6b7280;
+}
+html.dark .ms-count { background: rgba(255,255,255,0.1); color: #9ca3af; }
+.ms-badge {
+  flex-shrink: 0; font-size: 0.6rem; font-weight: 800; letter-spacing: 0.07em;
+  text-transform: uppercase; padding: 0.14rem 0.55rem; border-radius: 9999px; line-height: 1.5;
+}
+.ms-badge.on { background: rgba(16,185,129,0.14); color: #059669; }
+html.dark .ms-badge.on { background: rgba(16,185,129,0.2); color: #34d399; }
+.ms-badge.off { background: rgba(107,114,128,0.14); color: #6b7280; }
+html.dark .ms-badge.off { background: rgba(255,255,255,0.12); color: #9ca3af; }
+
+/* Cascade role chips on model cards (shown only for router/primary entries). */
+.model-role-chip {
+  flex-shrink: 0; font-size: 0.6rem; font-weight: 800; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 0.1rem 0.5rem; border-radius: 9999px; line-height: 1.4;
+}
+.model-role-chip.router { background: rgba(139,92,246,0.14); color: #7c3aed; }
+html.dark .model-role-chip.router { background: rgba(139,92,246,0.22); color: #c4b5fd; }
+.model-role-chip.primary { background: rgba(249,115,22,0.14); color: #ea580c; }
+html.dark .model-role-chip.primary { background: rgba(249,115,22,0.22); color: #fdba74; }
+
+/* Models/Templates tab bar (Models management view). */
+.mm-tabbar {
+  display: flex; gap: 0.25rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+html.dark .mm-tabbar { border-bottom-color: rgba(255,255,255,0.12); }
+.mm-tab {
+  border: none; background: transparent; cursor: pointer;
+  padding: 0.5rem 1.1rem 0.55rem; font-size: 0.82rem; font-weight: 700;
+  color: #9ca3af; position: relative; border-radius: 0.6rem 0.6rem 0 0;
+}
+.mm-tab:hover { color: #4b5563; }
+html.dark .mm-tab:hover { color: #e5e7eb; }
+.mm-tab.active { color: #7c3aed; }
+html.dark .mm-tab.active { color: #c4b5fd; }
+.mm-tab.active::after {
+  content: ''; position: absolute; left: 0.7rem; right: 0.7rem; bottom: -1px;
+  height: 2px; background: #7c3aed; border-radius: 2px;
+}
+html.dark .mm-tab.active::after { background: #a78bfa; }
+
+/* Launch template cards (Templates tab). */
+.template-card {
+  background: #fff; border: 1px solid #e5e7eb; border-radius: 0.85rem;
+  padding: 0.9rem 1rem; margin-bottom: 0.75rem;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+html.dark .template-card {
+  background: #1e1f20; border-color: rgba(255,255,255,0.1);
+}
+.template-card.builtin { border-left: 3px solid #8b5cf6; }
+html.dark .template-card.builtin { border-left-color: #a78bfa; }
+.template-main { min-width: 0; }
+.template-name {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  font-weight: 700; font-size: 0.92rem; color: #111827;
+}
+html.dark .template-name { color: #f3f4f6; }
+.template-builtin-tag {
+  font-size: 0.58rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 0.12rem 0.5rem; border-radius: 9999px;
+  background: rgba(139,92,246,0.14); color: #7c3aed;
+}
+html.dark .template-builtin-tag { background: rgba(139,92,246,0.25); color: #c4b5fd; }
+.template-count {
+  font-size: 0.64rem; font-weight: 700; letter-spacing: 0.05em;
+  padding: 0.1rem 0.55rem; border-radius: 9999px; background: rgba(128,128,128,0.14); color: #6b7280;
+}
+html.dark .template-count { background: rgba(255,255,255,0.1); color: #9ca3af; }
+.template-desc { margin-top: 0.2rem; font-size: 0.78rem; color: #6b7280; }
+html.dark .template-desc { color: #9ca3af; }
+.template-args {
+  display: block; margin-top: 0.45rem; padding: 0.45rem 0.6rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem; line-height: 1.55; color: #374151; white-space: pre-wrap;
+  word-break: break-all; background: #f9fafb; border: 1px solid #f3f4f6; border-radius: 0.5rem;
+}
+html.dark .template-args { color: #d1d5db; background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.08); }
+.template-usage { font-size: 0.7rem; }
+.tpl-args-input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem; line-height: 1.5; resize: vertical;
+}
+.model-del:disabled { opacity: 0.4; cursor: default; }
+
+/* Two-stage cascade flow card (router -> primary). */
+.cascade-card {
+  border: 1px dashed rgba(139,92,246,0.45); background: rgba(139,92,246,0.05);
+  border-radius: 0.85rem; padding: 0.85rem 1rem; margin-bottom: 0.65rem;
+}
+html.dark .cascade-card { border-color: rgba(139,92,246,0.4); background: rgba(139,92,246,0.09); }
+.cascade-flow { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.cascade-node {
+  display: inline-flex; align-items: center; gap: 0.4rem; max-width: 100%;
+  font-size: 0.8rem; font-weight: 700; padding: 0.38rem 0.75rem; border-radius: 0.6rem;
+}
+.cascade-node em { font-style: normal; font-weight: 600; color: #4b5563; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html.dark .cascade-node em { color: #d1d5db; }
+.cascade-node i {
+  font-style: normal; font-size: 0.66rem; font-weight: 700; opacity: 0.65;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.node-router { background: rgba(139,92,246,0.12); color: #7c3aed; border: 1px solid rgba(139,92,246,0.25); }
+html.dark .node-router { background: rgba(139,92,246,0.2); color: #c4b5fd; }
+.node-primary { background: rgba(249,115,22,0.12); color: #ea580c; border: 1px solid rgba(249,115,22,0.3); }
+html.dark .node-primary { background: rgba(249,115,22,0.18); color: #fdba74; }
+.cascade-node .cascade-missing { color: #ef4444; font-weight: 700; }
+html.dark .cascade-node .cascade-missing { color: #f87171; }
+.cascade-arrow { font-size: 1.05rem; font-weight: 700; color: #8b5cf6; }
+.cascade-hint { margin-top: 0.55rem; font-size: 0.78rem; line-height: 1.55; color: #6b7280; }
+html.dark .cascade-hint { color: #9ca3af; }
+.cascade-actions { margin-top: 0.65rem; display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.cascade-start {
+  border: none; border-radius: 0.45rem; padding: 0.34rem 0.85rem; cursor: pointer;
+  font-size: 0.78rem; font-weight: 600; color: #fff; background: #7c3aed;
+  transition: background 0.15s, opacity 0.15s;
+}
+.cascade-start:hover { background: #6d28d9; }
+.cascade-start:disabled { opacity: 0.45; cursor: default; }
+html.dark .cascade-start { background: #8b5cf6; }
+html.dark .cascade-start:hover { background: #7c3aed; }
+.cascade-notes { font-size: 0.7rem; color: #9ca3af; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+html.dark .cascade-notes { color: #6b7280; }
+
+/* Role pickers (router/primary dropdowns) living inside the cascade card. */
+.cascade-selects {
+  margin-top: 0.6rem;
+  display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap;
+}
+.cascade-pick {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  flex: 1 1 220px; min-width: 0;
+}
+.cascade-pick-label {
+  flex-shrink: 0;
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: #6b7280;
+}
+html.dark .cascade-pick-label { color: #9ca3af; }
+.cascade-role-select {
+  flex: 1; min-width: 0; max-width: 100%;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem; font-weight: 600; color: #111827;
+  background-color: #fff; border: 1px solid #d1d5db; border-radius: 0.5rem;
+  appearance: none; -webkit-appearance: none;
+  /* chevron matches the modal selects */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.55rem center;
+  background-size: 0.85em;
+  padding-right: 1.8rem;
+}
+.cascade-role-select:focus { outline: 2px solid rgba(139,92,246,0.4); border-color: #8b5cf6; }
+.cascade-role-select:disabled { opacity: 0.55; cursor: default; }
+html.dark .cascade-role-select {
+  background-color: #1f2937; border-color: #4b5563; color: #e5e7eb; color-scheme: dark;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+.cascade-stop {
+  border: 1px solid #fca5a5; border-radius: 0.45rem; padding: 0.34rem 0.85rem; cursor: pointer;
+  font-size: 0.78rem; font-weight: 600; color: #dc2626; background: transparent;
+  transition: background 0.15s, opacity 0.15s, color 0.15s;
+}
+.cascade-stop:hover { background: rgba(239,68,68,0.12); color: #b91c1c; }
+.cascade-stop:disabled { opacity: 0.45; cursor: default; }
+html.dark .cascade-stop { border-color: #ef4444; color: #fca5a5; }
+html.dark .cascade-stop:hover { background: rgba(239,68,68,0.16); color: #fecaca; }
+
+.field-note { display: block; margin-top: 0.3rem; font-size: 0.72rem; line-height: 1.5; color: #6b7280; }
+html.dark .field-note { color: #9ca3af; }
 
 /* ==================================================================
    Library view (grid of tiles) + chat attachments
@@ -1074,3 +1354,135 @@ html.dark .chan-test-result { color: #cbd5e1; }
 }
 html.dark .chan-meta { color: #9ca3af; background: rgba(255, 255, 255, 0.05); }
 .chan-meta-line { overflow-wrap: anywhere; }
+/* ---- Reasoning / Thinking panel (live-streamed model reasoning) ----------- */
+.reasoning {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  margin-bottom: 10px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+}
+html:not(.dark) .reasoning {
+  border-color: rgba(15, 23, 42, 0.15);
+  background: rgba(15, 23, 42, 0.04);
+}
+.reasoning-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #9ca3af;
+  text-align: left;
+}
+html:not(.dark) .reasoning-toggle { color: #475569; }
+.reasoning-toggle:hover { color: #d1d5db; }
+html:not(.dark) .reasoning-toggle:hover { color: #1e293b; }
+.reasoning-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #8b5cf6;
+  animation: reasoning-pulse 1.2s ease-in-out infinite;
+}
+.reasoning-chev { margin-left: auto; transition: transform 0.15s ease; font-size: 10px; }
+.reasoning-body {
+  max-height: 320px;
+  overflow: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+html:not(.dark) .reasoning-body { border-top-color: rgba(15, 23, 42, 0.1); }
+.reasoning-text {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #9ca3af;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+html:not(.dark) .reasoning-text { color: #475569; }
+.reasoning.collapsed .reasoning-body { display: none; }
+.reasoning.collapsed .reasoning-chev { transform: rotate(-90deg); }
+.reasoning:not(.streaming) .reasoning-dot { animation: none; background: #6b7280; }
+@keyframes reasoning-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+/* ============ System view (system prompt editor) ============ */
+.sys-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border-radius: 9999px;
+  padding: 0.15rem 0.55rem;
+}
+.sys-ov {
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+}
+html.dark .sys-ov {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+.sys-editbox {
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+html.dark .sys-editbox { border-color: rgba(255, 255, 255, 0.12); }
+.sys-prompt-textarea {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  resize: none;
+  outline: none;
+  padding: 0.875rem 1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #111827;
+  background: #ffffff;
+  border: 0;
+}
+html.dark .sys-prompt-textarea { color: #e5e7eb; background: #1e1f20; }
+.sys-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border-radius: 9999px;
+  padding: 0.45rem 1.1rem;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.sys-btn:hover:not(:disabled) { opacity: 0.88; }
+.sys-btn:disabled { opacity: 0.55; cursor: wait; }
+.sys-save { color: #ffffff; background: #059669; }
+.sys-reset {
+  color: #92400e;
+  background: #fef3c7;
+  border-color: #fcd34d;
+}
+html.dark .sys-reset {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.1);
+  border-color: rgba(251, 191, 36, 0.3);
+}
