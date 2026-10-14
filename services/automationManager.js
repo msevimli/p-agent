@@ -2,7 +2,8 @@
  * automationManager — scheduled automation engine for plife.
  *
  * Rules persist in <dataDir>/automations-state.json:
- *   { automations: [ {
+ *   { paused: boolean,   // global scheduler switch (manual Run now still works)
+ *     automations: [ {
  *       id, name, description, enabled,
  *       schedule: { type: 'cron', cron } | { type: 'interval', intervalMinutes },
  *       action:   { type: 'script', script, args? }
@@ -211,13 +212,14 @@ function computeNextRun(a, nowMs) {
   return next ? next.toISOString() : null;
 }
 
-/** Recompute nextRunAt for every enabled automation, persisting only changes. */
+/** Recompute nextRunAt for every enabled automation (none while globally
+ * paused), persisting only changes. */
 function refreshNextRuns() {
   const state = loadState();
   const now = Date.now();
   let dirty = false;
   for (const a of state.automations) {
-    const wants = a.enabled !== false ? computeNextRun(a, now) : null;
+    const wants = (state.paused === true || a.enabled === false) ? null : computeNextRun(a, now);
     if (a.nextRunAt !== wants) { a.nextRunAt = wants; dirty = true; }
   }
   if (dirty) saveState(state);
@@ -509,7 +511,7 @@ function update(id, body) {
     enabled: body && typeof body.enabled === 'boolean' ? body.enabled : existing.enabled !== false,
     updatedAt: new Date().toISOString(),
   };
-  merged.nextRunAt = merged.enabled !== false ? computeNextRun(merged, Date.now()) : null;
+  merged.nextRunAt = (merged.enabled !== false && state.paused !== true) ? computeNextRun(merged, Date.now()) : null;
   state.automations[idx] = merged;
   cronCache.delete(id);
   saveState(state);
@@ -521,10 +523,34 @@ function setEnabled(id, enabled) {
   const a = state.automations.find((x) => x.id === id);
   if (!a) return { ok: false, error: `automation not found: ${id}` };
   a.enabled = enabled !== false;
-  a.nextRunAt = a.enabled ? computeNextRun(a, Date.now()) : null;
+  a.nextRunAt = (a.enabled && state.paused !== true) ? computeNextRun(a, Date.now()) : null;
   a.updatedAt = new Date().toISOString();
   saveState(state);
   return { ok: true, automation: publicAutomation(a) };
+}
+
+/** Global pause: while paused NO scheduled automation fires (the checkDue
+ * tick returns early, per-item switches are inert) but manual Run now still
+ * works, mirroring the per-item semantics. Persisted on the store root. */
+function setPaused(paused) {
+  const state = loadState();
+  const next = paused !== false;
+  if (state.paused === next) return { ok: true, paused: next, unchanged: true };
+  state.paused = next;
+  for (const a of state.automations) {
+    a.nextRunAt = next ? null : (a.enabled !== false ? computeNextRun(a, Date.now()) : null);
+  }
+  saveState(state);
+  return { ok: true, paused: next };
+}
+
+/** Is the scheduler globally paused? (read-only; never throws) */
+function isPaused() {
+  try {
+    return loadState().paused === true;
+  } catch {
+    return false;
+  }
 }
 
 function remove(id) {
@@ -558,20 +584,25 @@ async function runNow(id) {
   return { ok: true, started: true, id };
 }
 
-/** Check the store for due jobs and launch them (used by the tick and tests). */
+/** Check the store for due jobs and launch them (used by the tick and tests).
+ * Returns { ran, paused } so tests can assert skips without observing spawns. */
 function checkDue(nowMs) {
   const now = Number.isFinite(nowMs) ? nowMs : Date.now();
   const state = loadState();
+  if (state.paused === true) return { ran: 0, paused: true };
+  let ran = 0;
   for (const a of state.automations) {
     if (a.enabled === false) continue;
     if (!a.nextRunAt || new Date(a.nextRunAt).getTime() > now) continue;
     if (running.has(a.id)) continue;
     running.add(a.id);
+    ran += 1;
     Promise.resolve()
       .then(() => execute(a))
       .then((result) => { recordRun(a.id, result); running.delete(a.id); })
       .catch((e) => { recordRun(a.id, { ok: false, status: 'error', summary: e.message || 'run failed', detail: '' }); running.delete(a.id); });
   }
+  return { ran, paused: false };
 }
 
 let tickTimer = null;
@@ -591,6 +622,8 @@ module.exports = {
   create,
   update,
   setEnabled,
+  setPaused,
+  isPaused,
   remove,
   runNow,
   checkDue,

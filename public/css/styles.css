@@ -752,6 +752,8 @@ html.dark .auto-card {
 html.dark .auto-card:hover { border-color: rgba(147,197,253,0.45); }
 .auto-card.disabled { opacity: 0.72; }
 .auto-card.deleting { opacity: 0.5; pointer-events: none; }
+.auto-list-paused .auto-card { opacity: 0.55; }
+.auto-list-paused .auto-card .switch input:disabled + .slider { cursor: not-allowed; }
 
 .auto-row { display: flex; align-items: flex-start; gap: 0.85rem; }
 .auto-ic {

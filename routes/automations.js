@@ -7,6 +7,7 @@
  *   GET    /api/automations/:id       single rule
  *   PUT    /api/automations/:id       update name/description/schedule/action
  *   POST   /api/automations/:id/toggle  enable (true) or pause (false)
+ *   POST   /api/automations/pause     global scheduler switch { paused: bool }
  *   POST   /api/automations/:id/run     manual on-demand run (works while paused)
  *   DELETE /api/automations/:id       delete a rule
  */
@@ -16,7 +17,14 @@ const router = express.Router();
 
 // GET /api/automations
 router.get('/', (_req, res) => {
-  res.json({ ok: true, automations: manager.list() });
+  res.json({ ok: true, paused: manager.isPaused(), automations: manager.list() });
+});
+
+// POST /api/automations/pause — global on/off switch for the scheduler
+// (manual Run now keeps working while paused). Registered before /:id routes.
+router.post('/pause', (req, res) => {
+  const r = manager.setPaused(req.body && req.body.paused);
+  res.status(r.ok ? 200 : 400).json({ ok: true, paused: r.paused });
 });
 
 // GET /api/automations/:id

@@ -206,6 +206,29 @@ editor:
   template), so the editor shows ground truth; a "custom" badge marks the
   override state.
 
+## Automations (Tools → Automations)
+
+Scheduled jobs (interval or cron) that run shell scripts or agent prompts at
+a cadence:
+
+- Every card has a **per-automation switch** — off means the scheduler skips
+  it (`nextRunAt` is cleared; `POST /api/automations/:id/toggle` with
+  `{enabled: true|false}`). Manual **Run now** still works for disabled
+  automations.
+- The panel top has a **"Pause all automations" master switch** — one click
+  stops the whole scheduler (`POST /api/automations/pause` with
+  `{paused: true|false}`, `GET /api/automations` reports `paused` + a nulled
+  `nextRunAt` per rule). While paused, per-item switches are inert and no job
+  fires on schedule, but manual **Run now** remains available; unpausing
+  restores the schedule only for enabled automations.
+- State (including the paused flag) persists in `data/automations-state.json`.
+- The agent itself can manage these states with the automation tools:
+  `set_automation_enabled {id, enabled}` (one rule) and
+  `set_automations_paused {paused}` (whole scheduler) — registered alongside
+  create/list/run/delete, auto-included when the conversation mentions
+  automation/pause/disable keywords, and documented in the system prompt
+  (template and any active override).
+
 ## System resource monitor (header)
 
 Two compact circular gauges in the header (left of the model status badge)

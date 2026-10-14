@@ -139,26 +139,12 @@ const FOREIGN = 'some-other-model.gguf';
   t('slotBusy: idle slot with retained id_task is NOT busy', modelLifecycle.slotBusy({ is_processing: false, id_task: 222 }) === false, '');
   t('slotBusy: bare idle slot is NOT busy', modelLifecycle.slotBusy({ is_processing: false }) === false, '');
 
-  // Positive path (safe): identity-matched entry whose own unit exists but is
-  // INACTIVE -> eject proceeds to unit-stop, which is a no-op on an inactive
-  // unit. Self-guarding: case runs only when the unit is confirmed inactive.
-  const { execSync } = require('child_process');
-  const unitActive = (name) => {
-    try {
-      return execSync(`systemctl --user is-active ${name}`, {
-        env: { ...process.env, XDG_RUNTIME_DIR: '/run/user/1002', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1002/bus' },
-        timeout: 5000,
-      }).toString().trim() === 'active';
-    } catch { return false; }
-  };
-  const gm = modelManager.getModel('gemma4-4b');
-  if (gm && modelLifecycle.unitFilePath && !unitActive('llama-gemma4-4b.service')) {
-    r = await modelLifecycle.eject('gemma4-4b');
-    t('eject: own unit inactive -> proceeds to (harmless) unit stop',
-      r && r.ok === true && r.stoppedUnit && /llama-gemma4-4b/.test(r.stoppedUnit), r && JSON.stringify(r));
-  } else {
-    t('eject: own-unit-inactive positive path (unit file present)', false, 'llama-gemma4-4b.service not on disk or ACTIVE — case skipped');
-  }
+  // Positive unit-stop path is deliberately NOT asserted here: it would POST
+  // /models/unload to the SHARED live endpoint on 8081 (a router-capable
+  // server would actually unload the serving model — a test must never do
+  // that) and the unit-state depends on the user's live sessions. The
+  // identity-guard 409 cases above pin the safe boundary; the unit-stop
+  // branch itself is a thin systemctl wrapper exercised live via Load/Eject.
 
   // ---------------- restore --------------------------------------------------
   modelManager.probeStatus = realProbeStatus;

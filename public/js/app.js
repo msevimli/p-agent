@@ -150,6 +150,8 @@
   const automationsViewEl = $('#automationsView');
   const automationsBtn = $('#automationsBtn');
   const automationsListEl = $('#automationsList');
+  const autoPauseToggle = $('#autoPauseToggle');
+  const autoPauseHint = $('#autoPauseHint');
   const automationsBackChat = $('#automationsBackChat');
   const automationsRefresh = $('#automationsRefresh');
   const automationsAddBtn = $('#automationsAddBtn');
@@ -2714,7 +2716,45 @@
       automationsListEl.innerHTML = `<div class="fe-muted fs-error">⚠️ ${escapeHtml(err.message)}</div>`;
       return;
     }
+    autoPaused = data.paused === true;
     renderAutomations(data.automations);
+    applyAutoPauseUI();
+  }
+
+  // Global scheduler pause: one switch stops EVERY scheduled run (manual
+  // "Run now" still works). Per-item switches are inert while paused.
+  let autoPaused = false;
+  function applyAutoPauseUI() {
+    automationsListEl.classList.toggle('auto-list-paused', autoPaused);
+    if (!autoPauseToggle) return;
+    autoPauseToggle.checked = autoPaused;
+    for (const input of automationsListEl.querySelectorAll('[data-auto-toggle]')) {
+      input.disabled = autoPaused;
+    }
+    if (autoPauseHint) {
+      autoPauseHint.textContent = autoPaused
+        ? 'All automations are paused — the scheduler is stopped. Manual "Run now" still works; toggle this off to resume the schedule.'
+        : 'Stops the scheduler — nothing runs on schedule. Manual "Run now" still works; per-item switches take effect again once unpaused.';
+    }
+  }
+  if (autoPauseToggle) {
+    autoPauseToggle.addEventListener('change', async (e) => {
+      const paused = e.target.checked;
+      try {
+        const res = await fetch('/api/automations/pause', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paused }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Could not update automation pause state');
+        autoPaused = data.paused === true;
+        loadAutomations();
+      } catch (err) {
+        e.target.checked = !paused; // revert
+        autoToast(err.message);
+      }
+    });
   }
 
   function fmtWhen(iso, { prefix = false } = {}) {

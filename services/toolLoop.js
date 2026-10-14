@@ -741,9 +741,13 @@ function findBareToolObject(text) {
  */
 const AUTOMATIONS_GUIDANCE =
   'Automations: this server has a built-in Automations engine with tools ' +
-  'create_automation, list_automations, run_automation, delete_automation. ' +
+  'create_automation, list_automations, run_automation, delete_automation, ' +
+  'set_automation_enabled and set_automations_paused. ' +
   'When the user asks to create an automation or schedule something recurring, ' +
   'use them yourself — never suggest OS cron jobs. ' +
+  'To stop or pause: set_automation_enabled (id, enabled:false) disables one rule; ' +
+  'set_automations_paused (paused:true) stops the whole scheduler — neither deletes ' +
+  'rules and manual run_automation still works. ' +
   'Include all required fields: name, schedule_type (interval|cron), ' +
   'interval_minutes or cron, action_type (script|skill|prompt), and the matching ' +
   'script/skill/prompt value. Confirm with list_automations after creating. ' +
@@ -825,8 +829,11 @@ function buildSystemPrompt(base) {
     'You execute shell commands yourself with the run_shell tool and have internet access through curl. ' +
     'When the user needs live data or system information, call the tool and answer from its output — ' +
     'never ask the user to run commands.\n' +
-    'Automations: creating/scheduling/running/removing automations is done with the automation ' +
-    'tools — never suggest OS crontab entries.\n' +
+    'Automations: creating, scheduling, enabling/disabling and pausing/resuming automations is done ' +
+        'with the automation tools — never suggest OS crontab entries. To stop one rule use ' +
+        'set_automation_enabled (enabled:false); to stop ALL rules at once use set_automations_paused ' +
+        '(paused:true); both keep the rules and allow manual run_automation. Re-enable with ' +
+        'enabled:true / paused:false.\\n' +
     'Library: attached files are usually inlined in your input; use the library tools to list, ' +
     'read or save documents.\n' +
     'Skills: skills are plain user-managed folders in the workspace skills/ directory — they are ' +
@@ -868,7 +875,7 @@ const TOPIC_TOOLS = [
   {
     topic: 'automations',
     re: /automation|schedul|recurr|remind|cron|every\s+\d+\s*(min|hour|day|week)|daily|hourly|weekly|monthly|periodic/i,
-    tools: ['create_automation', 'delete_automation', 'list_automations', 'run_automation'],
+    tools: ['create_automation', 'delete_automation', 'list_automations', 'run_automation', 'set_automation_enabled', 'set_automations_paused'],
   },
   {
     topic: 'library',

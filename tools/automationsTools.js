@@ -166,4 +166,90 @@ const deleteAutomation = {
   },
 };
 
-module.exports = { tools: [createAutomation, listAutomations, runAutomation, deleteAutomation] };
+const setAutomationEnabled = {
+  name: 'set_automation_enabled',
+  description:
+    'Enable or disable an existing automation by id (ids from list_automations). ' +
+    'enabled:false disables that single automation — it will not run on schedule (nextRunAt is cleared) ' +
+    'but manual run_automation still works and the rule is NOT deleted. ' +
+    'Use when the user asks to stop, disable or pause one specific automation; ' +
+    'enabled:true re-enables it. Confirm with list_automations afterwards.',
+  parameters: {
+    type: 'object',
+    properties: {
+      id: { type: 'string', description: 'Automation id from list_automations (required)' },
+      enabled: {
+        type: 'boolean',
+        description: 'false = disable this automation (stop scheduled runs); true = re-enable (required)',
+      },
+    },
+    required: ['id', 'enabled'],
+  },
+  async run(args) {
+    const id = String((args && args.id) || '').trim();
+    if (!id) return { ok: false, error: 'id is required (take it from list_automations)' };
+    const enabled = args && typeof args.enabled === 'boolean' ? args.enabled : null;
+    if (enabled === null) return { ok: false, error: 'enabled must be a boolean' };
+    try {
+      const r = manager.setEnabled(id, enabled);
+      if (!r.ok) return { ok: false, error: r.error || `automation not found: ${id}` };
+      return {
+        ok: true,
+        message: `Automation "${r.automation.name}" ${enabled ? 're-enabled' : 'disabled'}`,
+        automation: summarize(r.automation),
+      };
+    } catch (e) {
+      return { ok: false, error: `set_automation_enabled failed: ${String((e && e.message) || e)}` };
+    }
+  },
+};
+
+const setAutomationsPaused = {
+  name: 'set_automations_paused',
+  description:
+    'Globally pause or resume the ENTIRE automation scheduler. paused:true stops every automation ' +
+    'from running on schedule at once (per-rule enabled flags are kept, no rule is deleted, manual ' +
+    'run_automation still works). paused:false resumes the schedule for all enabled automations. ' +
+    'Use when the user asks to pause/disable ALL automations together; for one rule use ' +
+    'set_automation_enabled instead.',
+  parameters: {
+    type: 'object',
+    properties: {
+      paused: {
+        type: 'boolean',
+        description: 'true = pause the whole scheduler; false = resume (required)',
+      },
+    },
+    required: ['paused'],
+  },
+  async run(args) {
+    const paused = args && typeof args.paused === 'boolean' ? args.paused : null;
+    if (paused === null) return { ok: false, error: 'paused must be a boolean' };
+    try {
+      const r = manager.setPaused(paused);
+      if (!r.ok) return { ok: false, error: r.error || 'could not update pause state' };
+      const all = manager.list();
+      return {
+        ok: true,
+        message: paused
+          ? `Automation scheduler paused (${all.length} automation${all.length === 1 ? '' : 's'} held)`
+          : 'Automation scheduler resumed',
+        paused: r.paused,
+        automations: all.length,
+      };
+    } catch (e) {
+      return { ok: false, error: `set_automations_paused failed: ${String((e && e.message) || e)}` };
+    }
+  },
+};
+
+module.exports = {
+  tools: [
+    createAutomation,
+    listAutomations,
+    runAutomation,
+    deleteAutomation,
+    setAutomationEnabled,
+    setAutomationsPaused,
+  ],
+};
