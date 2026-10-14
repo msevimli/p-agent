@@ -29,6 +29,11 @@ const t = (name, cond, detail) => results.push(`${cond ? 'PASS' : 'FAIL'} ${name
 const modelManager = require(path.join(ROOT, 'services', 'modelManager'));
 const modelLifecycle = require(path.join(ROOT, 'services', 'modelLifecycle'));
 
+// The eject positive path talks to the user systemd bus — set the env here so
+// the test is hermetic (modelLifecycle.systemctlUser inherits process.env).
+process.env.XDG_RUNTIME_DIR = process.env.XDG_RUNTIME_DIR || '/run/user/1002';
+process.env.DBUS_SESSION_BUS_ADDRESS = process.env.DBUS_SESSION_BUS_ADDRESS || 'unix:path=/run/user/1002/bus';
+
 const GEMMA = 'gemma-4-E4B-it-Q5_K_M.gguf';
 const FOREIGN = 'some-other-model.gguf';
 

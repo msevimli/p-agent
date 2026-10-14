@@ -405,7 +405,9 @@ p-agent/
   rendering, per-message collapsible **Thinking…** panels (live reasoning
   stream, auto-collapse on answer, global visibility toggle + 5-level
   effort dropdown in the compose toolbar, `localStorage`
-  `pagent.reasoningLevel`), generation settings + context-budget popovers,
+  `pagent.reasoningLevel`), generation settings (incl. the **Advanced local
+  params** toggle — `generation.advancedParams` — auto-disabled with a hint
+  when the active model is cloud-hosted) + context-budget popovers,
   stop-generation via AbortController, per-message ⚡ duration/token badges,
   library grid tiles with inline delete-confirm state machine, a channels
   panel (token, whitelist, toggle, test-connection, live status meta), the
@@ -433,6 +435,12 @@ p-agent/
    `reasoningLevel` is mapped to `reasoning_effort` / `thinking.budget_tokens`
    (payload-only, NEVER prompt bytes — KV-prefix-stable, see Local LLM
    Integration); attachments are inlined into the last user message.
+   Provider-aware sanitization runs last on the payload: llama.cpp-only keys
+   (`repeat_penalty`, `repeat_last_n`, `cache_prompt`) are stripped for
+   cloud endpoints (Nvidia NIM rejects them with HTTP 400) and on local
+   endpoints when `generation.advancedParams` is false; a cloud 400 mentioning
+   unsupported parameters triggers ONE retry with the minimal OpenAI-safe
+   payload before the provider error surfaces.
    Dynamic content (dates, request ids, session ids) is NEVER part of the
    prefix — only the per-turn tail is new, so the second message of a
    conversation re-evaluates just the new message + last reply. Every

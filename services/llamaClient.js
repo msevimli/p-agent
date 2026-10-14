@@ -43,6 +43,31 @@ function stripSlash(url) {
   return String(url || '').replace(/\/+$/, '');
 }
 
+/** llama.cpp-only chat-completion params that strict OpenAI-compatible cloud
+ * APIs reject with HTTP 400 "Unsupported parameter(s)" (e.g. Nvidia NIM).
+ * Never sent to non-loopback targets; omitted on local targets when the
+ * frontend "Advanced local params" toggle is off. */
+const LOCAL_ONLY_PARAMS = ['repeat_penalty', 'repeat_last_n', 'cache_prompt'];
+
+/** True for p-agent's own llama.cpp endpoints (loopback addresses). */
+function isLoopbackBaseUrl(baseUrl) {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)/i.test(String(baseUrl || ''));
+}
+
+/** Upstream rejection body naming unsupported parameters. */
+function isUnsupportedParamError(body) {
+  return /unsupported parameter/i.test(String(body || ''));
+}
+
+/** OpenAI-safe fallback for a rejected cloud payload: everything except the
+ * llama.cpp-only params and the enterprise usage-options key. */
+function minimalCloudPayload(payload) {
+  const out = { ...(payload || {}) };
+  for (const k of LOCAL_ONLY_PARAMS) delete out[k];
+  delete out.stream_options;
+  return out;
+}
+
 /**
  * OpenAI chat-completions URL for a base endpoint. Tolerates a trailing slash
  * and bases that already carry `/v1` or the full `/v1/chat/completions` suffix,
@@ -190,7 +215,7 @@ function buildChatPayload(rawMessages, generation, opts) {
     } else if (!THINK_BUDGET[reasoningLevel]) {
       /* unknown -> omit */
     } else {
-      const loopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)/i.test(String(target.baseUrl || ''));
+      const loopback = isLoopbackBaseUrl(target.baseUrl);
       payload.reasoning_effort = reasoningLevel;
       if (loopback) payload.thinking = { type: 'enabled', budget_tokens: THINK_BUDGET[reasoningLevel] };
     }
@@ -200,6 +225,13 @@ function buildChatPayload(rawMessages, generation, opts) {
   // default tool_choice behavior is untouched).
   if (o.toolChoice === 'required' || o.toolChoice === 'auto' || o.toolChoice === 'none') {
     payload.tool_choice = o.toolChoice;
+  }
+  // Provider-aware parameter policy: local-only sampling/cache params are
+  // stripped for cloud targets (strict providers 400 on them — Nvidia NIM:
+  // "Unsupported parameter(s)") and for local targets when the frontend
+  // advanced toggle (body.generation.advancedParams === false) is off.
+  if (!isLoopbackBaseUrl(target.baseUrl) || gen.advancedParams === false) {
+    for (const k of LOCAL_ONLY_PARAMS) delete payload[k];
   }
   return payload;
 }
@@ -478,13 +510,33 @@ function doComplete(opts) {
       reject(new Error(msg));
     });
 
-    const upstream = streamCompletions(payload, (upRes) => {
+    let upstream = null;
+    const upstreamLabel = isLoopbackBaseUrl((opts.target && opts.target.baseUrl) || activeTarget().baseUrl)
+      ? 'llama.cpp'
+      : 'cloud provider';
+    const handleUpstream = (upRes, retried) => {
       if (upRes.statusCode !== 200) {
         let body = '';
         upRes.on('data', (c) => (body += c));
-        upRes.on('end', () =>
-          reject(new Error(`llama.cpp ${upRes.statusCode}: ${body.slice(0, 300)}`))
-        );
+        upRes.on('end', () => {
+          // Cloud resilience: a strict provider rejecting local-only params
+          // (HTTP 400 "Unsupported parameter(s)") gets ONE retry with the
+          // OpenAI-safe minimal payload before the error surfaces.
+          if (!retried && upstreamLabel !== 'llama.cpp' && isUnsupportedParamError(body)) {
+            const minimal = minimalCloudPayload(payload);
+            console.log(`[llm] cloud 400 unsupported parameter(s) — retrying with local-only params stripped (${Object.keys(minimal).length} keys kept)`);
+            const req2 = streamCompletions(minimal, (u2) => handleUpstream(u2, true), opts.target);
+            upstream = req2;
+            req2.on('error', (e) => {
+              supervisor.stop();
+              reject(new Error(`cloud provider stream error: ${e.message}`));
+            });
+            req2.write(JSON.stringify(minimal));
+            req2.end();
+            return;
+          }
+          reject(new Error(`${upstreamLabel} ${upRes.statusCode}: ${body.slice(0, 300)}`));
+        });
         return;
       }
       let buffer = '';
@@ -610,7 +662,8 @@ function doComplete(opts) {
         supervisor.stop();
         reject(new Error(`llama.cpp stream error: ${e.message}`));
       });
-    }, opts.target);
+    };
+    upstream = streamCompletions(payload, (upRes) => handleUpstream(upRes, false), opts.target);
     upstream.on('error', (e) => {
       supervisor.stop();
       reject(new Error(`llama.cpp unreachable: ${e.message}`));
@@ -725,4 +778,9 @@ module.exports = {
   complete,
   joinToolCallArgs,
   parseSseToClient,
+  // cloud-vs-local payload policy (test seams)
+  LOCAL_ONLY_PARAMS,
+  isLoopbackBaseUrl,
+  isUnsupportedParamError,
+  minimalCloudPayload,
 };

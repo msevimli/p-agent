@@ -8,7 +8,7 @@
     currentId: null,
     currentMessages: [],
     streaming: false,
-    settings: { temperature: 0.7, top_p: 0.95, max_tokens: 2048 },
+    settings: { temperature: 0.7, top_p: 0.95, max_tokens: 2048, advanced: true },
     // Reasoning effort/visibility controller (Off|Default|Low|Medium|High),
     // persisted; 'off' hides thinking panels AND asks the backend to disable
     // reasoning (reasoning_effort:'none' / no budget). Migrates the earlier
@@ -81,6 +81,8 @@
   const toppVal = $('#toppVal');
   const maxTokensInput = $('#maxTokensInput');
   const resetSettingsBtn = $('#resetSettings');
+  const advParamsToggle = $('#advParamsToggle');
+  const advParamsHint = $('#advParamsHint');
 
   // File Explorer / Skills / view-switching refs
   const chatViewEl = $('#chatView');
@@ -468,6 +470,7 @@
       return;
     }
     renderModels(data.models, data.cascade);
+    applyAdvancedAdaptive(data.models);
   }
 
   function modelStatus(status) {
@@ -1785,12 +1788,25 @@
   });
 
   // ------------------------------------------------------------- settings control
+  /** Disable the advanced-params toggle when the ACTIVE model is cloud-hosted
+   * (the backend always strips local-only params there — toggling would be
+   * misleading). Local active model (or none): enabled, default hint. */
+  function applyAdvancedAdaptive(models) {
+    if (!advParamsToggle || !advParamsHint) return;
+    const act = (models || []).find((m) => m.active) || null;
+    const cloud = !act || !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)/i.test(String(act.endpoint || ''));
+    advParamsToggle.disabled = cloud;
+    advParamsHint.textContent = cloud
+      ? 'Active model is cloud-hosted — these parameters are always stripped server-side (providers reject them with HTTP 400).'
+      : 'repeat_penalty · repeat_last_n · cache_prompt — sent to local llama.cpp servers only; always stripped for cloud APIs. Disabling also disables KV cache reuse.';
+  }
   function applySettingsToUI() {
     tempRange.value = state.settings.temperature;
     tempVal.textContent = Number(state.settings.temperature).toFixed(2);
     toppRange.value = state.settings.top_p;
     toppVal.textContent = Number(state.settings.top_p).toFixed(2);
     maxTokensInput.value = state.settings.max_tokens;
+    if (advParamsToggle) advParamsToggle.checked = state.settings.advanced !== false;
   }
   tempRange.addEventListener('input', () => {
     const v = parseFloat(tempRange.value);
@@ -1806,9 +1822,15 @@
     const v = parseInt(maxTokensInput.value, 10);
     if (Number.isFinite(v) && v > 0 && v <= 8192) state.settings.max_tokens = v;
   });
+  if (advParamsToggle) {
+    advParamsToggle.addEventListener('change', () => {
+      state.settings.advanced = advParamsToggle.checked;
+    });
+  }
   resetSettingsBtn.addEventListener('click', () => {
-    state.settings = { temperature: 0.7, top_p: 0.95, max_tokens: 2048 };
+    state.settings = { temperature: 0.7, top_p: 0.95, max_tokens: 2048, advanced: true };
     applySettingsToUI();
+    if (advParamsToggle) advParamsToggle.checked = true;
   });
   applySettingsToUI();
 

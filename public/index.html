@@ -428,6 +428,17 @@
                       class="w-full mt-1 rounded-lg border border-gray-300 dark:border-white/15 bg-white dark:bg-[#131314]
                              px-3 py-1.5 text-sm outline-none focus:border-blue-500" />
                   </div>
+                  <div>
+                    <label class="flex items-center gap-2 cursor-pointer select-none py-0.5">
+                      <input type="checkbox" id="advParamsToggle" checked
+                        class="accent-blue-600 h-4 w-4 shrink-0" />
+                      <span class="text-gray-600 dark:text-gray-300 text-sm">Advanced local params</span>
+                    </label>
+                    <p id="advParamsHint" class="text-[11px] text-gray-400 dark:text-gray-600 mt-1 leading-relaxed">
+                      repeat_penalty · repeat_last_n · cache_prompt — sent to local llama.cpp servers only; always
+                      stripped for cloud APIs. Disabling also disables KV cache reuse.
+                    </p>
+                  </div>
                 </div>
                 <p class="text-[11px] text-gray-400 dark:text-gray-600 mt-3">Applied on your next message.</p>
               </div>

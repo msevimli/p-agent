@@ -1,5 +1,5 @@
 {
-  "activeId": "qwen-coder",
+  "activeId": "nemotron-3-ultra-550b-a55b",
   "models": [
     {
       "id": "qwen-coder",
@@ -123,6 +123,28 @@
       "role": "",
       "templateId": "new-template",
       "hasKey": false
+    },
+    {
+      "id": "nemotron-3.5-lightning-30b-a3b",
+      "name": "nemotron-3.5-lightning-30b-a3b",
+      "provider": "remote",
+      "endpoint": "https://integrate.api.nvidia.com/v1",
+      "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "contextLength": 8192,
+      "role": "",
+      "templateId": "",
+      "hasKey": true
+    },
+    {
+      "id": "nemotron-3-ultra-550b-a55b",
+      "name": "nemotron-3-ultra-550b-a55b",
+      "provider": "remote",
+      "endpoint": "https://integrate.api.nvidia.com/v1",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "contextLength": 500000,
+      "role": "",
+      "templateId": "",
+      "hasKey": true
     }
   ]
 }

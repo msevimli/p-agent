@@ -93,6 +93,14 @@ re-rendered on the next Load when the template changed; hand-crafted units
   only. The agent also warms up on startup (`AUTO_WARMUP=false` to disable).
   After a warm-up, the first real message starts from a KV-cache hit (the
   usage badge shows it: "6.1k tok (5.9k cached) · 12.1/2.6 tok/s").
+- **Cloud-vs-local payload filtering** — llama.cpp-only sampling/cache params
+  (`repeat_penalty`, `repeat_last_n`, `cache_prompt`) are stripped from chat
+  payloads routed to cloud/OpenAI-compatible endpoints (Nvidia NIM rejects
+  them with HTTP 400 "Unsupported parameter(s)"); local loopback targets keep
+  them (KV cache reuse stays on). The Generation popover's **Advanced local
+  params** toggle disables them on local targets too and auto-disables when
+  the active model is cloud-hosted. A one-shot retry with the minimal
+  OpenAI-safe payload covers any provider rejection that slips through.
 - **Prompt caching:** the system prompt and the full 16-tool array are
   byte-stable (static text, tools sorted by name, identical serialization),
   `cache_prompt: true` is set on every request, and dynamic content is never
