@@ -390,8 +390,17 @@ short refusal and never trigger the agent.
   missing key AND the expected shape (`Expected format: {"path": …}` /
   `{"command": "your_shell_command_here"}`; placeholder text like
   `your_shell_command_here` itself is never executed). The same invalid call
-  repeated 3× fails fast and forces the final answer; `MAX_TOOL_ROUNDS=7`
-  caps spam loops. Conversation-based path recovery exists ONLY for
+  repeated 3× fails fast and forces the final answer. **Repetition
+  detection, not round counting, terminates loops:** an identical tool call
+  repeated back-to-back, or a provable A-B-A-B-A ping-pong cycle between two
+  calls, is skipped with a constructive hint ("you already ran this tool
+  with these exact arguments; use the previous output or proceed to the next
+  step"); two consecutive all-skip rounds freeze tool execution and force
+  the final answer. A single A-B-A round-trip and repeats of FAILED calls
+  still execute (intent/recovery). Numeric ceilings (24 execution rounds,
+  `TOOL_MAX_ITERATIONS`) exist only as safety nets — long multi-step tasks
+  run to completion as long as each step is a genuinely new fingerprint.
+  Conversation-based path recovery exists ONLY for
   read_file/write_file/edit_file — never inferred for run_shell, delete_file
   or anything else.
 - **Never stalls on a broken model** — if the active model returns an empty

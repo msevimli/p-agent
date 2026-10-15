@@ -29,6 +29,7 @@ const writeState = (s) => fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2
 (async () => {
   const backup = fs.readFileSync(STATE_FILE, 'utf8');
   const testId = 'toggle-test-' + process.pid;
+  const buddyId = 'toggle-buddy-' + process.pid;
   try {
     // ---------------- create -------------------------------------------------
     const created = manager.create({
@@ -39,6 +40,16 @@ const writeState = (s) => fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2
     });
     t('create: temp automation ok', created.ok === true && created.automation.id === testId, created.error || created.automation && created.automation.id);
     t('create: enabled by default with a next run', created.automation.enabled === true && !!created.automation.nextRunAt, JSON.stringify(created.automation.nextRunAt));
+
+    // An unrelated enabled automation — proves the global pause reaches rules
+    // beyond the one under test (never depends on live store contents).
+    const buddyCreate = manager.create({
+      id: buddyId,
+      name: 'Toggle buddy',
+      schedule: { type: 'interval', intervalMinutes: 2 },
+      action: { type: 'script', script: 'scripts/__nope__.py' },
+    });
+    t('create: buddy automation ok', buddyCreate.ok === true, buddyCreate.error || '');
 
     // ---------------- per-item disable ---------------------------------------
     let r = manager.setEnabled(testId, false);
@@ -63,8 +74,8 @@ const writeState = (s) => fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2
     t('setPaused(true): ok + paused flag', r.ok === true && r.paused === true, '');
     t('isPaused(): true', manager.isPaused() === true, '');
     st = readState();
-    const solana = st.automations.find((a) => a.id === 'fetch-solana-price');
-    t('setPaused: user automation nextRunAt ALSO nulled', solana && solana.nextRunAt === null, JSON.stringify(solana && solana.nextRunAt));
+    const buddy = st.automations.find((a) => a.id === buddyId);
+    t('setPaused: an enabled unrelated automation nextRunAt ALSO nulled', buddy && buddy.nextRunAt === null, JSON.stringify(buddy && buddy.nextRunAt));
     t('setPaused: universe of nextRunAt is null while paused', st.automations.every((a) => a.nextRunAt === null), '');
     const due2 = manager.checkDue(Date.now());
     t('checkDue: paused tick returns early (ran 0)', due2.paused === true && due2.ran === 0, JSON.stringify(due2));
@@ -78,9 +89,9 @@ const writeState = (s) => fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2
     t('setPaused(false): resumed', r.ok === true && r.paused === false && manager.isPaused() === false, '');
     st = readState();
     const mine2 = st.automations.find((a) => a.id === testId);
-    const solana2 = st.automations.find((a) => a.id === 'fetch-solana-price');
+    const buddy2 = st.automations.find((a) => a.id === buddyId);
     t('unpause: enabled temp automation rescheduled', mine2 && !!mine2.nextRunAt, JSON.stringify(mine2 && mine2.nextRunAt));
-    t('unpause: user automation rescheduled', solana2 && !!solana2.nextRunAt, JSON.stringify(solana2 && solana2.nextRunAt));
+    t('unpause: unrelated enabled automation rescheduled', buddy2 && !!buddy2.nextRunAt, JSON.stringify(buddy2 && buddy2.nextRunAt));
     t('setPaused no-op when already unpaused (unchanged flag)', manager.setPaused(false).unchanged === true, '');
 
     // ---------------- tool layer (tools/automationsTools) ---------------------
@@ -100,6 +111,7 @@ const writeState = (s) => fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2
     t('tool set_automations_paused: resumed', t4.ok === true && t4.paused === false && manager.isPaused() === false, '');
 
     // ---------------- cleanup -------------------------------------------------
+    manager.remove(buddyId);
     const removed = manager.remove(testId);
     t('cleanup: temp automation removed', removed.ok === true && removed.deleted === true, '');
   } finally {

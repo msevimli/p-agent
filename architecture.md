@@ -244,7 +244,13 @@ p-agent/
   the feed shows the real path/command pre-execution.
   **Anti-loop safeguards:** the same invalid call repeated 3× in one request
   fails fast and forces the final answer instead of looping;
-  `MAX_TOOL_ROUNDS=7` caps spam loops; conversation-based path recovery is
+  **repetition detection** terminates loops — an identical call
+  back-to-back or a provable A-B-A-B-A cycle between two calls is skipped
+  with a constructive hint, and two consecutive all-skip rounds freeze
+  tool execution (single A-B-A round-trips and repeats after FAILED calls
+  still execute); `MAX_TOOL_ROUNDS=24` + `TOOL_MAX_ITERATIONS` are pure
+  safety nets, so multi-step tasks run as long as each step is a new
+  fingerprint; conversation-based path recovery is
   whitelisted to read_file/write_file/edit_file ONLY — never inferred for
   run_shell, delete_file, skills, or automations (exactly one unique
   workRoot-resolving candidate, non-URL, real content still required for

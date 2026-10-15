@@ -727,15 +727,19 @@ router.post('/', async (req, res) => {
       let firstRoundDone = false; // never re-await the pre-queued firstPromise
       // Anti-spam abort state (per user message): a structural stop when the
       // model repeats only already-skipped calls instead of making progress.
-      let execRounds = 0; // hard cap on rounds that execute tool calls
+      let execRounds = 0; // safety ceiling on rounds that execute tool calls
       let dupStreak = 0; // consecutive rounds whose calls were ALL skips
       let frozen = false; // tool execution locked out; final answer forced
       let frozenRounds = 0;
       // Per-request count of IDENTICAL rejected emissions (name -> argsKey ->
       // count): the model repeating the exact same invalid call 3 times gets
-      // frozen instead of burning all 7 rounds on the same mistake.
+      // frozen instead of burning rounds on the same mistake.
       const rejectedCalls = new Map();
-      const MAX_TOOL_ROUNDS = 7;
+      // Safety ceiling ONLY — loops are terminated by repetition detection
+      // (exact-repeat and A-B-A guards in toolLoop.executeTool + the
+      // dupStreak freeze below), never by counting rounds: legit multi-step
+      // tasks may need many rounds as long as each step is unique progress.
+      const MAX_TOOL_ROUNDS = 24;
       // Live-streaming bookkeeping: loop rounds stream their deltas to the
       // client in real time (see onDelta/onReasoning below); the round
       // boundary events tell the frontend which text to keep. The FINAL

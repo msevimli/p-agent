@@ -135,7 +135,11 @@ module.exports = {
   // Tool calling: enable/disable the agentic loop and cap its iterations so a
   // runaway model can't loop forever.
   toolCallingEnabled: process.env.TOOL_CALLING !== 'false',
-  toolMaxIterations: Number(process.env.TOOL_MAX_ITERATIONS || 10),
+  // Outer tool-loop ceiling (rounds incl. escalations/corrections). Safety
+  // net only: real loop termination is repetition detection (identical
+  // consecutive calls, A-B-A ping-pong, all-skip rounds) in toolLoop/chat.js,
+  // so long multi-step tasks run as long as each step is unique progress.
+  toolMaxIterations: Number(process.env.TOOL_MAX_ITERATIONS || 24),
   // Guard retry (step 3): when the model answers with a shell/curl description
   // instead of a tool call, retry once with tool_choice:"required". Requires a
   // llama.cpp build that accepts the field on the OpenAI-compat API; set

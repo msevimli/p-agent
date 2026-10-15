@@ -340,6 +340,66 @@ function restoreState() {
     t('dedup: create_automation repeat skipped (no dup id error)', !ca2.ok && ca2.skippedDuplicate === true, JSON.stringify(ca2));
     t('dedup: create_automation executed once', execCount === 1);
 
+    // ---- repetition detection (smart loop guard, DEDUP_EXEMPT tools) ------
+    // Exempt tools are intentionally repeatable, but an IDENTICAL call
+    // immediately after itself is a redundant re-emission, and a provable
+    // A-B-A-B-A ping-pong cycle is a model loop — both are caught with a
+    // constructive hint instead of burning rounds. A SINGLE A-B-A round-trip
+    // still executes (re-checking a value after an action = intent), as does
+    // any genuinely new step and any repeat after a FAILED call (recovery).
+    {
+      toolLoop.resetSeenCalls();
+      const g1 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(10)"' });
+      const g2 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(10)"' });
+      t('rep: consecutive identical exempt call skipped with hint',
+        g1.ok && !g2.ok && g2.skippedDuplicate === true && /already ran this tool with these exact arguments|duplicate shell command skipped/.test(g2.error || ''), JSON.stringify(g2));
+      const g3 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(11)"' });
+      t('rep: fresh call after consecutive skip executes', g3.ok === true, JSON.stringify(g3));
+    }
+    {
+      toolLoop.resetSeenCalls();
+      const a = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(20)"' });
+      const b = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(21)"' });
+      const a2 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(20)"' });
+      t('rep: single A-B-A round-trip executes (intentional double run)',
+        a.ok && b.ok && a2.ok === true && !a2.skippedDuplicate, JSON.stringify(a2));
+      const b2 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(21)"' });
+      const a3 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(20)"' });
+      t('rep: A-B-A-B-A cycle caught as alternation with loop hint',
+        !a3.ok && a3.skippedDuplicate === true && a3.repetition === 'alternation' && /looping/.test(a3.error || ''), JSON.stringify(a3));
+      const c = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(22)"' });
+      t('rep: genuinely new step after cycle skip executes', c.ok === true, JSON.stringify(c));
+    }
+    {
+      toolLoop.resetSeenCalls();
+      const f1 = await toolLoop.executeTool('run_shell', { command: 'node -e "process.exit(9)"' });
+      const f2 = await toolLoop.executeTool('run_shell', { command: 'node -e "process.exit(9)"' });
+      t('rep: repeat of a FAILED call executes (recovery, not a loop)', !f1.ok && !f2.ok && !f2.skippedDuplicate, '');
+    }
+    {
+      // run_automation exemption + repetition (execute stubbed):
+      toolLoop.resetSeenCalls();
+      const raDef = registry.find((x) => x.name === 'run_automation');
+      const origRa = raDef.execute;
+      raDef.execute = async () => ({ ok: true, message: 'stub' });
+      const r1 = await toolLoop.executeTool('run_automation', { id: 'probe-rule' });
+      const r2 = await toolLoop.executeTool('run_automation', { id: 'probe-rule' });
+      raDef.execute = origRa;
+      t('rep: run_automation consecutive identical skipped (exempt guard)',
+        r1.ok === true && !r2.ok && r2.skippedDuplicate === true && r2.repetition === 'consecutive', JSON.stringify(r2));
+    }
+    {
+      // Long unique multi-step progression — no numeric ceiling: every step
+      // executes as long as it is a genuinely new fingerprint.
+      toolLoop.resetSeenCalls();
+      let allOk = true;
+      for (let i = 100; i < 130; i++) {
+        const r = await toolLoop.executeTool('run_shell', { command: `node -e "console.log(${i})"` });
+        if (!r.ok) { allOk = false; break; }
+      }
+      t('rep: 30-step unique progression all executes (no numeric ceiling)', allOk === true, '');
+    }
+
     // Canonical key: key order must not matter
     toolLoop.resetSeenCalls();
     const k1 = toolLoop.canonicalArgsKey({ b: 1, a: 2 });

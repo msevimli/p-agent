@@ -63,8 +63,17 @@ const DEDUP_EXEMPT = new Set([
   'list_files',
   'list_library_files',
 ]);
-// Per-chat-request execution ledger: { name, argsKey } of every executed call.
+// Per-chat-request execution ledger: { name, argsKey } of every executed call
+// (non-exempt only — exempt tools are intentionally repeatable and are
+// handled by the repetition detector below instead).
 const seenCalls = [];
+
+// Per-chat-request FINGERPRINT HISTORY: { name, argsKey, ok } of EVERY
+// executed call, exempt or not, in execution order. This is the input to
+// detectRepetition() — exempt tools (run_shell/run_skill/run_automation)
+// may legitimately re-run a UNIQUE call, but identical consecutive calls and
+// A-B-A ping-pong patterns are model loops and must be caught.
+const callHistory = [];
 
 // Normalized key of the last successfully executed shell command (null when
 // none yet / after the ledger reset). Reset with resetSeenCalls().
@@ -170,17 +179,70 @@ function wasCallExecuted(name, args) {
   return seenCalls.some((c) => c.name === name && c.argsKey === key);
 }
 
+// Repetition detection is for EXEC-class repeatable tools ONLY — read-only
+// exempt tools (list_*) must always re-run: a repeated list after a state
+// change returns FRESH data and is the point of their exemption.
+const REPETITION_TRACKED = new Set(['run_shell', 'run_skill', 'run_automation']);
+
+/**
+ * Repetition detection for DEDUP_EXEMPT exec tools (run_shell, run_skill,
+ * run_automation — intentionally repeatable, so the plain ledger never
+ * blocks them). Two loop shapes are caught:
+ *
+ *  1. consecutive: the exact same (name, args) fingerprint as the LAST
+ *     executed call — a redundant re-emission of the just-finished step.
+ *  2. alternation (A-B-A-B-A): the current fingerprint matches the call TWO
+ *     positions back AND the two in-between entries are themselves an
+ *     identical pair — the model is ping-ponging A → B → A → B instead of
+ *     progressing. A single A-B-A round-trip is NOT caught: repeating a
+ *     call after one different step can be intentional (re-checking a value
+ *     after an action); only a provable cycle is a loop.
+ *
+ * Both triggers require the earlier same-fingerprint call to have
+ * SUCCEEDED: a repeat after a failure is recovery, not a loop.
+ * Returns { skip:true, kind:'consecutive'|'alternation' } or { skip:false }.
+ */
+function detectRepetition(name, argsKey) {
+  const n = callHistory.length;
+  if (n === 0) return { skip: false };
+  const last = callHistory[n - 1];
+  if (last.name === name && last.argsKey === argsKey) {
+    if (!last.ok) return { skip: false };
+    // run_shell additionally requires the old guard's PROOF conditions: a
+    // no-output repeat may be an uncertain-outcome retry and must re-run.
+    if (name === 'run_shell' && !(lastShellHadOutput && !lastShellHadOps)) return { skip: false };
+    return { skip: true, kind: 'consecutive' };
+  }
+  // Cycle check: history ends [A, B, A, B] and the candidate is A —
+  // the A-B pair has now alternated twice, i.e. a provable ping-pong loop.
+  if (n >= 4) {
+    const aPrev = callHistory[n - 2];
+    const bPrev = callHistory[n - 1];
+    const aPrev2 = callHistory[n - 4];
+    const bPrev2 = callHistory[n - 3];
+    if (
+      aPrev.name === name && aPrev.argsKey === argsKey && aPrev.ok &&
+      aPrev2.name === name && aPrev2.argsKey === argsKey && aPrev2.ok &&
+      bPrev.name === bPrev2.name && bPrev.argsKey === bPrev2.argsKey
+    ) {
+      return { skip: true, kind: 'alternation' };
+    }
+  }
+  return { skip: false };
+}
+
 /** Forget all recorded calls (start of a new chat request). */
 function resetSeenCalls() {
   seenCalls.length = 0;
+  callHistory.length = 0;
   lastShellCommandKey = null;
   lastShellHadOutput = false;
   lastShellHadOps = false;
 }
 
 /** Remember an executed (name, args) pair. */
-function recordCall(name, args) {
-  seenCalls.push({ name, args, argsKey: canonicalArgsKey(args) });
+function recordCall(name, args, ok) {
+  seenCalls.push({ name, args, argsKey: canonicalArgsKey(args), ok: ok !== false });
 }
 
 /** Slug an automation name into its id (mirrors the store's slugify). */
@@ -479,13 +541,31 @@ async function executeTool(name, args) {
       };
     }
   }
+  // Repetition detection for DEDUP_EXEMPT exec tools (intentionally
+  // repeatable — the plain ledger below never blocks them, but a model loop
+  // that re-emits the exact same call consecutively or ping-pongs A-B-A-B is
+  // not progress). Read-only exempt tools (list_*) keep running freely.
+  // Repeats of FAILED calls are recovery and always execute.
+  if (REPETITION_TRACKED.has(name)) {
+    const rep = detectRepetition(name, canonicalArgsKey(nargs));
+    if (rep.skip) {
+      const hint =
+        rep.kind === 'consecutive'
+          ? `${name} was just executed with these exact arguments — you already ran this tool ` +
+            'with these exact arguments; use the previous output or proceed to the next step'
+          : `${name} is looping: you are alternating between the same two calls (A → B → A → B) with ` +
+            'identical arguments — stop and use the results you already have; either write the final answer ' +
+            'now or take a genuinely new step';
+      return { ok: false, skippedDuplicate: true, error: hint, repetition: rep.kind };
+    }
+  }
   if (!DEDUP_EXEMPT.has(name)) {
     if (wasCallExecuted(name, nargs)) {
       return {
         ok: false,
         error:
           `duplicate tool call skipped: ${name} was already executed with these exact arguments in this request — ` +
-          'do NOT call it again; interpret the original result and continue towards the final answer',
+          'you already ran this tool with these exact arguments; use the previous output or proceed to the next step',
         skippedDuplicate: true,
       };
     }
@@ -512,8 +592,10 @@ async function executeTool(name, args) {
       lastShellHadOutput = !!(result.stdout || result.stderr);
       lastShellHadOps = shellCommandHasUnquotedOps(nargs.command);
     }
+    callHistory.push({ name, argsKey: canonicalArgsKey(nargs), ok: !!(result && result.ok) });
     return result;
   } catch (e) {
+    callHistory.push({ name, argsKey: canonicalArgsKey(nargs), ok: false });
     return { ok: false, error: e && e.message ? e.message : String(e) };
   }
 }
