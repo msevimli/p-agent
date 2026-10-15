@@ -248,7 +248,8 @@ p-agent/
   back-to-back or a provable A-B-A-B-A cycle between two calls is skipped
   with a constructive hint, and two consecutive all-skip rounds freeze
   tool execution (single A-B-A round-trips and repeats after FAILED calls
-  still execute); `MAX_TOOL_ROUNDS=24` + `TOOL_MAX_ITERATIONS` are pure
+  still execute); `MAX_TOOL_ROUNDS=64` + `TOOL_MAX_ITERATIONS` (default 64)
+  are pure
   safety nets, so multi-step tasks run as long as each step is a new
   fingerprint; conversation-based path recovery is
   whitelisted to read_file/write_file/edit_file ONLY — never inferred for

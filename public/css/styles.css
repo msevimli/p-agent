@@ -755,6 +755,35 @@ html.dark .auto-card:hover { border-color: rgba(147,197,253,0.45); }
 .auto-list-paused .auto-card { opacity: 0.55; }
 .auto-list-paused .auto-card .switch input:disabled + .slider { cursor: not-allowed; }
 
+/* Persisted tool-run cards (role:'tool' replay, collapsible) */
+.tool-step { border: 1px solid rgba(148,163,184,0.25); border-left: 3px solid #d97706; border-radius: 8px; background: rgba(217,119,6,0.06); margin: 6px 0; }
+.tool-step.ok { border-left-color: #16a34a; }
+.tool-step.err { border-left-color: #dc2626; }
+.tool-step.skipped { border-left-color: #64748b; opacity: 0.85; }
+.tool-step summary { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 6px 10px; list-style: none; flex-wrap: wrap; }
+.tool-step summary::-webkit-details-marker { display: none; }
+.tool-step summary::before { content: '▸'; color: #94a3b8; font-size: 11px; }
+.tool-step[open] summary::before { content: '▾'; }
+.ts-ic { font-size: 13px; }
+.ts-name { font-weight: 600; font-size: 12.5px; color: #d97706; }
+.tool-step.ok .ts-name { color: #16a34a; }
+.tool-step.err .ts-name { color: #dc2626; }
+.ts-args { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: #64748b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+.ts-status { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; margin-left: auto; }
+.ts-status.ok { background: rgba(22,163,74,0.12); color: #16a34a; }
+.ts-status.err { background: rgba(220,38,38,0.12); color: #dc2626; }
+.ts-status.skipped { background: rgba(100,116,139,0.15); color: #94a3b8; }
+.ts-when { font-size: 10.5px; color: #94a3b8; }
+.ts-body { padding: 4px 10px 10px; border-top: 1px dashed rgba(148,163,184,0.2); }
+.ts-block { margin-top: 7px; }
+.ts-block b { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: #94a3b8; display: block; margin-bottom: 3px; }
+.ts-block pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; background: rgba(15,23,42,0.35); padding: 7px 9px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; margin: 0; max-height: 220px; overflow-y: auto; }
+.ts-err-c pre { color: #f87171; }
+.ts-out pre { color: #4ade80; }
+html.dark .tool-step { background: rgba(217,119,6,0.08); }
+html.dark .ts-block pre { background: rgba(0,0,0,0.35); }
+.ts-code { font-size: 11px; color: #f87171; margin-top: 6px; }
+
 .auto-row { display: flex; align-items: flex-start; gap: 0.85rem; }
 .auto-ic {
   flex-shrink: 0; width: 2.1rem; height: 2.1rem; display: flex; align-items: center;

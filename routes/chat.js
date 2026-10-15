@@ -48,6 +48,33 @@ const reasoningChunk = (r) => `data: ${JSON.stringify({ choices: [{ delta: { con
 // round concludes (final:false) — live tokens without tool-JSON pollution.
 const roundChunk = (final) => `data: ${JSON.stringify({ type: 'round', final: !!final })}\n\n`;
 const statusChunk = (m) => `data: ${JSON.stringify({ type: 'status', message: m })}\n\n`;
+// Structured tool-run event: the DURABLE record of one executed (or
+// dedup-skipped) tool step — tool name, arguments (bounded), outcome
+// preview and a timestamp. The frontend persists it into the session
+// message history, so tool rounds survive session switches/refreshes and
+// can be replayed from history. Rejected (invalidArgs) calls stay status
+// lines — they never executed and their corrective note is live-only.
+const toolChunk = (entry) => `data: ${JSON.stringify({ type: 'tool', ...entry })}\n\n`;
+const toolRunEvent = (name, args, result) => {
+  let argsJson = '';
+  try { argsJson = JSON.stringify(args || {}); } catch {}
+  if (argsJson.length > 600) argsJson = argsJson.slice(0, 600) + '…[truncated]';
+  const r = result || {};
+  let out = String(r.stdout || r.stderr || '').trim();
+  if (out.length > 400) out = out.slice(0, 400) + '…[truncated]';
+  let error = String(r.error || '');
+  if (error.length > 240) error = error.slice(0, 240) + '…[truncated]';
+  return {
+    ts: Date.now(),
+    tool: name,
+    args: argsJson,
+    ok: r.ok === true,
+    skipped: !!(r.skippedDuplicate || r.skippedRedundant || r.skippedAntiSpam),
+    code: typeof r.code === 'number' ? r.code : undefined,
+    out: out || undefined,
+    error: error || undefined,
+  };
+};
 const usageChunk = (u) => `data: ${JSON.stringify({ choices: [], usage: u })}\n\n`;
 const DONE_CHUNK = 'data: [DONE]\n\n';
 
@@ -736,10 +763,12 @@ router.post('/', async (req, res) => {
       // frozen instead of burning rounds on the same mistake.
       const rejectedCalls = new Map();
       // Safety ceiling ONLY — loops are terminated by repetition detection
-      // (exact-repeat and A-B-A guards in toolLoop.executeTool + the
-      // dupStreak freeze below), never by counting rounds: legit multi-step
-      // tasks may need many rounds as long as each step is unique progress.
-      const MAX_TOOL_ROUNDS = 24;
+      // (exact-repeat and A-B-A-B guards in toolLoop.executeTool + the
+      // dupStreak freeze below), never by counting rounds. 64 execution
+      // rounds allows deep multi-step probes (read → grep → db check →
+      // …) with unique progressive steps; only a genuinely runaway model
+      // ever reaches it.
+      const MAX_TOOL_ROUNDS = 64;
       // Live-streaming bookkeeping: loop rounds stream their deltas to the
       // client in real time (see onDelta/onReasoning below); the round
       // boundary events tell the frontend which text to keep. The FINAL
@@ -1353,6 +1382,10 @@ router.post('/', async (req, res) => {
                   lost
                 );
               }
+              // Durable tool-step record (executed or dedup-skipped). Emitted
+              // for every real outcome so the UI history shows what ran, with
+              // what arguments and what result, at what time.
+              safeWrite(res, toolChunk(toolRunEvent(c.name, c.args, result)), lost);
               slots[idx] = { name: c.name, result };
             })
           );
@@ -1386,9 +1419,19 @@ router.post('/', async (req, res) => {
         }
       }
       if (!answered) {
+        // Safety-net trip: the loop made steady (unique) progress but the
+        // model never produced a final answer within the (generous) ceiling.
+        // Surface it as a visible event, not just a silent final text.
+        safeWrite(
+          res,
+          statusChunk(
+            `⏹ Reached the tool-step safety ceiling (${config.toolMaxIterations} rounds) with steady progress but no final answer — everything that ran is recorded above; send a follow-up to continue.`
+          ),
+          lost
+        );
         finalText =
           finalText ||
-          '\u23f9 Reached the maximum number of tool steps without a final answer. Try simplifying the request.';
+          '⏹ Reached the tool-step safety ceiling without a final answer. The tool steps above are complete and recorded; tell me what to do next to continue.';
       }
     }
 

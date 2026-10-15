@@ -397,12 +397,23 @@ short refusal and never trigger the agent.
   with these exact arguments; use the previous output or proceed to the next
   step"); two consecutive all-skip rounds freeze tool execution and force
   the final answer. A single A-B-A round-trip and repeats of FAILED calls
-  still execute (intent/recovery). Numeric ceilings (24 execution rounds,
-  `TOOL_MAX_ITERATIONS`) exist only as safety nets — long multi-step tasks
-  run to completion as long as each step is a genuinely new fingerprint.
+  still execute (intent/recovery). Numeric ceilings (64 execution rounds,
+  `TOOL_MAX_ITERATIONS` default 64) exist only as safety nets — deep
+  multi-step tasks (read → grep → db check → …) run to completion as long as
+  each step is a genuinely new fingerprint, and the trip notice tells the
+  user the work so far is recorded and a follow-up continues.
   Conversation-based path recovery exists ONLY for
   read_file/write_file/edit_file — never inferred for run_shell, delete_file
   or anything else.
+- **Persistent tool-run history (session replay)** — every executed (or
+  dedup-skipped) tool step is streamed as a structured `type:"tool"` SSE
+  event (tool name, bounded arguments, outcome preview, exit code,
+  timestamp) and persisted by the frontend into the session message store
+  as `role:"tool"` records; on refresh/session switch they reload as
+  collapsible cards (✓ ok / ⏭ skipped / ✗ failed, expandable args +
+  output/error). Tool records are excluded from the model-bound
+  `apiMessages` (server-side history keeps its own tool glue) and bounded
+  (args ≤ 600 chars, output ≤ 400, error ≤ 240) so sessions stay light.
 - **Never stalls on a broken model** — if the active model returns an empty
   stream when tool calling is enabled (some providers do), the request is
   automatically re-run without the tools array and still answers, with a

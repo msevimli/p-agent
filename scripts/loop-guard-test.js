@@ -549,11 +549,12 @@ function restoreState() {
       }
     }
     const statuses = events.filter((e) => e.type === 'status').map((e) => e.message);
+    const toolEvents = events.filter((e) => e.type === 'tool');
     const text = events
       .filter((e) => e.choices && e.choices[0] && e.choices[0].delta && typeof e.choices[0].delta.content === 'string')
       .map((e) => e.choices[0].delta.content)
       .join('');
-    return { events, statuses, text, steps: callLog.length, callLog };
+    return { events, statuses, toolEvents, text, steps: callLog.length, callLog };
   }
 
   // ----- A) regression: duplicate write_file + successful create -> final answer
@@ -838,7 +839,7 @@ function restoreState() {
   // normalize+execute (no rejection loop), and EMPTY args must reject WITH
   // the command format hint so the model can correct itself
   {
-    const { statuses, text, steps, callLog } = await runChat('what is the current status of system resources?', [
+    const { statuses, text, steps, callLog, toolEvents } = await runChat('what is the current status of system resources?', [
       { toolCalls: [{ index: 0, id: 'k1', name: 'run_shell', arguments: '{"cmd":"free -h"}' }] },
       { content: 'Here is the current memory usage.', finishReason: 'stop' },
     ]);
@@ -850,6 +851,11 @@ function restoreState() {
     t('e2e-K: status shows the real command (no "Running command: ")', statuses.some((s) => s === '⚙ Running command: free -h'), JSON.stringify(statuses));
     t('e2e-K: completed in exactly 2 steps', steps === 2, `steps=${steps}`);
     t('e2e-K: final answer streamed', /memory usage/.test(text), text.slice(0, 100));
+    // Durable tool-run events (persisted history records) — one per executed
+    // tool step with tool name, args, outcome and a timestamp.
+    const kTools = toolEvents.filter((e) => e.tool === 'run_shell');
+    t('e2e-K: tool event streamed for the executed call', kTools.length === 1 && kTools[0].ok === true, JSON.stringify(kTools[0] || {}));
+    t('e2e-K: tool event carries args + ts', typeof kTools[0].args === 'string' && kTools[0].args.includes('free -h') && Number.isFinite(kTools[0].ts), JSON.stringify((kTools[0] || {}).args));
 
     // empty payload: the rejection names the gap AND the expected shape
     const { statuses: s2, steps: st2 } = await runChat('what is the current status of system resources?', [

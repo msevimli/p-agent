@@ -63,7 +63,15 @@ ensure_data_dir() { mkdir -p "$DATA_DIR"; }
 is_pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 
 node_server_pids() {
-  pgrep -f "node server\.js" 2>/dev/null | grep -v "^\$\$" || true
+  # Only report processes whose working directory IS the p-agent root. A
+  # bare `pgrep -f "node server.js"` name-matches unrelated projects (e.g.
+  # skills/trading-dashboard's own server.js) and wrongly blocks --start /
+  # wrongly stops the user's other apps.
+  local pid cwd
+  for pid in $(pgrep -f "node server\.js" 2>/dev/null | grep -v '^\$\$' || true); do
+    cwd="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+    if [ "$cwd" = "$ROOT" ]; then echo "$pid"; fi
+  done
 }
 
 port_has_health() {

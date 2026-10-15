@@ -137,9 +137,10 @@ module.exports = {
   toolCallingEnabled: process.env.TOOL_CALLING !== 'false',
   // Outer tool-loop ceiling (rounds incl. escalations/corrections). Safety
   // net only: real loop termination is repetition detection (identical
-  // consecutive calls, A-B-A ping-pong, all-skip rounds) in toolLoop/chat.js,
-  // so long multi-step tasks run as long as each step is unique progress.
-  toolMaxIterations: Number(process.env.TOOL_MAX_ITERATIONS || 24),
+  // consecutive calls, A-B-A-B ping-pong, all-skip rounds) in toolLoop/chat.js,
+  // so deep multi-step tasks (read → grep → db → …) run as long as each
+  // step is unique progress; 64 rounds rarely binds, the env override stays.
+  toolMaxIterations: Number(process.env.TOOL_MAX_ITERATIONS || 64),
   // Guard retry (step 3): when the model answers with a shell/curl description
   // instead of a tool call, retry once with tool_choice:"required". Requires a
   // llama.cpp build that accepts the field on the OpenAI-compat API; set

@@ -1540,9 +1540,45 @@
   function renderMessages() {
     messagesEl.innerHTML = '';
     emptyStateEl.style.display = state.currentMessages.length ? 'none' : 'flex';
-    state.currentMessages.forEach((m) => appendMessage(m.role, m.content, false, m.meta, m.reasoning));
+    state.currentMessages.forEach((m) => {
+      if (m.role === 'tool') { appendToolStep(m); return; }
+      appendMessage(m.role, m.content, false, m.meta, m.reasoning);
+    });
     scrollToBottom();
     updateBudget();
+  }
+
+  // Replay a persisted tool-run record (role:'tool') as a collapsible card:
+  // tool name, argument preview, outcome badge and time on the summary row;
+  // full arguments + output/error inside. Skipped duplicates show ⏭.
+  function appendToolStep(m) {
+    emptyStateEl.style.display = 'none';
+    const args = typeof m.args === 'string' ? m.args : JSON.stringify(m.args || {});
+    const cls = m.skipped ? 'skipped' : (m.ok ? 'ok' : 'err');
+    const status = m.skipped ? '⏭ skipped' : (m.ok ? '✓ ok' : '✗ failed');
+    const when = m.ts ? new Date(m.ts).toLocaleTimeString() : '';
+    const details = [];
+    if (m.out) details.push(`<div class="ts-block ts-out"><b>output</b><pre>${escapeHtml(m.out)}</pre></div>`);
+    if (m.error) details.push(`<div class="ts-block ts-err-c"><b>${m.skipped ? 'notice' : 'error'}</b><pre>${escapeHtml(m.error)}</pre></div>`);
+    if (typeof m.code === 'number' && m.code !== 0) details.push(`<div class="ts-code">exit code ${escapeHtml(String(m.code))}</div>`);
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ts-msg';
+    wrap.innerHTML = `
+      <details class="tool-step ${cls}">
+        <summary>
+          <span class="ts-ic">${m.skipped ? '⏭' : '🔧'}</span>
+          <span class="ts-name">${escapeHtml(m.tool || 'tool')}</span>
+          <span class="ts-args">${escapeHtml(args.slice(0, 160))}${args.length > 160 ? ' …' : ''}</span>
+          <span class="ts-status ${cls}">${status}</span>
+          ${when ? `<span class="ts-when">${escapeHtml(when)}</span>` : ''}
+        </summary>
+        <div class="ts-body">
+          <div class="ts-block"><b>args</b><pre>${escapeHtml(args)}</pre></div>
+          ${details.join('')}
+        </div>
+      </details>`;
+    messagesEl.appendChild(wrap);
+    scrollToBottom();
   }
 
   function appendMessage(role, content, animate = true, meta, reasoning) {
@@ -2164,7 +2200,9 @@
     };
     const captureTimings = (t) => { reqTimings = t; };
 
-    const apiMessages = state.currentMessages.map((m) => ({ role: m.role, content: m.content }));
+    const apiMessages = state.currentMessages
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => ({ role: m.role, content: m.content }));
 
     // abortable stream
     const ac = new AbortController();
@@ -2206,6 +2244,24 @@
     };
 
     const handleData = (json) => {
+      if (json.type === 'tool') {
+        // Durable tool-step record: persisted into the session history so
+        // tool rounds survive session switches/refreshes (renderMessages
+        // replays them as collapsible cards). Live activity stays in the
+        // transient ⚙ status feed — no DOM duplication.
+        state.currentMessages.push({
+          role: 'tool',
+          tool: json.tool,
+          args: json.args,
+          ok: json.ok === true,
+          skipped: json.skipped === true,
+          code: json.code,
+          out: json.out,
+          error: json.error,
+          ts: json.ts || Date.now(),
+        });
+        return;
+      }
       if (json.type === 'status') {
         statuses.push(json.message || '');
         addToolStatus(json.message || '');
