@@ -34,6 +34,8 @@
  */
 'use strict';
 
+const { parseJsonRepaired } = require('./jsonRepair');
+
 // Stable retry instruction (step 3 of the task): fed back as a user message
 // exactly once per user message when the model answered with a shell/curl
 // description instead of a tool call. Kept as a constant so the prompt text
@@ -135,11 +137,9 @@ function validateCallObject(o, allowedNames) {
         : o.args;
   if (args === undefined) args = {};
   if (typeof args === 'string') {
-    try {
-      args = JSON.parse(args);
-    } catch {
-      return null; // arguments as a JSON string must parse
-    }
+    const p = parseJsonRepaired(args);
+    if (!p.ok) return null; // arguments as a JSON string must parse (or repair)
+    args = p.value;
   }
   if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
   return { name, args };
@@ -151,20 +151,21 @@ function validateCallObject(o, allowedNames) {
 function parsePayloadObjects(payload, names) {
   const calls = [];
   if (!payload) return { calls, parsed: false };
-  try {
-    const whole = JSON.parse(payload);
+  const p = parseJsonRepaired(payload);
+  if (p.ok) {
+    const whole = p.value;
     const arr = Array.isArray(whole) ? whole : [whole];
     for (const o of arr) {
       const v = validateCallObject(o, names);
       if (v) calls.push(v);
     }
     return { calls, parsed: true };
-  } catch { /* not one doc — try bare objects below */ }
+  }
   for (const frag of findJsonFragments(payload)) {
-    try {
-      const v = validateCallObject(JSON.parse(frag), names);
-      if (v) calls.push(v);
-    } catch { /* fragment is not a call */ }
+    const fp = parseJsonRepaired(frag);
+    if (!fp.ok) continue;
+    const v = validateCallObject(fp.value, names);
+    if (v) calls.push(v);
   }
   return { calls, parsed: false };
 }

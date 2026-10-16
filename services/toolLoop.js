@@ -11,6 +11,7 @@
  */
 const registry = require('../tools');
 const path = require('path');
+const jsonRepair = require('./jsonRepair');
 
 function listTools() {
   return registry.map(({ name, description, parameters }) => ({
@@ -617,16 +618,24 @@ function hasTool(name) {
   return registry.some((t) => t.name === name);
 }
 
-/** Parse a tool-call `arguments` string (may be empty/partial). Never throws. */
+/**
+ * Parse a tool-call `arguments` string (may be empty/partial). Never throws.
+ * Falls back to the auto-repair cascade for LLM-mangled JSON (unescaped
+ * quotes/newlines in inline commands, single quotes, unquoted keys…);
+ * every repaired candidate is parse-verified in services/jsonRepair.js.
+ */
 function safeParseArgs(str) {
   if (!str) return {};
   if (typeof str !== 'string') return str || {};
-  try {
-    const j = JSON.parse(str);
+  const p = jsonRepair.parseJsonRepaired(str);
+  if (p.ok) {
+    if (p.repaired) {
+      console.log(`[tool-call] repaired malformed JSON args (${(p.steps || []).join(',')}) — ${String(str).slice(0, 90).replace(/\n/g, '\\n')}`);
+    }
+    const j = p.value;
     return j && typeof j === 'object' && !Array.isArray(j) ? j : {};
-  } catch {
-    return {};
   }
+  return {};
 }
 
 /**
@@ -671,10 +680,10 @@ function normalizeCallObject(o, outsideTags) {
           : {};
   if (typeof raw === 'string') {
     // arguments may arrive double-encoded as a JSON string
-    try {
-      const p = JSON.parse(raw);
-      if (p && typeof p === 'object' && !Array.isArray(p)) return { tool: name, args: p };
-    } catch { /* not JSON — not a call */ }
+    const p = jsonRepair.parseJsonRepaired(raw);
+    if (p.ok && p.value && typeof p.value === 'object' && !Array.isArray(p.value)) {
+      return { tool: name, args: p.value };
+    }
     return null;
   }
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) return { tool: name, args: raw };
@@ -689,14 +698,19 @@ function normalizeCallObject(o, outsideTags) {
  * {"name":<name>,"arguments":{}}), or an embedded JSON object anywhere in
  * the text. Requires a valid, guarded object (well-formed JSON with a
  * registered tool name), so plain prose is never mistaken for a call.
+ * Malformed-but-repairable JSON (unescaped quotes/newlines, single quotes,
+ * unquoted keys…) is auto-repaired and still executed.
  * Returns { tool, args } or null.
  */
 function tryParseTool(t, outsideTags) {
-  try {
-    const o = JSON.parse(t);
-    const c = normalizeCallObject(o, outsideTags);
+  const p = jsonRepair.parseJsonRepaired(t);
+  if (p.ok) {
+    if (p.repaired) {
+      console.log(`[tool-call] repaired malformed tool-call JSON (${(p.steps || []).join(',')}) — ${String(t).slice(0, 90).replace(/\n/g, '\\n')}`);
+    }
+    const c = normalizeCallObject(p.value, outsideTags);
     if (c) return c;
-  } catch { /* not JSON */ }
+  }
   return null;
 }
 
@@ -716,9 +730,10 @@ function parseCallPayloads(payload) {
   const out = [];
   const t = String(payload || '').trim();
   if (!t) return out;
-  // Whole payload first: object or array of objects.
-  try {
-    const whole = JSON.parse(t);
+  // Whole payload first: object or array of objects (repair-friendly).
+  const p = jsonRepair.parseJsonRepaired(t);
+  if (p.ok) {
+    const whole = p.value;
     const arr = Array.isArray(whole) ? whole : [whole];
     let any = false;
     for (const o of arr) {
@@ -726,13 +741,14 @@ function parseCallPayloads(payload) {
       if (c) { out.push(c); any = true; }
     }
     if (any) return out; // at least one valid call — the payload was one doc
-  } catch { /* not a single JSON doc — try bare objects below */ }
+  }
   // Multiple bare JSON objects inside one tag (whitespace/newline separated).
   for (const frag of findJsonObjects(t)) {
-    try {
-      const c = normalizeCallObject(JSON.parse(frag), false);
+    const fp = jsonRepair.parseJsonRepaired(frag);
+    if (fp.ok) {
+      const c = normalizeCallObject(fp.value, false);
       if (c) out.push(c);
-    } catch { /* fragment is not a call */ }
+    }
   }
   return out;
 }
@@ -906,6 +922,12 @@ function buildSystemPrompt(base) {
     'For JSON APIs, embedding a small python3 one-liner is often more reliable: ' +
     '`python3 -c "import urllib.request,json; d=json.load(urllib.request.urlopen(\'https://api.example.com/v1/price?ids=solana&vs_currencies=usd\')); print(d)"`. ' +
     'If a fetch failed, retry the corrected quoted command — a corrected retry is NOT a duplicate.\n' +
+    'INLINE vs SCRIPT FILES: keep run_shell commands SHORT and single-line. For anything multi-line ' +
+    'or containing quotes (node -e, python3 -c, awk, heredocs, nested "quotes in quotes"), write a ' +
+    'script file FIRST (write_file to scripts/, e.g. scripts/tmp_check.js) and then run it with ' +
+    '`node scripts/tmp_check.js` or `bash scripts/tmp_check.sh`. Inline one-liners with nested ' +
+    'quotes are fragile — their JSON escapes get corrupted mid-task — while a script file has no ' +
+    'quote-nesting problem at all. Do not re-write the same script; reuse what is already there.\n' +
     'If a call fails, fix it and retry once, then keep going. After the tool results, work until ' +
     'the task is done, then reply with a short plain-text final answer.\n' +
     'You execute shell commands yourself with the run_shell tool and have internet access through curl. ' +

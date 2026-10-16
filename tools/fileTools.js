@@ -101,7 +101,7 @@ const readFileTool = {
 const writeFileTool = {
   name: 'write_file',
   description:
-    'Create or fully overwrite a text file (parent directories are created automatically).',
+    'Create or fully overwrite a text file (parent directories are created automatically). For multi-line or quote-heavy shell logic, write a script here (scripts/…) and run it with run_shell — prefer this over inline `node -e`/`python3 -c` one-liners, whose nested quotes break when JSON-encoded.',
   parameters: {
     type: 'object',
     properties: {

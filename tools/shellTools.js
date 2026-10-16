@@ -82,14 +82,14 @@ function execute(command, timeout) {
 const shellTool = {
   name: 'run_shell',
   description:
-    'Run a shell command in the workspace (sandboxed, 60 s default timeout, safety denylist). Returns stdout, stderr and exit code.',
+    'Run a shell command in the workspace (sandboxed, 60 s default timeout, safety denylist). Returns stdout, stderr and exit code. KEEP COMMANDS SHORT AND SINGLE-LINE; for multi-line logic or anything with quotes, write a script file first (write_file to scripts/, e.g. scripts/tmp_check.js) and run `node scripts/tmp_check.js` / `bash scripts/tmp_check.sh` — nested quotes inside inline `node -e`/`python3 -c` one-liners get corrupted when the call is encoded as JSON.',
   parameters: {
     type: 'object',
     properties: {
       command: {
         type: 'string',
         description:
-          'The shell command to run. Payload shape: {"command": "free -h"} — the command key is required; single command, one line.',
+          'The shell command to run. Payload shape: {"command": "free -h"} — the command key is required; single command, one line. Multi-line or quote-heavy logic: use a script file (see description).',
       },
       timeout_ms: { type: 'number', description: 'Optional timeout in ms (default 60000, max 300000)' },
     },
