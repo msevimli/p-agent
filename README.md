@@ -414,6 +414,44 @@ short refusal and never trigger the agent.
   output/error). Tool records are excluded from the model-bound
   `apiMessages` (server-side history keeps its own tool glue) and bounded
   (args ≤ 600 chars, output ≤ 400, error ≤ 240) so sessions stay light.
+- **Malformed-JSON auto-repair in tool calls** — if a cloud model emits
+  tool-call arguments that fail strict `JSON.parse` (unescaped quotes or
+  newlines inside nested inline commands like `node -e "…"`, single-quoted
+  strings, unquoted keys, trailing commas, smart quotes, `None`/`True`/
+  `False`, truncation), `services/jsonRepair.js` repairs them through a
+  parse-verified cascade: every repaired candidate must `JSON.parse` AND
+  pass a key-cleanliness + structural-boundary gate (an escaped quote that
+  would swallow a `,"key":` boundary is rejected — the repair never merges
+  two key/value pairs into one mangled string), so no corrupted shape is
+  ever executed. Valid JSON is never touched (fast path); unrepairable
+  input keeps the strict corrective-round flow. Wired into every parse
+  site: `toolLoop.safeParseArgs` (native `tool_calls`), `extractToolCalls`,
+  `parseCallPayloads`, `normalizeCallObject` and `toolCallParser` (tilde
+  tags/fences + double-encoded arguments).
+- **Shell guidance: script files over inline one-liners** — the `run_shell`
+  tool schema, `write_file`'s schema and the system guidance (template +
+  active override) tell the model to keep commands short and single-line,
+  and to write multi-line or quote-heavy logic to a script file
+  (write_file → `node scripts/x.js` / `bash scripts/x.sh`) instead of
+  fragile nested-quote inline `node -e`/`python3 -c` one-liners whose JSON
+  escapes get corrupted mid-task. This prevents the corruption class at
+  the source, the repair module catches what still slips through.
+- **Session re-attachment & background turn sync** — running turns belong
+  to their SESSION, not the current view: the SSE reader keeps consuming
+  into a per-session buffer (`state.activeStreams`) while you browse other
+  sessions, so switching back re-attaches statuses, partial text, reasoning
+  and tool cards to fresh DOM and resumes the timer/stop button exactly
+  where they were. The backend mirrors every active turn in a registry
+  (`GET /api/chat/state/:sessionId`, keyed by the `sessionId` the client
+  sends with each chat request; records outlive the turn by 90 s), so a
+  stream lost to a hard refresh is polled and folded back into the session.
+  Tool records and final answers always persist into the stream's OWN
+  session — a background turn can never write into the session you are
+  viewing.
+- **Sidebar processing indicator** — sessions with an active turn show a
+  pulsing amber dot (`.session-processing-indicator`, glow animation,
+  reduced-motion aware) next to their title; it clears when the turn ends
+  or is stopped.
 - **Never stalls on a broken model** — if the active model returns an empty
   stream when tool calling is enabled (some providers do), the request is
   automatically re-run without the tools array and still answers, with a

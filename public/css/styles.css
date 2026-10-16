@@ -782,6 +782,31 @@ html.dark .auto-card:hover { border-color: rgba(147,197,253,0.45); }
 .ts-out pre { color: #4ade80; }
 html.dark .tool-step { background: rgba(217,119,6,0.08); }
 html.dark .ts-block pre { background: rgba(0,0,0,0.35); }
+.session-processing-indicator {
+  --spi-c: #f59e0b;                 /* amber — matches the tool-status accent */
+  --spi-glow: rgba(245, 158, 11, 0.55);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  margin-left: 2px;
+  background: var(--spi-c);
+  box-shadow: 0 0 0 0 var(--spi-glow);
+  animation: session-pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+html.dark .session-processing-indicator {
+  --spi-c: #fbbf24;
+  --spi-glow: rgba(251, 191, 36, 0.5);
+}
+@keyframes session-pulse {
+  0% { box-shadow: 0 0 0 0 var(--spi-glow); opacity: 1; }
+  70% { box-shadow: 0 0 0 8px transparent; opacity: 0.85; }
+  100% { box-shadow: 0 0 0 0 transparent; opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-processing-indicator { animation: none; opacity: 0.9; }
+}
+
 .ts-code { font-size: 11px; color: #f87171; margin-top: 6px; }
 
 .auto-row { display: flex; align-items: flex-start; gap: 0.85rem; }

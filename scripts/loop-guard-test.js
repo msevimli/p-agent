@@ -496,6 +496,7 @@ function restoreState() {
   // -- patch complete(), then re-require the router so it binds the mock --
   const callLog = []; // every payload seen by the mock
   let seq = [];
+  let mockDeferSeen = false; // registry net: set when a deferred round is pending
   llamaClient.complete = function (opts) {
     const acc = seq.shift();
     if (acc === undefined) throw new Error('mock exhausted — loop ran more steps than canned');
@@ -507,13 +508,17 @@ function restoreState() {
     // before openSse() and crash with ERR_HTTP_HEADERS_SENT. The callbacks
     // still fire before the round resolves, so the loop's round-boundary
     // events always follow the text they refer to (order pinned by e2e-G).
-    const p = Promise.resolve().then(() => {
+    // `defer: <promise>` (registry net) blocks the round on a test gate so a
+    // mid-turn state snapshot can be taken.
+    const emit = () => {
       if (acc.reasoning && opts.onReasoning) opts.onReasoning(acc.reasoning);
       if (acc.content && opts.onDelta) opts.onDelta(acc.content);
       return acc;
-    });
+    };
+    const p = acc.defer ? acc.defer.then(emit) : Promise.resolve().then(emit);
     Object.defineProperty(p, 'position', { value: 1, enumerable: true });
     if (opts.onUsage && acc.usage) opts.onUsage(acc.usage);
+    if (acc.defer) mockDeferSeen = true;
     return p;
   };
   const chatPath = path.join(ROOT, 'routes', 'chat.js');
@@ -555,6 +560,35 @@ function restoreState() {
       .map((e) => e.choices[0].delta.content)
       .join('');
     return { events, statuses, toolEvents, text, steps: callLog.length, callLog };
+  }
+
+  // ----- REG) turn-state registry: GET /api/chat/state/:sessionId ----------
+  // Mid-turn the frontend can re-attach to a stream it lost the reader for
+  // (hard refresh); after completion the record stays readable for a grace
+  // window. The deferred round holds the loop open so we can snapshot it.
+  {
+    let release = null;
+    const gate = new Promise((r) => { release = r; });
+    mockDeferSeen = false;
+    seq = [
+      { content: '', reasoning: '', toolCalls: [{ index: 0, id: 'r1', name: 'run_shell', arguments: '{"command":"free -h"}' }], finishReason: 'tool_calls', usage: { prompt_tokens: 100, completion_tokens: 10 }, defer: gate },
+      { content: 'Here is the current memory usage.', reasoning: '', toolCalls: [], finishReason: 'stop', usage: { prompt_tokens: 110, completion_tokens: 20 } },
+    ];
+    const regFetch = fetch(`http://127.0.0.1:${port}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'memory status' }], generation: {}, sessionId: 'sess-reg' }),
+    });
+    for (let i = 0; i < 100 && !mockDeferSeen; i++) await new Promise((r) => setTimeout(r, 20));
+    const mid = await (await fetch(`http://127.0.0.1:${port}/api/chat/state/sess-reg`)).json();
+    t('reg: mid-turn state is active with a statuses/text buffer', mid.ok === true && mid.active === true && Array.isArray(mid.statuses) && typeof mid.text === 'string', JSON.stringify(mid).slice(0, 120));
+    release();
+    const regBody = await (await regFetch).text();
+    t('reg: turn completes normally', regBody.includes('[DONE]'), regBody.slice(-40));
+    const done = await (await fetch(`http://127.0.0.1:${port}/api/chat/state/sess-reg`)).json();
+    t('reg: after completion active:false + final text captured', done.ok === true && done.active === false && done.text.includes('memory usage'), JSON.stringify(done).slice(0, 160));
+    const unknown = await fetch(`http://127.0.0.1:${port}/api/chat/state/no-such-session`);
+    t('reg: unknown session -> 404', unknown.status === 404);
   }
 
   // ----- A) regression: duplicate write_file + successful create -> final answer

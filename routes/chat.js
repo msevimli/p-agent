@@ -78,6 +78,57 @@ const toolRunEvent = (name, args, result) => {
 const usageChunk = (u) => `data: ${JSON.stringify({ choices: [], usage: u })}\n\n`;
 const DONE_CHUNK = 'data: [DONE]\n\n';
 
+// ---------------------------------------------------------------------------
+// Turn-state registry: /api/chat/state/:sessionId re-attachment recovery.
+// While a POST /api/chat turn is running, safeWrite() mirrors every status
+// line and streamed token into res._chatState (created below), and the GET
+// route below exposes it. A frontend that lost its SSE reader (hard refresh
+// mid-turn) can re-attach by polling the registry and replaying statuses +
+// accumulated text; entries outlive the request by REATTACH_GRACE_MS so a
+// late poller still sees the final state.
+// ---------------------------------------------------------------------------
+const REATTACH_GRACE_MS = 90 * 1000;
+const chatTurnRegistry = new Map(); // 'chat:' + sessionId -> state record
+
+function registerChatTurn(sessionId, res) {
+  if (!sessionId) return null;
+  const st = {
+    sessionId,
+    statuses: [],
+    text: '',
+    updatedAt: Date.now(),
+    done: false,
+  };
+  res._chatState = st;
+  chatTurnRegistry.set('chat:' + sessionId, st);
+  return st;
+}
+
+/** Mark a turn finished; the record stays readable for the grace window. */
+function finalizeChatTurn(sessionId, st) {
+  if (!st) return;
+  st.done = true;
+  st.updatedAt = Date.now();
+  if (!sessionId) return;
+  setTimeout(() => {
+    if (chatTurnRegistry.get('chat:' + sessionId) === st) {
+      chatTurnRegistry.delete('chat:' + sessionId);
+    }
+  }, REATTACH_GRACE_MS);
+}
+
+router.get('/state/:sessionId', (req, res) => {
+  const st = chatTurnRegistry.get('chat:' + String(req.params.sessionId || ''));
+  if (!st) return res.status(404).json({ ok: false, error: 'no turn known for this session' });
+  res.json({
+    ok: true,
+    active: !st.done,
+    statuses: st.statuses,
+    text: st.text,
+    updatedAt: st.updatedAt,
+  });
+});
+
 // Fed back as a user message when max_tokens cut a generation short; the
 // model resumes exactly where it stopped instead of repeating itself.
 const CONTINUE_MSG =
@@ -416,6 +467,10 @@ router.post('/', async (req, res) => {
   toolLoop.resetSeenCalls();
 
   const { messages, stream = true, attachments } = req.body || {};
+  // Session id for the turn-state registry (GET /api/chat/state/:sessionId):
+  // purely a re-attachment key, never part of the model history.
+  const sessionId = typeof (req.body && req.body.sessionId) === 'string' ? req.body.sessionId : null;
+  const turnState = registerChatTurn(sessionId, res);
   const gen = req.body && typeof req.body.generation === 'object' ? req.body.generation : {};
   // Reasoning effort/visibility controller rides the gen object so EVERY
   // buildChatPayload call site (plain path, tool loop, cascade router)
@@ -1446,12 +1501,14 @@ router.post('/', async (req, res) => {
       }
       safeWrite(res, DONE_CHUNK, lost);
     }
+    finalizeChatTurn(sessionId, turnState);
     res.end();
   } catch (err) {
     // Headers already sent (SSE open) — report the failure as an event.
     try {
       safeWrite(res, statusChunk('\u26a0 ' + (err && err.message ? err.message : 'chat failed')), lost);
       safeWrite(res, DONE_CHUNK, lost);
+      finalizeChatTurn(sessionId, turnState);
       res.end();
     } catch { /* ignore */ }
   }

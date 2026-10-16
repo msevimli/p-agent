@@ -25,6 +25,11 @@
     lastUsage: null, // { sessionId, prompt_tokens, completion_tokens } from llama
     pendingDeleteId: null, // session awaiting inline delete confirmation
     abortController: null, // AbortController for the active stream
+    // Per-session active-turn registry: sessionId -> stream record while a
+    // request is running for that session (see sendMessage/reattachStreamUI).
+    // A stream keeps consuming into its record even while the user views
+    // another session — switching back re-attaches the buffers to fresh DOM.
+    activeStreams: {},
     view: 'chat', // 'chat' | 'files' — which panel is shown in the main area
     fsDir: '', // current directory in the File Explorer (workspace-relative; '' = root)
     attachments: [], // [{ id, name, size }] queued for the next chat message
@@ -1411,6 +1416,7 @@
     const confirmingId = state.pendingDeleteId;
     state.sessions.forEach((s) => {
       const confirming = s.id === confirmingId;
+      const processing = hasActiveStream(s.id);
       const item = document.createElement('div');
       item.className =
         'session-item' +
@@ -1421,6 +1427,7 @@
       item.innerHTML = `
         <span class="thread-icon">💬</span>
         <span class="title">${escapeHtml(s.title)}</span>
+        ${processing ? '<span class="session-processing-indicator" title="processing…"></span>' : ''}
         ${confirming
           ? `<span class="del-ask">
                <button class="del-confirm" data-id="${s.id}" title="Confirm delete">✓</button>
@@ -1478,6 +1485,11 @@
     renderChips();
     renderMessages();
     renderSessionList();
+    // Stream re-attachment: if THIS session has a running turn (own reader
+    // or a turn recovered from the backend registry), re-attach its buffers
+    // to the fresh DOM — the live progress, stop button and timer resume.
+    if (hasActiveStream(id)) reattachStreamUI();
+    else maybeAdoptRemoteTurn(id);
   }
 
   async function newChat() {
@@ -1505,16 +1517,21 @@
     renderSessionList();
   }
 
-  async function persistSession() {
-    if (!state.currentMessages.length) return;
-    const title = state.currentMessages.find((m) => m.role === 'user')?.content?.slice(0, 60) || 'New chat';
+  async function persistSession(messages, id) {
+    // A stream finishing while another session is VIEWED must persist into
+    // the STREAM'S session (its own array) — passing (messages, id) makes
+    // the target explicit; callers with no args persist the current view.
+    const target = Array.isArray(messages) ? messages : state.currentMessages;
+    const targetId = typeof id === 'string' ? id : state.currentId;
+    if (!target.length) return;
+    const title = target.find((m) => m.role === 'user')?.content?.slice(0, 60) || 'New chat';
     const res = await fetch('/api/sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: state.currentId || undefined,
+        id: targetId || undefined,
         title: title + (title.length >= 60 ? '…' : ''),
-        messages: state.currentMessages,
+        messages: target,
       }),
     });
     const saved = await res.json();
@@ -1996,8 +2013,10 @@
       `⏱ ${s >= 60 ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s` : `${s}s`}…`;
   }
 
-  function startGenTimer() {
-    genStartedAt = Date.now();
+  function startGenTimer(from) {
+    // Re-attach support: `from` restores the ORIGINAL turn start so the
+    // elapsed counter is seamless across session switches.
+    genStartedAt = typeof from === 'number' ? from : Date.now();
     genTimerEl.classList.remove('hidden');
     paintGenTimer();
     clearInterval(genTimerInterval);
@@ -2124,9 +2143,175 @@
     }
   }
 
+  // --------------------------------------------------------------------
+  // Per-session stream re-attachment
+  // --------------------------------------------------------------------
+  // A running turn belongs to its SESSION, not to the current view: the
+  // reader keeps consuming into the stream record while the user is on
+  // another session, and switching back re-attaches the buffers to fresh
+  // DOM (buildAssistantBubble + replay) instead of freezing on stale node
+  // references. The sidebar pulse, the stop button and the timer all read
+  // the same registry, so they stay synchronized.
+
+  /** Build the assistant bubble scaffolding; returns live element refs. */
+  function buildAssistantBubble() {
+    const el = appendMessage(
+      'assistant',
+      `<div class="agent-status hidden"></div>` +
+        `<div class="reasoning hidden collapsed">` +
+        `<button class="reasoning-toggle" type="button"><span class="reasoning-dot"></span>Reasoning / Thinking<span class="reasoning-chev">▾</span></button>` +
+        `<div class="reasoning-body"><pre class="reasoning-text"></pre></div>` +
+        `</div>` +
+        `<div class="agent-content"><span class="typing"><span></span><span></span><span></span></span></div>`
+    );
+    return {
+      assistantEl: el,
+      statusEl: el.querySelector('.agent-status'),
+      reasoningEl: el.querySelector('.reasoning'),
+      reasoningTextEl: el.querySelector('.reasoning-text'),
+      contentEl: el.querySelector('.agent-content'),
+    };
+  }
+
+  function hasActiveStream(sid) {
+    const s = state.activeStreams[sid];
+    return !!s && !s.done;
+  }
+
+  /** Re-attach the current view to its session's running stream. The DOM
+   *  was re-rendered by switchSession, so stale refs are replaced by fresh
+   *  ones and the buffered state (statuses, reasoning, partial text) is
+   *  replayed; the timer restarts from the ORIGINAL turn start. */
+  function reattachStreamUI() {
+    const stream = state.activeStreams[state.currentId];
+    if (!stream || stream.done) return;
+    stream.refs = buildAssistantBubble();
+    const { statusEl, contentEl, reasoningEl, reasoningTextEl } = stream.refs;
+    for (const msg of stream.statuses) {
+      const line = document.createElement('div');
+      line.className = 'tool-line' + (msg && msg.trim().startsWith('\u26a0') ? ' err' : '');
+      line.textContent = msg;
+      statusEl.appendChild(line);
+    }
+    if (stream.statuses.length) statusEl.classList.remove('hidden');
+    if (stream.reasoning) {
+      reasoningEl.classList.remove('hidden');
+      reasoningEl.classList.remove('collapsed');
+      reasoningTextEl.textContent = stream.reasoning.trim();
+    }
+    if (stream.text) {
+      contentEl.innerHTML = '';
+      contentEl.textContent = stream.text;
+    }
+    startGenTimer(stream.startedAt);
+    syncStreamingUI();
+    scrollToBottom();
+  }
+
+  /** Stop button / send-gate reflect the CURRENT VIEW's stream while the
+   *  global send-gate stays on while ANY stream runs (backend FIFO-queues
+   *  concurrent requests). */
+  function syncStreamingUI() {
+    const anyActive = Object.values(state.activeStreams).some((s) => !s.done);
+    state.streaming = anyActive;
+    if (hasActiveStream(state.currentId)) setStreamingUI(true);
+    else setStreamingUI(false);
+  }
+
+  let remotePollTimer = null;
+
+  /** Adopt a turn we LOST the reader for (hard refresh mid-turn): the
+   *  backend registry (GET /api/chat/state/:sessionId) still mirrors it.
+   *  Only when no own stream exists — the live reader always wins. */
+  function maybeAdoptRemoteTurn(sid) {
+    if (hasActiveStream(sid) || sid == null) return;
+    fetch(`/api/chat/state/${encodeURIComponent(String(sid))}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((st) => {
+        if (!st || !st.active) return;
+        state.activeStreams[sid] = {
+          sessionId: sid,
+          abort: null,
+          startedAt: Date.now(),
+          statuses: st.statuses || [],
+          text: st.text || '',
+          reasoning: '',
+          sessionMessages: null, // resolved at finalize from the sessions store
+          refs: null,
+          done: false,
+          remote: true,
+        };
+        renderSessionList();
+        if (state.currentId === sid) reattachStreamUI();
+        clearInterval(remotePollTimer);
+        remotePollTimer = setInterval(() => pollRemoteTurn(sid), 1200);
+      })
+      .catch(() => {});
+  }
+
+  /** Poll a remotely adopted turn until it finishes, then fold the final
+   *  text into the session store (the client owns persistence, so a turn
+   *  completed while the client was away is recovered from the registry). */
+  async function pollRemoteTurn(sid) {
+    const stream = state.activeStreams[sid];
+    if (!stream) { clearInterval(remotePollTimer); remotePollTimer = null; return; }
+    let st = null;
+    try {
+      const r = await fetch(`/api/chat/state/${encodeURIComponent(String(sid))}`);
+      st = r.ok ? await r.json() : null;
+    } catch { return; } // transient — keep polling
+    stream.statuses = st ? st.statuses : stream.statuses;
+    stream.text = st ? st.text : stream.text;
+    if (state.currentId === sid && stream.refs) {
+      // Live re-sync of the replayed bubble.
+      const { statusEl, contentEl } = stream.refs;
+      statusEl.innerHTML = '';
+      for (const msg of stream.statuses) {
+        const line = document.createElement('div');
+        line.className = 'tool-line' + (msg && msg.trim().startsWith('\u26a0') ? ' err' : '');
+        line.textContent = msg;
+        statusEl.appendChild(line);
+      }
+      if (stream.statuses.length) statusEl.classList.remove('hidden');
+      if (stream.text && contentEl.textContent !== stream.text) contentEl.textContent = stream.text;
+      scrollToBottom();
+    }
+    if (st && !st.active) {
+      clearInterval(remotePollTimer);
+      remotePollTimer = null;
+      delete state.activeStreams[sid];
+      renderSessionList();
+      // Fold the recovered final text into the persisted session.
+      const sess = state.sessions.find((x) => x.id === sid);
+      if (sess && stream.text) {
+        sess.messages = sess.messages || [];
+        sess.messages.push({ role: 'assistant', content: stream.text });
+        persistSession(sess.messages, sid);
+        if (state.currentId === sid) {
+          renderMessages();
+          const refs = buildAssistantBubble();
+          stream.refs = refs;
+          refs.contentEl.innerHTML = marked.parse(stream.text);
+          attachCopyButtons(refs.contentEl);
+          scrollToBottom();
+          syncStreamingUI();
+        }
+      } else {
+        syncStreamingUI();
+      }
+    }
+  }
+
   async function sendMessage() {
     const text = promptInput.value.trim();
     if (!text || state.streaming) return;
+
+    // The stream belongs to THIS SESSION: the record keeps buffering while
+    // the user visits other sessions, and all message pushes go to the
+    // session's OWN array (state.currentMessages is re-pointed on every
+    // switchSession — writing it directly would corrupt another session).
+    const sid = state.currentId;
+    const sessionMessages = state.currentMessages;
 
     // Attachments queued via the paperclip: snapshot them for this message,
     // render them inside the user bubble, then clear the compose row.
@@ -2154,38 +2339,46 @@
     // before the next status poll picks up the prefill phase.
     if (state.modelStatus) renderModelStatus({ ...state.modelStatus, busy: true });
 
+    // Per-session stream record: buffers + abort + DOM refs. Registered
+    // BEFORE the fetch so the sidebar pulse appears immediately.
+    const stream = {
+      sessionId: sid,
+      abort: null, // assigned once the AbortController exists (below)
+      startedAt: Date.now(),
+      statuses: [],
+      text: '',
+      reasoning: '',
+      sessionMessages,
+      refs: null,
+      done: false,
+    };
+    state.activeStreams[sid] = stream;
+    renderSessionList(); // pulse indicator for this session
+
     // assistant placeholder: status feed (hidden) + reasoning panel + content
     // slot (typing first). The reasoning panel appears only once reasoning
     // tokens arrive; it is auto-open while thinking and collapses on
     // completion (the toggle re-expands it at any time).
-    const assistantEl = appendMessage(
-      'assistant',
-      `<div class="agent-status hidden"></div>` +
-        `<div class="reasoning hidden collapsed">` +
-        `<button class="reasoning-toggle" type="button"><span class="reasoning-dot"></span>Reasoning / Thinking<span class="reasoning-chev">▾</span></button>` +
-        `<div class="reasoning-body"><pre class="reasoning-text"></pre></div>` +
-        `</div>` +
-        `<div class="agent-content"><span class="typing"><span></span><span></span><span></span></span></div>`
-    );
-    const statusEl = assistantEl.querySelector('.agent-status');
-    const reasoningEl = assistantEl.querySelector('.reasoning');
-    const reasoningTextEl = assistantEl.querySelector('.reasoning-text');
-    // NOTE: no toggle binding here — appendMessage's bubble-level delegation
-    // already owns .reasoning-toggle clicks (a second binding on the same
-    // button would toggle twice per click and silently cancel out).
-    const contentEl = assistantEl.querySelector('.agent-content');
+    stream.refs = buildAssistantBubble();
+    // LIVE refs: reattachStreamUI() replaces stream.refs when the user
+    // switches back mid-turn — every DOM write must read the CURRENT refs
+    // (a one-time destructure would keep writing into the detached bubble).
+    const refs = () => stream.refs || {};
     // Live-stream accumulation: reasoning trace + visible answer text,
     // split/pumped per SSE delta (see pumpStream above).
     const st = streamState();
+    // View check evaluated at USE time: the user may switch sessions
+    // mid-stream; handleData re-evaluates per event, the completion/finally
+    // paths below re-check when they run.
+    const viewingNow = () => sid === state.currentId;
     let typingOn = true;
-    const statuses = [];
     const addToolStatus = (msg) => {
-      if (typingOn) { typingOn = false; contentEl.innerHTML = ''; }
-      statusEl.classList.remove('hidden');
+      if (typingOn) { typingOn = false; refs().contentEl.innerHTML = ''; }
+      refs().statusEl.classList.remove('hidden');
       const line = document.createElement('div');
       line.className = 'tool-line' + (msg && msg.trim().startsWith('\u26a0') ? ' err' : '');
       line.textContent = msg || '';
-      statusEl.appendChild(line);
+      refs().statusEl.appendChild(line);
       scrollToBottom();
     };
     let reqUsage = null; // usage from THIS request only (tokens + elapsedMs)
@@ -2193,7 +2386,7 @@
     const captureUsage = (u) => {
       reqUsage = u;
       state.lastUsage = {
-        sessionId: state.currentId,
+        sessionId: sid, // the STREAM's session — not state.currentId (view)
         prompt_tokens: u.prompt_tokens,
         completion_tokens: u.completion_tokens,
       };
@@ -2207,6 +2400,7 @@
     // abortable stream
     const ac = new AbortController();
     state.abortController = ac;
+    stream.abort = ac;
     let full = ''; // accumulated assistant text, visible to the abort handler
 
     // Paint the current stream state into the DOM without re-parsing the
@@ -2216,20 +2410,20 @@
     const liveRender = () => {
       if (typingOn && (st.text || st.reasoning)) {
         typingOn = false;
-        contentEl.innerHTML = '';
+        refs().contentEl.innerHTML = '';
       }
-      if (contentEl.textContent !== st.text) contentEl.textContent = st.text;
+      if (refs().contentEl.textContent !== st.text) refs().contentEl.textContent = st.text;
       if (st.reasoning) {
-        reasoningEl.classList.remove('hidden');
-        reasoningEl.classList.remove('collapsed');
-        reasoningEl.classList.add('streaming');
-        reasoningTextEl.textContent = st.reasoning.trim();
+        refs().reasoningEl.classList.remove('hidden');
+        refs().reasoningEl.classList.remove('collapsed');
+        refs().reasoningEl.classList.add('streaming');
+        refs().reasoningTextEl.textContent = st.reasoning.trim();
       }
       // The final answer has started: thinking is done — stop the pulsing
       // dot and collapse the panel (the toggle re-expands it anytime).
-      if (st.text && reasoningEl.classList.contains('streaming')) {
-        reasoningEl.classList.remove('streaming');
-        reasoningEl.classList.add('collapsed');
+      if (st.text && refs().reasoningEl.classList.contains('streaming')) {
+        refs().reasoningEl.classList.remove('streaming');
+        refs().reasoningEl.classList.add('collapsed');
       }
       scrollToBottom();
     };
@@ -2238,18 +2432,23 @@
     // collapse the panel (the toggle re-expands it); hide it entirely when
     // nothing was streamed.
     const pushReasoning = (reasoning) => {
-      reasoningEl.classList.remove('streaming');
-      reasoningEl.classList.add('collapsed');
-      if (!reasoning) reasoningEl.classList.add('hidden');
+      refs().reasoningEl.classList.remove('streaming');
+      refs().reasoningEl.classList.add('collapsed');
+      if (!reasoning) refs().reasoningEl.classList.add('hidden');
     };
 
     const handleData = (json) => {
+      // DOM writes below only apply while THIS session is the visible one;
+      // buffering into the stream record happens ALWAYS so a re-attach can
+      // replay everything.
+      const viewing = sid === state.currentId;
       if (json.type === 'tool') {
-        // Durable tool-step record: persisted into the session history so
-        // tool rounds survive session switches/refreshes (renderMessages
-        // replays them as collapsible cards). Live activity stays in the
-        // transient ⚙ status feed — no DOM duplication.
-        state.currentMessages.push({
+        // Durable tool-step record: persisted into the session's OWN history
+        // (state.currentMessages is re-pointed per view — never coroutine
+        // into it) so tool rounds survive session switches/refreshes;
+        // renderMessages replays them as collapsible cards. Live activity
+        // stays in the transient ⚙ status feed — no DOM duplication.
+        sessionMessages.push({
           role: 'tool',
           tool: json.tool,
           args: json.args,
@@ -2263,8 +2462,8 @@
         return;
       }
       if (json.type === 'status') {
-        statuses.push(json.message || '');
-        addToolStatus(json.message || '');
+        stream.statuses.push(json.message || '');
+        if (viewing) addToolStatus(json.message || '');
         return;
       }
       if (json.type === 'round') {
@@ -2279,19 +2478,27 @@
           st.raw = '';
           st.mode = 'answer';
           full = '';
-          if (had) {
-            contentEl.textContent = '';
-            reasoningEl.classList.add('hidden');
-            reasoningTextEl.textContent = '';
+          stream.text = '';
+          stream.reasoning = '';
+          if (viewing && had) {
+            refs().contentEl.textContent = '';
+            refs().reasoningEl.classList.add('hidden');
+            refs().reasoningTextEl.textContent = '';
           }
         }
         return;
       }
       const d = json.choices?.[0]?.delta || {};
-      if (typeof d.reasoning === 'string' && d.reasoning) st.reasoning += d.reasoning;
+      if (typeof d.reasoning === 'string' && d.reasoning) {
+        st.reasoning += d.reasoning;
+        stream.reasoning = st.reasoning;
+      }
       if (typeof d.content === 'string' && d.content) pumpStream(st, d.content);
-      if (st.text !== full) full = st.text;
-      if (st.text || st.reasoning) liveRender();
+      if (st.text !== full) {
+        full = st.text;
+        stream.text = full;
+      }
+      if (viewing && (st.text || st.reasoning)) liveRender();
       if (json.usage) captureUsage(json.usage);
       if (json.timings) captureTimings(json.timings);
     };
@@ -2301,6 +2508,10 @@
         {
           messages: apiMessages,
           stream: true,
+          // Session id for the turn-state registry: enables backend re-attach
+          // (GET /api/chat/state/:sessionId) after a lost reader. Never part
+          // of the model history.
+          sessionId: sid || undefined,
           generation: { ...state.settings },
           reasoningLevel: state.reasoningLevel,
           ...(sentAttachments.length
@@ -2343,11 +2554,11 @@
           try { handleData(JSON.parse(data)); } catch { /* partial chunk */ }
         }
 
-        if (full) {
+        if (viewingNow() && full) {
           // Live plain-text paint per chunk (markdown only at the end) —
           // re-parsing the whole message on every token flickers and stalls
           // on long outputs; textContent stays smooth at any token rate.
-          if (contentEl.textContent !== full) contentEl.textContent = full;
+          if (refs().contentEl.textContent !== full) refs().contentEl.textContent = full;
           scrollToBottom();
         }
       }
@@ -2362,9 +2573,9 @@
 
       // If the only output was an error status, surface it instead of an empty answer.
       if (!full && !st.reasoning) {
-        const errStatus = statuses.find((s) => s && s.trim().startsWith('\u26a0'));
+        const errStatus = stream.statuses.find((s) => s && s.trim().startsWith('\u26a0'));
         if (errStatus) {
-          contentEl.innerHTML =
+          refs().contentEl.innerHTML =
             `<div class="text-red-500 dark:text-red-400 font-medium">⚠️ ${escapeHtml(errStatus.replace(/^\u26a0\s*/, ''))}</div>`;
           scrollToBottom();
           return; // finally still runs
@@ -2373,70 +2584,83 @@
       }
 
       const metaText = genMetaText(reqUsage, reqTimings);
-      state.currentMessages.push({
+      sessionMessages.push({
         role: 'assistant',
         content: full,
         ...(st.reasoning ? { reasoning: st.reasoning.trim() } : {}),
         meta: metaText,
       });
-      pushReasoning(st.reasoning);
-      contentEl.innerHTML = marked.parse(full);
-      attachCopyButtons(contentEl);
-      if (metaText) {
-        const metaEl = document.createElement('div');
-        metaEl.className = 'msg-meta';
-        metaEl.textContent = metaText;
-        // KV-cache / throughput detail moves to the hover tooltip so the
-        // visible badge stays strictly "duration · this response's tokens".
-        const tip = genMetaTooltip(reqUsage, reqTimings);
-        if (tip) metaEl.title = 'Footer badges: duration + tokens generated by this response only. ' + tip;
-        assistantEl.appendChild(metaEl);
+      if (viewingNow()) {
+        pushReasoning(st.reasoning);
+        refs().contentEl.innerHTML = marked.parse(full);
+        attachCopyButtons(refs().contentEl);
+        if (metaText) {
+          const metaEl = document.createElement('div');
+          metaEl.className = 'msg-meta';
+          metaEl.textContent = metaText;
+          // KV-cache / throughput detail moves to the hover tooltip so the
+          // visible badge stays strictly "duration · this response's tokens".
+          const tip = genMetaTooltip(reqUsage, reqTimings);
+          if (tip) metaEl.title = 'Footer badges: duration + tokens generated by this response only. ' + tip;
+          refs().assistantEl.appendChild(metaEl);
+        }
+        scrollToBottom();
       }
-      scrollToBottom();
-      await persistSession();
+      await persistSession(sessionMessages, sid);
       updateBudget();
     } catch (err) {
       const aborted = err && err.name === 'AbortError';
       if (aborted) {
         // User pressed Stop: freeze whatever partial response arrived.
         if (full || st.reasoning) {
-          state.currentMessages.push({
+          sessionMessages.push({
             role: 'assistant',
             content: full,
             ...(st.reasoning ? { reasoning: st.reasoning.trim() } : {}),
             meta: genMetaText(reqUsage, reqTimings),
           });
-          pushReasoning(st.reasoning);
-          contentEl.innerHTML = marked.parse(full);
-          attachCopyButtons(contentEl);
-          const note = document.createElement('div');
-          note.className = 'stop-note';
-          note.textContent = '⏹ Generation stopped — partial response kept.';
-          messagesEl.appendChild(note);
-          scrollToBottom();
-        } else {
+          if (viewingNow()) {
+            pushReasoning(st.reasoning);
+            refs().contentEl.innerHTML = marked.parse(full);
+            attachCopyButtons(refs().contentEl);
+            const note = document.createElement('div');
+            note.className = 'stop-note';
+            note.textContent = '⏹ Generation stopped — partial response kept.';
+            messagesEl.appendChild(note);
+            scrollToBottom();
+          }
+        } else if (viewingNow()) {
           // Stopped before any content arrived — drop the typing placeholder
           // but keep the user's message. Reset the assistant slot cleanly.
-          assistantEl.remove();
+          refs().assistantEl.remove();
         }
-        await persistSession();
+        await persistSession(sessionMessages, sid);
         updateBudget();
       } else {
-        contentEl.innerHTML =
-          `<div class="text-red-500 dark:text-red-400 font-medium">⚠️ ${escapeHtml(err.message)}</div>` +
-          `<div class="text-sm mt-1 text-gray-500 dark:text-gray-400">This request was retried automatically. If it keeps failing, the active model endpoint may be unavailable — check the Models panel or the llama.cpp server.</div>`;
-        scrollToBottom();
+        if (viewingNow()) {
+          refs().contentEl.innerHTML =
+            `<div class="text-red-500 dark:text-red-400 font-medium">⚠️ ${escapeHtml(err.message)}</div>` +
+            `<div class="text-sm mt-1 text-gray-500 dark:text-gray-400">This request was retried automatically. If it keeps failing, the active model endpoint may be unavailable — check the Models panel or the llama.cpp server.</div>`;
+          scrollToBottom();
+        }
       }
     } finally {
       if (state.abortController === ac) state.abortController = null;
-      setStreamingUI(false);
-      stopGenTimer();
+      stream.done = true;
+      delete state.activeStreams[sid];
+      renderSessionList(); // pulse off for this session
+      if (sid === state.currentId) stopGenTimer();
+      syncStreamingUI();
       refreshModelStatus(); // badge returns to the real lifecycle state
     }
   }
 
   function stopGeneration() {
-    if (state.abortController) state.abortController.abort();
+    // Stop targets the ACTIVE VIEW's stream (per-session registry); a
+    // stream running for another session keeps going in the background.
+    const s = state.activeStreams[state.currentId];
+    if (s && !s.done) s.abort.abort();
+    else if (state.abortController) state.abortController.abort();
   }
 
   const SEND_ICON = `<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">

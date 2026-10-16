@@ -1,5 +1,5 @@
 {
-  "activeId": "nemotron-3-ultra-550b-a55b",
+  "activeId": "nemotron-3-5",
   "models": [
     {
       "id": "qwen-coder",
@@ -142,6 +142,17 @@
       "endpoint": "https://integrate.api.nvidia.com/v1",
       "model": "nvidia/nemotron-3-ultra-550b-a55b",
       "contextLength": 500000,
+      "role": "",
+      "templateId": "",
+      "hasKey": true
+    },
+    {
+      "id": "nvidia-deepseek-v4-flash",
+      "name": "deepseek-v4.1-flash",
+      "provider": "remote",
+      "endpoint": "https://integrate.api.nvidia.com/v1",
+      "model": "deepseek-ai/deepseek-v4.1-flash",
+      "contextLength": 1000000,
       "role": "",
       "templateId": "",
       "hasKey": true
