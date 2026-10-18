@@ -108,7 +108,8 @@ const writeFileTool = {
       path: { type: 'string', description: 'Workspace-relative file path, e.g. "scripts/get_solana_price.py"' },
       content: {
         type: ['string', 'array'],
-        description: 'File content, or an array of lines joined with newlines',
+        description:
+          'File content, or an array of lines. JSON RULE: code inside this string must escape every internal double quote as \\" — e.g. data["solana"] is written data[\\"solana\\"]. One file per call; never nest raw or fenced code into deep JSON (prefer write_file sequentially for each script file).',
       },
     },
     required: ['path', 'content'],

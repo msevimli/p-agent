@@ -46,7 +46,7 @@ const runSkillTool = {
 const writeSkillTool = {
   name: 'write_skill',
   description:
-    'Create or update a skill: name + description + files map {"run.js": "<code>"} (run.js is the default entry). Optional instructions become the SKILL.md body.',
+    'Create or update a skill: name + description + files map {"run.js": "<code>"} (run.js is the default entry). Optional instructions become the SKILL.md body. JSON RULE: escape every internal double quote inside the content strings as \\" — e.g. data["solana"] becomes data[\\"solana\\"]; for large or quote-heavy code prefer ONE write_file call per script file instead of nesting many files in this map.',
   parameters: {
     type: 'object',
     properties: {

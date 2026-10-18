@@ -203,6 +203,81 @@ function ok(name, got, want) {
   t('toolCallParser repairs double-encoded arguments', fb.ok === true && fb.calls.length === 1 && fb.calls[0].args.command === 'node -e "console.log(1)"', JSON.stringify(fb.calls));
 }
 
+// ----------------------------------------------------------------------
+// 13. CODE PAYLOADS — embedded script quotes in write_file / write_skill
+//     values (the reported edge case: `data["solana"]["usd"]`, f-strings).
+//     Strays sit ANYWHERE in the value, often 6+ at once — beyond the
+//     tail-combination budget — so the span-based code-quotes step must
+//     repair them.
+// ----------------------------------------------------------------------
+{
+  // The reported shape: quoted-string args + unescaped bracket lookups +
+  // f-string, far from the doc tail (literal \n escapes in the value).
+  const raw =
+    '{"tool":"write_file","args":{"path":"run.py","content":"import requests\\ndata = requests.get(url).json()["solana"]["usd"]\\nprint(f"{value}")"}}';
+  const r = parseJsonRepaired(raw);
+  const want = 'import requests\ndata = requests.get(url).json()["solana"]["usd"]\nprint(f"{value}")';
+  t('code payload: bracket lookups + f-string repaired (exact content)', r.ok && r.repaired === true && r.value.args.content === want, r.ok ? JSON.stringify(r.value.args.content) : 'FAIL');
+  t('code payload: repaired via the code-quotes step', r.repaired === true && r.steps.includes('code-quotes'), JSON.stringify(r.steps));
+}
+{
+  // Same payload with RAW newlines (must compose with squashControlChars).
+  const raw = '{"tool":"write_file","args":{"path":"run.py","content":"import requests\n' + 'data = requests.get(url).json()["solana"]["usd"]\n' + 'print(f"{value}")"}}';
+  const r = parseJsonRepaired(raw);
+  t('code payload: raw-newline variant repaired', r.ok && r.value.args.content === 'import requests\ndata = requests.get(url).json()["solana"]["usd"]\nprint(f"{value}")', r.ok ? JSON.stringify(r.value.args.content) : 'FAIL');
+}
+{
+  // Multi-file skills map: TWO broken values, both escaped in one pass.
+  const raw = '{"tool":"write_skill","args":{"name":"p","files":{"run.py":"print(d["a"])","main.py":"x = f"{y}""}}}';
+  const r = parseJsonRepaired(raw);
+  t('code payload: write_skill files map (two values) repaired', r.ok && r.repaired === true && r.value.args.files['run.py'] === 'print(d["a"])' && r.value.args.files['main.py'] === 'x = f"{y}"', r.ok ? JSON.stringify(r.value.args.files) : 'FAIL');
+}
+{
+  // Array literal in code makes the first comma-followed quote a FALSE
+  // closer — the second/third closer choice must recover.
+  const raw = '{"tool":"write_file","args":{"path":"t.py","content":"items = ["a", "b"]\\nfor i in items:\\n    print(i)\\ndone = f"{n} ok""}}';
+  const r = parseJsonRepaired(raw);
+  const want = 'items = ["a", "b"]\nfor i in items:\n    print(i)\ndone = f"{n} ok"';
+  t('code payload: array-literal false closer recovered', r.ok && r.value.args.content === want, r.ok ? JSON.stringify(r.value.args.content) : 'FAIL');
+}
+{
+  // Dict literal INSIDE the code: `{"a": "b"}` — the inner b-close followed
+  // by } is a false closer; the true closer still wins.
+  const raw = '{"tool":"write_file","args":{"path":"c.py","content":"cfg = {"a": "b"}; print(cfg["a"])"}}';
+  const r = parseJsonRepaired(raw);
+  t('code payload: dict literal inside code repaired', r.ok && r.value.args.content === 'cfg = {"a": "b"}; print(cfg["a"])', r.ok ? JSON.stringify(r.value.args.content) : 'FAIL');
+}
+{
+  // Prose with UNESCAPED quotes (same defect class, text instead of code).
+  const raw = '{"tool":"write_file","args":{"path":"a.txt","content":"say "hi" then "bye""}}';
+  const r = parseJsonRepaired(raw);
+  t('code payload: prose quotes in a value repaired', r.ok && r.value.args.content === 'say "hi" then "bye"', r.ok ? JSON.stringify(r.value.args.content) : 'FAIL');
+}
+{
+  // Mixed: properly escaped quotes PRESERVED while strays get escaped.
+  const raw = '{"tool":"write_file","args":{"path":"b.txt","content":"use \\"escaped\\" and "oops""}}';
+  const r = parseJsonRepaired(raw);
+  t('code payload: escaped quotes preserved, strays escaped', r.ok && r.value.args.content === 'use "escaped" and "oops"', r.ok ? JSON.stringify(r.value.args.content) : 'FAIL');
+}
+{
+  // Early-position strays with a LATER healthy value (strays not in the
+  // tail window; per-value span repair must find them anyway).
+  const raw = '{"tool":"write_skill","args":{"name":"s","files":{"gen.py":"out = open("f.txt", "w")\\nout.write(data["k"])","readme.md":"# fine"}}}';
+  const r = parseJsonRepaired(raw);
+  t('code payload: early strays + healthy sibling repaired', r.ok && r.value.args.files['gen.py'] === 'out = open("f.txt", "w")\nout.write(data["k"])', r.ok ? JSON.stringify(r.value.args.files) : 'FAIL');
+}
+{
+  // REGRESSION: the dual-role boundary shape must STILL be rejected
+  // (structural gate + keysClean — never a mangled-but-parseable accept).
+  const r = parseJsonRepaired('{"tool": "write_file", "args": {"path": "x.txt", "content:"broken"}}');
+  t('REGRESSION: dual-role boundary shape still rejected', r.ok === false, JSON.stringify(r.steps));
+}
+{
+  // REGRESSION: hopeless payload stays rejected (no over-guessing).
+  const r = parseJsonRepaired('{"tool":"write_file","args":{"content":"still open');
+  t('REGRESSION: hopeless payload stays rejected', r.ok === false, JSON.stringify(r.steps));
+}
+
 const fails = results.filter((x) => x.startsWith('FAIL')).length;
 console.log(results.join('\n'));
 console.log(`\n${results.length - fails}/${results.length} json-repair checks passed${fails ? ` (${fails} FAILED)` : ''}`);

@@ -3,9 +3,10 @@
  *
  * High-capability cloud models (Nemotron via OpenRouter, etc.) occasionally
  * emit tool-call payloads that fail strict JSON.parse: unescaped quotes or
- * newlines inside nested inline commands (`node -e "…"`), single-quoted
- * strings, unquoted keys, trailing commas, smart/curly quotes, Python-ish
- * None/True/False, truncation.
+ * newlines inside nested inline commands (`node -e "…"`), embedded script
+ * code in write_file/write_skill values (`data["solana"]["usd"]`, `f"{x}"`),
+ * single-quoted strings, unquoted keys, trailing commas, smart/curly quotes,
+ * Python-ish None/True/False, truncation.
  *
  * SAFETY CONTRACT (the parse gate):
  *  - The fast path returns the ORIGINAL parse result untouched — repair only
@@ -277,6 +278,123 @@ function escapeStrayQuotes(s) {
 const TAIL_WINDOW = 6;
 
 /**
+ * Step 8c — CODE-PAYLOAD value escapes: models embedding script/file text
+ * in string values (write_file content, write_skill files maps, run_shell
+ * commands) routinely leave the code's own quotes UNESCAPED
+ * (`data["solana"]["usd"]`, `f"{val}"`). Those strays sit anywhere in the
+ * value — often FAR from the tail and 6+ at once — so the tail-combination
+ * step can never reach them (k <= 4 over the last 6 quotes). This step
+ * finds every `"key": "` VALUE OPENING quote and the value's likely
+ * CLOSING quote (the next unescaped quote followed by `,`/`}`/EOF; `]` is
+ * deliberately not structural — `d["k"]` would cut the value at the
+ * bracket), then escapes everything between the two. `items = ["a", "b"]`
+ * code makes the first comma-followed quote a FALSE closer, so up to three
+ * closer choices are tried per value plus COMBINED variants fixing every
+ * span at once (multi-file skills). Parse-verified by the caller; the
+ * boundary gate rejects candidates whose escaped quote swallows a
+ * `,"key":` boundary, so the repair can never merge two JSON pairs.
+ */
+function escapeCodeValueQuotes(s) {
+  // 1) Every value-opening quote: `"<key>": "` (keys were already quoted
+  //    by step 5; nested maps like `"files": {"run.py": "…"}` have the same
+  //    shape for their inner keys).
+  const openers = [];
+  const re = /"([A-Za-z_$][A-Za-z0-9_$-]*(?:\.[A-Za-z0-9_$-]+)*)"\s*:\s*"/g;
+  let m;
+  while ((m = re.exec(s)) !== null) openers.push(m.index + m[0].length - 1);
+  if (!openers.length) return [];
+
+  const isEscaped = (i) => {
+    let b = 0;
+    for (let j = i - 1; j >= 0 && s[j] === "\\"; j--) b++;
+    return b % 2 === 1;
+  };
+  const followedByStruct = (i) => {
+    let j = i + 1;
+    while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n' || s[j] === '\r')) j++;
+    if (j >= s.length) return true; // EOF is the last value's closer
+    return s[j] === ',' || s[j] === '}';
+  };
+  /** Escape every unescaped quote strictly between opener o and closer c.
+   *  Keeps the WHOLE document: prefix (0..o inclusive) + escaped span +
+   *  suffix (c..end) — per-value candidates must be complete docs. */
+  const escapeSpan = (o, c) => {
+    let out = s.slice(0, o + 1);
+    let last = o + 1;
+    for (let p = o + 1; p < c; p++) {
+      if (s[p] !== '"' || isEscaped(p)) continue;
+      out += s.slice(last, p) + "\\\"";
+      last = p + 1;
+    }
+    return out + s.slice(last);
+  };
+
+  const candidates = [];
+  // STRUCTURAL-BOUNDARY GATE (same contract as the tail-combo step): an
+  // escaped quote immediately followed by a next key — comma-key-colon or
+  // key-colon (plain or already-escaped key quotes) — merges two key/value
+  // pairs into one string that still parses (the tool-value swallows the
+  // args object): reject. Code dicts ({a: b, c: d} inside a value)
+  // textually match and may be dropped: a clean rejection + one
+  // corrective round beats a silently mangled execution.
+  const hasBoundaryViolation = (c) => {
+    if (/\\"[\s\t\n\r]*,\s*(?:\\"|")[A-Za-z_$][A-Za-z0-9_$-]*(?:\\"|")\s*:/.test(c)) return true;
+    if (/\\"[\s\t\n\r]*(?:\\"|")[A-Za-z_$][A-Za-z0-9_$-]*(?:\\"|")\s*:/.test(c)) return true;
+    if (/\\"[\s\t\n\r]*,\s*(?:\\"|"|")[A-Za-z_$][A-Za-z0-9_$-]*\s*:\s*(?:\\"|"|")/.test(c)) return true;
+    return false;
+  };
+  // 2) COMBINED: every opener gets its FIRST structural closer and all
+  //    spans are escaped at once (multi-file skills maps). Nested spans
+  //    overlapping an earlier one are skipped — the outer span covers them.
+  {
+    const spans = [];
+    let prev = -1;
+    for (let i = 0; i < Math.min(openers.length, 4); i++) {
+      const o = openers[i];
+      let c = -1;
+      for (let q = o + 1; q < s.length; q++) {
+        if (s[q] !== '"' || isEscaped(q)) continue;
+        if (followedByStruct(q)) { c = q; break; }
+      }
+      if (c > o + 1 && o >= prev) { spans.push([o, c]); prev = c; }
+    }
+    if (spans.length) {
+      let out = '';
+      let last = 0;
+      for (const [o, c] of spans) {
+        out += s.slice(last, o + 1);
+        let last2 = o + 1;
+        for (let p = o + 1; p < c; p++) {
+          if (s[p] !== '"' || isEscaped(p)) continue;
+          out += s.slice(last2, p) + "\\\"";
+          last2 = p + 1;
+        }
+        out += s.slice(last2, c);
+        last = c;
+      }
+      out += s.slice(last);
+      if (out !== s && !hasBoundaryViolation(out)) candidates.push(out);
+    }
+  }
+  // 3) Per-value candidates — up to three closer choices per opener
+  //    (first = plain case; second/third = array-literal / dict-literal
+  //    code where an interior quote is followed by `,` or `}`).
+  for (let i = 0; i < Math.min(openers.length, 3); i++) {
+    const o = openers[i];
+    const closers = [];
+    for (let q = o + 1; q < s.length && closers.length < 3; q++) {
+      if (s[q] !== '"' || isEscaped(q)) continue;
+      if (followedByStruct(q)) closers.push(q);
+    }
+    for (const c of closers) {
+      if (c <= o + 1) continue;
+      const cand = escapeSpan(o, c);
+      if (cand && !hasBoundaryViolation(cand)) candidates.push(cand);
+    }
+  }
+  return candidates.slice(0, 12);
+}
+/**
  * Step 9 — truncation repair: if the scanner ends inside structure (not a
  * string) with small depth, append the missing closers. Unambiguous-ish
  * (the doc was already unparseable; the candidate still has to parse).
@@ -379,6 +497,20 @@ function parseJsonRepaired(raw) {
     steps.push(name);
     t = candidate; // chain: later transforms build on the repaired shape
   }
+
+  // Code-payload value escapes FIRST (write_file content / write_skill
+  // files with unescaped bracket or f-string quotes anywhere in the value —
+  // the tail-combo step below cannot reach 6+ strays or early-position
+  // ones, and the boundary gate must never guess among many candidates).
+  for (const candidate of escapeCodeValueQuotes(t)) {
+    try {
+      const value = JSON.parse(candidate);
+      if (accept(value)) {
+        return { ok: true, value, repaired: true, steps: [...steps, 'code-quotes'] };
+      }
+    } catch { /* next candidate */ }
+  }
+  if (!steps.includes('code-quotes')) steps.push('code-quotes');
 
   // Quote-escape candidates (each verified).
   for (const candidate of escapeStrayQuotes(t)) {
