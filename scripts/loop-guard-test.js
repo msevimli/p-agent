@@ -2,13 +2,13 @@
 /**
  * Regression tests for the tool-loop bugfixes:
  *
- *  1. Dedup guard (services/toolLoop.js): an exact repeat of a tool call
- *     (same name + canonical args) within one chat request is refused and the
- *     model gets a "duplicate tool call skipped" result instead of a second
- *     physical execution. run_shell is exempt from that ledger but has its
- *     own CONSECUTIVE guard: a back-to-back repeat of the identical command
- *     that just succeeded is skipped; repeats after other steps and retries
- *     of failed commands still execute.
+ *  1. NO duplicate suppression (services/toolLoop.js): identical repeats of
+ *     any tool call — including back-to-back run_shell commands, repeated
+ *     reads, and delete-after-create — all EXECUTE. The reported failure
+ *     mode was the opposite: a model re-running a grep or re-reading a file
+ *     after an edit got blocked as a "duplicate". The only remaining bounds
+ *     are the per-request execution-round ceiling and the static anti-spam
+ *     guardrails (chmod-on-.py, missing-logs hint).
  *  2. joinToolCallArgs (services/llamaClient.js): re-joins fragmented
  *     streaming tool-call arguments on JSON token boundaries.
  *  3. Automation enforcement settle (routes/chat.js): a model that creates
@@ -99,30 +99,36 @@ function restoreState() {
   }
 
   // =========================================================================
-  // 2) Dedup guard (unit level, real registry, throwaway workRoot)
+  // 2) NO duplicate suppression (unit level, real registry, throwaway
+  //    workRoot): every identical repeat executes and returns fresh state.
   // =========================================================================
-  toolLoop.resetSeenCalls();
   {
-    const W = path.join(process.env.PLIFE_WORK_ROOT, 'scripts', '__dedup_probe.txt'); // inside temp workRoot
-    const r1 = await toolLoop.executeTool('write_file', { path: 'scripts/__dedup_probe.txt', content: 'one' });
-    const r2 = await toolLoop.executeTool('write_file', { path: 'scripts/__dedup_probe.txt', content: 'one' });
+    // The reported scenario: write (edit) → re-run checks — all execute.
+    const W = path.join(process.env.PLIFE_WORK_ROOT, 'scripts', '__repeat_probe.txt');
+    const r1 = await toolLoop.executeTool('write_file', { path: 'scripts/__repeat_probe.txt', content: 'one' });
+    const r2 = await toolLoop.executeTool('write_file', { path: 'scripts/__repeat_probe.txt', content: 'one' });
     const afterDup = fs.readFileSync(W, 'utf8');
-    const r3 = await toolLoop.executeTool('write_file', { path: 'scripts/__dedup_probe.txt', content: 'two' });
-    t('dedup: first write executes', r1.ok === true, JSON.stringify(r1));
-    t('dedup: identical repeat skipped', !r2.ok && r2.skippedDuplicate === true, JSON.stringify(r2));
-    t('dedup: different content still executes', r3.ok === true, JSON.stringify(r3));
-    t('dedup: file not clobbered by dup', afterDup === 'one');
+    const r3 = await toolLoop.executeTool('write_file', { path: 'scripts/__repeat_probe.txt', content: 'two' });
+    const rr1 = await toolLoop.executeTool('read_file', { path: 'scripts/__repeat_probe.txt' });
+    const rr2 = await toolLoop.executeTool('read_file', { path: 'scripts/__repeat_probe.txt' });
+    const rp = await toolLoop.executeTool('run_shell', { command: 'grep -c two scripts/__repeat_probe.txt' });
+    const rp2 = await toolLoop.executeTool('run_shell', { command: 'grep -c two scripts/__repeat_probe.txt' });
+    t('repeat: first write executes', r1.ok === true, JSON.stringify(r1));
+    t('repeat: identical write executes again (no skip)', r2.ok === true && !r2.skippedDuplicate, JSON.stringify(r2));
+    t('repeat: identical write overwrote the file (real execution)', afterDup === 'one');
+    t('repeat: different content executes', r3.ok === true, JSON.stringify(r3));
+    t('repeat: identical read executes (fresh result, no skip)', rr1.ok === true && rr2.ok === true && !rr2.skippedDuplicate && rr2.content.includes('two'), JSON.stringify(rr2).slice(0, 120));
+    t('repeat: identical grep re-run executes (verification after edit)', rp.ok === true && rp2.ok === true && !rp2.skippedDuplicate && /1/.test(String(rp2.stdout || '')), JSON.stringify(rp2).slice(0, 120));
 
-    // delete_file: single-file deletion strictly inside the sandbox
-    toolLoop.resetSeenCalls();
+    // delete_file: single-file deletion strictly inside the sandbox — and a
+    // repeat of the delete EXECUTES too (clean missing-file error, no skip)
     const P = 'scripts/__del_probe.txt';
     await toolLoop.executeTool('write_file', { path: P, content: 'bye' });
-    toolLoop.resetSeenCalls(); // fresh request — a delete of it is legitimate
     const d1 = await toolLoop.executeTool('delete_file', { path: P });
     t('delete_file: removes an existing file', d1.ok === true && d1.deleted === true, JSON.stringify(d1));
     t('delete_file: file really gone', !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, P)));
     const d2 = await toolLoop.executeTool('delete_file', { path: P });
-    t('delete_file: identical repeat is deduped (no second attempt)', !d2.ok && d2.skippedDuplicate === true, JSON.stringify(d2));
+    t('delete_file: identical repeat executes (clean missing-file error)', !d2.ok && !d2.skippedDuplicate && /no such file/.test(d2.error || ''), JSON.stringify(d2));
     const d2b = await toolLoop.executeTool('delete_file', { path: 'nope.txt' });
     t('delete_file: missing file reports cleanly', !d2b.ok && /no such file/.test(d2b.error || ''), JSON.stringify(d2b));
     const d3 = await toolLoop.executeTool('delete_file', { path: 'scripts' });
@@ -140,24 +146,18 @@ function restoreState() {
       fs.mkdirSync(path.join(D, 'scripts'), { recursive: true });
       fs.writeFileSync(path.join(D, 'scripts', '__norm_probe.txt'), 'norm-probe-content');
       fs.writeFileSync(path.join(D, 'scripts', '__norm_del.txt'), 'x');
-      toolLoop.resetSeenCalls();
       const r1 = await toolLoop.executeTool('read_file', { file: 'scripts/__norm_probe.txt' });
       t('arg-norm: read_file with {file:...} executes', r1.ok === true && /norm-probe-content/.test(r1.content || ''), JSON.stringify(r1).slice(0, 120));
-      toolLoop.resetSeenCalls();
       const r2 = await toolLoop.executeTool('read_file', 'scripts/__norm_probe.txt');
       t('arg-norm: read_file with bare string args executes', r2.ok === true && r2.path === 'scripts/__norm_probe.txt', JSON.stringify(r2).slice(0, 120));
-      toolLoop.resetSeenCalls();
       const r3 = await toolLoop.executeTool('read_file', { filename: 'scripts/__norm_probe.txt' });
       t('arg-norm: read_file with {filename:...} executes', r3.ok === true && r3.path === 'scripts/__norm_probe.txt', JSON.stringify(r3).slice(0, 120));
-      toolLoop.resetSeenCalls();
       const r4 = await toolLoop.executeTool('write_file', { file: 'scripts/__norm_probe2.txt', content: 'written via alias' });
       t('arg-norm: write_file with {file, content} executes', r4.ok === true && fs.readFileSync(path.join(D, 'scripts', '__norm_probe2.txt'), 'utf8') === 'written via alias', JSON.stringify(r4));
       const r4b = await toolLoop.executeTool('write_file', { file: 'scripts/__norm_probe2.txt', content: 'written via alias' });
-      t('arg-norm: alias-keyed repeat dedups identically', !r4b.ok && r4b.skippedDuplicate === true, JSON.stringify(r4b));
-      toolLoop.resetSeenCalls();
+      t('arg-norm: alias-keyed repeat executes', r4b.ok === true && !r4b.skippedDuplicate, JSON.stringify(r4b));
       const r5 = await toolLoop.executeTool('delete_file', { src: 'scripts/__norm_del.txt' });
       t('arg-norm: delete_file with {src:...} executes', r5.ok === true && r5.deleted === true, JSON.stringify(r5));
-      toolLoop.resetSeenCalls();
       const r6 = await toolLoop.executeTool('edit_file', { file: 'scripts/__norm_probe.txt', old_text: 'norm-probe-content', new_text: 'edited' });
       t('arg-norm: edit_file with {file,...} executes', r6.ok === true && fs.readFileSync(path.join(D, 'scripts', '__norm_probe.txt'), 'utf8') === 'edited', JSON.stringify(r6));
       const r7 = await toolLoop.executeTool('read_file', {});
@@ -172,7 +172,6 @@ function restoreState() {
           // shell_command) and bare unkeyed strings map to `command` so the call
           // EXECUTES (the gemma 4B reported failure mode — empty/aliased commands)
           {
-            toolLoop.resetSeenCalls();
             for (const [alias, cmd] of [
               ['cmd', 'printf shell-norm-cmd'],
               ['exec', 'printf shell-norm-exec'],
@@ -183,7 +182,6 @@ function restoreState() {
               const r = await toolLoop.executeTool('run_shell', { [alias]: cmd });
               t(`arg-norm: run_shell {${alias}:...} executes`, r.ok === true && /shell-norm-/.test(String(r.stdout || '')), JSON.stringify(r).slice(0, 100));
             }
-            toolLoop.resetSeenCalls();
             const rs = await toolLoop.executeTool('run_shell', 'printf shell-norm-bare');
             t('arg-norm: run_shell bare string executes', rs.ok === true && /shell-norm-bare/.test(String(rs.stdout || '')), JSON.stringify(rs).slice(0, 100));
             const rEmpty = await toolLoop.executeTool('run_shell', {});
@@ -215,24 +213,21 @@ function restoreState() {
       t('batch: identical duplicates never share a group', g([WW('a.txt'), WW('a.txt')]).length === 2);
     }
 
-    // read-only list tools are exempt from the dedup ledger — a repeated
-    // list after a state change returns FRESH data, never a skip error
-    toolLoop.resetSeenCalls();
+    // repeated list after a state change returns FRESH data
     const la1 = await toolLoop.executeTool('list_automations', {});
     const la2 = await toolLoop.executeTool('list_automations', {});
-    t('list_automations: repeat executes (read-only, exempt from dedup)', la1.ok === true && la2.ok === true && !la2.skippedDuplicate, JSON.stringify(la2));
+    t('list_automations: repeat executes (fresh data, never a skip)', la1.ok === true && la2.ok === true && !la2.skippedDuplicate, JSON.stringify(la2));
 
-    // redundant-churn guard: no delete-and-recreate within one request
-    toolLoop.resetSeenCalls();
+    // No redundant-churn guard either: a delete of something created this
+    // request is a normal call and executes (the model decides; guidance
+    // only)
     await toolLoop.executeTool('write_file', { path: 'scripts/__churn.txt', content: 'x' });
     const ch1 = await toolLoop.executeTool('delete_file', { path: 'scripts/__churn.txt' });
-    t('churn: delete of file created this request is skipped', ch1.ok === false && ch1.skippedRedundant === true, JSON.stringify(ch1));
-    t('churn: the created file survives', fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, 'scripts/__churn.txt')));
-    toolLoop.resetSeenCalls(); // fresh request → the same delete is legitimate
+    t('churn: delete of file created this request executes', ch1.ok === true && ch1.deleted === true, JSON.stringify(ch1));
+    t('churn: the file is really gone', !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, 'scripts/__churn.txt')));
     const ch2 = await toolLoop.executeTool('delete_file', { path: 'scripts/__churn.txt' });
-    t('churn: same delete in a fresh request executes', ch2.ok === true && ch2.deleted === true, JSON.stringify(ch2));
+    t('churn: repeated delete reports the missing file cleanly', !ch2.ok && !ch2.skippedDuplicate && /no such file/.test(ch2.error || ''), JSON.stringify(ch2));
 
-    toolLoop.resetSeenCalls();
     const ca = await toolLoop.executeTool('create_automation', {
       name: 'Churn Temp',
       description: 'temp',
@@ -242,169 +237,109 @@ function restoreState() {
       script: 'scripts/churn.sh',
     });
     const da = await toolLoop.executeTool('delete_automation', { id: 'churn-temp' });
-    t('churn: delete of automation created this request is skipped', ca.ok === true && da.ok === false && da.skippedRedundant === true, JSON.stringify(da));
+    t('churn: automation delete executes right after create', ca.ok === true && da.ok === true, JSON.stringify(da));
 
-    // unit checks of the churn mapping (explicit ledger, slash normalization)
-    const uledger = [{ name: 'write_skill', args: { name: '/s1' } }];
-    t('churn: delete_skill maps to write_skill with slash normalization', toolLoop.createdEarlierInRequest('delete_skill', { name: 's1' }, uledger) !== null);
-    t('churn: unrelated delete has no churn', toolLoop.createdEarlierInRequest('delete_skill', { name: 'other' }, uledger) === null);
-    t('churn: slugifyId mirrors the store slug', toolLoop.slugifyId('Print Current Date and Time') === 'print-current-date-and-time');
-    t('churn: no churn when create failed earlier', toolLoop.createdEarlierInRequest('delete_automation', { id: 'x' }, []) === null);
+    // read repeat (identical re-reads execute — the verification workflow):
+    const rrA = await toolLoop.executeTool('read_file', { path: 'scripts/__repeat_probe.txt' });
+    const rrB = await toolLoop.executeTool('read_file', { path: 'scripts/__repeat_probe.txt' });
+    t('repeat: read_file repeat executes with fresh content', rrA.ok === true && rrB.ok === true && !rrB.skippedDuplicate && rrB.content.includes('two'), JSON.stringify(rrB).slice(0, 120));
 
-    // Reset clears the ledger:
-    toolLoop.resetSeenCalls();
-    const r4 = await toolLoop.executeTool('write_file', { path: 'scripts/__dedup_probe.txt', content: 'one' });
-    t('dedup: resetSeenCalls allows re-execution', r4.ok === true && !r4.skippedDuplicate, JSON.stringify(r4));
-
-    // read_file dedup:
-    const rd1 = await toolLoop.executeTool('read_file', { path: 'scripts/__dedup_probe.txt' });
-    const rd2 = await toolLoop.executeTool('read_file', { path: 'scripts/__dedup_probe.txt' });
-    t('dedup: read repeat skipped', rd1.ok && !rd2.ok && rd2.skippedDuplicate, JSON.stringify(rd2));
-
-    // run_shell is exempt from the exact-args ledger (intentional repeats
-    // stay possible), but the CONSECUTIVE guard (added later) refuses a
-    // back-to-back repeat of the identical command that JUST succeeded —
-    // re-quoted with the same tokens counts as identical. A repeat after an
-    // intervening different command executes (intentional double run), and a
-    // retry of a FAILED command executes (recovery).
-    toolLoop.resetSeenCalls();
+    // run_shell: no consecutive guard — identical back-to-back commands all
+    // execute (intentional double runs and verification re-runs both work)
     const sh1 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(1)"' });
     const sh2 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(1)"' });
-    t('dedup: run_shell back-to-back identical repeat skipped (consecutive guard)', sh1.ok && !sh2.ok && sh2.skippedDuplicate === true, JSON.stringify(sh2));
+    t('repeat: run_shell back-to-back identical repeat executes', sh1.ok && sh2.ok && !sh2.skippedDuplicate, JSON.stringify(sh2));
     const sh2b = await toolLoop.executeTool('run_shell', { command: "node -e 'console.log(1)'" });
-    t('dedup: re-quoted identical command still skipped back-to-back', !sh2b.ok && sh2b.skippedDuplicate === true, JSON.stringify(sh2b));
+    t('repeat: re-quoted identical command executes too', sh2b.ok === true && !sh2b.skippedDuplicate, JSON.stringify(sh2b));
     const sh3 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(2)"' });
     const sh4 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(1)"' });
-    t('dedup: repeat after another step executes (intentional double run)', sh3.ok && sh4.ok && !sh4.skippedDuplicate, JSON.stringify(sh4));
-    toolLoop.resetSeenCalls();
+    t('repeat: repeat after another step executes', sh3.ok && sh4.ok && !sh4.skippedDuplicate, JSON.stringify(sh4));
     const sf1 = await toolLoop.executeTool('run_shell', { command: 'node -e "process.exit(3)"' });
     const sf2 = await toolLoop.executeTool('run_shell', { command: 'node -e "process.exit(3)"' });
-    t('dedup: retry of a FAILED command executes (recovery)', !sf1.ok && !sf2.ok && !sf2.skippedDuplicate, JSON.stringify(sf2));
+    t('repeat: retry of a FAILED command executes (recovery)', !sf1.ok && !sf2.ok && !sf2.skippedDuplicate, JSON.stringify(sf2));
 
-    // ---- shell URL-quoting retry (the curl-&-quote dedup bug) --------------
-    // An unquoted URL with & backgrounded the fetch and the shell 'succeeded'
-    // (exit 0) on the stray assignment — the exit-0/empty-output run must NOT
-    // block the corrected quoted retry as a duplicate.
+    // ---- shell URL-quoting (guidance, not enforcement) ---------------------
+    // The quoted-vs-unquoted retry saga is moot: every command executes as
+    // emitted. The URL-quoting guidance lives in the prompt; the only thing
+    // to pin here is that corrected retries NEVER bounce off any guard.
     {
-      toolLoop.resetSeenCalls();
       const bad = 'curl -s http://127.0.0.1:9/prices?ids=solana&vs_currencies=usd';
       const good = 'curl -s "http://127.0.0.1:9/prices?ids=solana&vs_currencies=usd"';
       const rBad = await toolLoop.executeTool('run_shell', { command: bad });
-      t('url-dedup: unquoted & command exits 0 but produces no output', rBad.ok === true && !(rBad.stdout || rBad.stderr), JSON.stringify(rBad));
+      t('url-retry: unquoted & command exits 0 but produces no output', rBad.ok === true && !(rBad.stdout || rBad.stderr), JSON.stringify(rBad));
       const rGood = await toolLoop.executeTool('run_shell', { command: good });
-      t('url-dedup: corrected quoted retry EXECUTES (not a duplicate)', !rGood.skippedDuplicate && rGood.ok !== undefined, JSON.stringify(rGood).slice(0, 140));
-      // back-to-back identical EMPTY-output command is still subject to the
-      // guard's intent? no — an empty-output repeat re-executes (that is the
-      // fix); a repeat WITH output must still skip:
-      toolLoop.resetSeenCalls();
+      t('url-retry: corrected quoted retry executes (never blocked)', !rGood.skippedDuplicate && rGood.ok === false && rGood.code === 7, JSON.stringify(rGood).slice(0, 140));
       const e1 = await toolLoop.executeTool('run_shell', { command: 'echo url-ok' });
       const e2 = await toolLoop.executeTool('run_shell', { command: 'echo "url-ok"' });
-      t('url-dedup: re-quoted command WITH output still skipped as duplicate', !e2.ok && e2.skippedDuplicate === true, JSON.stringify(e2));
-      // WITH output AND an unquoted shell operator -> the shell parsed the
-      // first run structurally differently; the corrected (quoted) retry must
-      // execute even though the first run produced output (the exact smoke
-      // failure: backgrounded curl's error JSON landed, blocking the retry):
-      toolLoop.resetSeenCalls();
+      t('url-retry: re-quoted command with output executes', e1.ok === true && e2.ok === true && !e2.skippedDuplicate, JSON.stringify(e2));
       const f1 = await toolLoop.executeTool('run_shell', { command: 'echo probe; x=1' });
       const f2 = await toolLoop.executeTool('run_shell', { command: 'echo "probe"; x=1' });
-      t('url-dedup: quoted retry executes when first run had output AND unquoted ops', f1.ok === true && !f2.skippedDuplicate, JSON.stringify(f2).slice(0, 120));
-      // A repeated CORRECT quoted command (ops inside quotes only) is still a
-      // duplicate — successful runs are the only ones the guard records:
-      toolLoop.resetSeenCalls();
+      t('url-retry: quoted retry after output+unquoted-ops executes', f1.ok === true && f2.ok === true && !f2.skippedDuplicate, JSON.stringify(f2).slice(0, 120));
       const g1 = await toolLoop.executeTool('run_shell', { command: 'echo "a&b"' });
       const g2 = await toolLoop.executeTool('run_shell', { command: 'echo "a&b"' });
-      t('url-dedup: repeated correctly-quoted command still deduped', g1.ok === true && !g2.ok && g2.skippedDuplicate === true, JSON.stringify(g2).slice(0, 120));
-      t('url-dedup: helper flags unquoted &', toolLoop.shellCommandHasUnquotedOps('curl -s URL?ids=x&v=y') === true);
-      t('url-dedup: helper ignores ops inside quotes', toolLoop.shellCommandHasUnquotedOps('curl -s "URL?ids=x&v=y"') === false);
-      // expansion-aware normalization: $VAR quoted vs unquoted differ
-      toolLoop.resetSeenCalls();
-      const kq = toolLoop.normalizeShellCommandKey('curl "$URL"');
-      const ku = toolLoop.normalizeShellCommandKey('curl $URL');
-      t('url-dedup: quoted $VAR and bare $VAR are DISTINCT commands', kq !== ku, `${kq} vs ${ku}`);
-      const ku2 = toolLoop.normalizeShellCommandKey('curl "https://x/?a=1&b=2"');
-      const kq2 = toolLoop.normalizeShellCommandKey('curl https://x/?a=1&b=2');
-      t('url-dedup: quoted and bare plain URLs still compare equal', kq2 === ku2, `${kq2} vs ${ku2}`);
+      t('url-retry: repeated correctly-quoted command executes', g1.ok === true && g2.ok === true && !g2.skippedDuplicate, JSON.stringify(g2).slice(0, 120));
     }
 
-    // create_automation dedup (execute stubbed — no real state writes here):
-    toolLoop.resetSeenCalls();
+    // create_automation repeats (execute stubbed — no real state writes here):
     const createDef = registry.find((x) => x.name === 'create_automation');
     const origExec = createDef.execute;
     let execCount = 0;
     createDef.execute = () => { execCount += 1; return { ok: true, message: 'stub' }; };
-    const caArgs = { name: 'Dup', schedule_type: 'interval', interval_minutes: 5, action_type: 'script', script: 'scripts/__dedup_probe.txt' };
+    const caArgs = { name: 'Dup', schedule_type: 'interval', interval_minutes: 5, action_type: 'script', script: 'scripts/__repeat_probe.txt' };
     const ca1 = await toolLoop.executeTool('create_automation', caArgs);
     const ca2 = await toolLoop.executeTool('create_automation', caArgs);
     createDef.execute = origExec;
-    t('dedup: create_automation first executes', ca1.ok && !ca1.skippedDuplicate);
-    t('dedup: create_automation repeat skipped (no dup id error)', !ca2.ok && ca2.skippedDuplicate === true, JSON.stringify(ca2));
-    t('dedup: create_automation executed once', execCount === 1);
+    t('repeat: create_automation first executes', ca1.ok && !ca1.skippedDuplicate);
+    t('repeat: identical create_automation executes again (no skip)', ca2.ok === true && !ca2.skippedDuplicate, JSON.stringify(ca2));
+    t('repeat: create_automation executed twice (real repeat)', execCount === 2);
 
-    // ---- repetition detection (smart loop guard, DEDUP_EXEMPT tools) ------
-    // Exempt tools are intentionally repeatable, but an IDENTICAL call
-    // immediately after itself is a redundant re-emission, and a provable
-    // A-B-A-B-A ping-pong cycle is a model loop — both are caught with a
-    // constructive hint instead of burning rounds. A SINGLE A-B-A round-trip
-    // still executes (re-checking a value after an action = intent), as does
-    // any genuinely new step and any repeat after a FAILED call (recovery).
+    // ---- no repetition detection ------------------------------------------
+    // Identical consecutive calls and A-B-A-B-A cycles all EXECUTE: the
+    // loop ceiling is the only bound, and a model re-running a check after
+    // an edit is legitimate, not a loop.
     {
-      toolLoop.resetSeenCalls();
       const g1 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(10)"' });
       const g2 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(10)"' });
-      t('rep: consecutive identical exempt call skipped with hint',
-        g1.ok && !g2.ok && g2.skippedDuplicate === true && /already ran this tool with these exact arguments|duplicate shell command skipped/.test(g2.error || ''), JSON.stringify(g2));
+      t('rep: consecutive identical exempt call executes', g1.ok && g2.ok && !g2.skippedDuplicate, JSON.stringify(g2));
       const g3 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(11)"' });
-      t('rep: fresh call after consecutive skip executes', g3.ok === true, JSON.stringify(g3));
+      t('rep: fresh call after repeat executes', g3.ok === true, JSON.stringify(g3));
     }
     {
-      toolLoop.resetSeenCalls();
       const a = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(20)"' });
       const b = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(21)"' });
       const a2 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(20)"' });
-      t('rep: single A-B-A round-trip executes (intentional double run)',
-        a.ok && b.ok && a2.ok === true && !a2.skippedDuplicate, JSON.stringify(a2));
+      t('rep: single A-B-A round-trip executes', a.ok && b.ok && a2.ok === true && !a2.skippedDuplicate, JSON.stringify(a2));
       const b2 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(21)"' });
       const a3 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(20)"' });
-      t('rep: A-B-A-B-A cycle caught as alternation with loop hint',
-        !a3.ok && a3.skippedDuplicate === true && a3.repetition === 'alternation' && /looping/.test(a3.error || ''), JSON.stringify(a3));
+      t('rep: A-B-A-B-A cycle also executes (no alternation guard)', a3.ok === true && !a3.skippedDuplicate, JSON.stringify(a3));
       const c = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(22)"' });
-      t('rep: genuinely new step after cycle skip executes', c.ok === true, JSON.stringify(c));
+      t('rep: fresh step after cycle executes', c.ok === true, JSON.stringify(c));
     }
     {
-      toolLoop.resetSeenCalls();
       const f1 = await toolLoop.executeTool('run_shell', { command: 'node -e "process.exit(9)"' });
       const f2 = await toolLoop.executeTool('run_shell', { command: 'node -e "process.exit(9)"' });
-      t('rep: repeat of a FAILED call executes (recovery, not a loop)', !f1.ok && !f2.ok && !f2.skippedDuplicate, '');
+      t('rep: repeat of a FAILED call executes (recovery)', !f1.ok && !f2.ok && !f2.skippedDuplicate, '');
     }
     {
-      // run_automation exemption + repetition (execute stubbed):
-      toolLoop.resetSeenCalls();
+      // run_automation identical repeat executes (execute stubbed):
       const raDef = registry.find((x) => x.name === 'run_automation');
       const origRa = raDef.execute;
       raDef.execute = async () => ({ ok: true, message: 'stub' });
       const r1 = await toolLoop.executeTool('run_automation', { id: 'probe-rule' });
       const r2 = await toolLoop.executeTool('run_automation', { id: 'probe-rule' });
       raDef.execute = origRa;
-      t('rep: run_automation consecutive identical skipped (exempt guard)',
-        r1.ok === true && !r2.ok && r2.skippedDuplicate === true && r2.repetition === 'consecutive', JSON.stringify(r2));
+      t('rep: run_automation identical repeat executes (no exempt guard)', r1.ok === true && r2.ok === true && !r2.skippedDuplicate, JSON.stringify(r2));
     }
     {
       // Long unique multi-step progression — no numeric ceiling: every step
-      // executes as long as it is a genuinely new fingerprint.
-      toolLoop.resetSeenCalls();
+      // executes as long as the loop ceiling is not reached.
       let allOk = true;
       for (let i = 100; i < 130; i++) {
         const r = await toolLoop.executeTool('run_shell', { command: `node -e "console.log(${i})"` });
         if (!r.ok) { allOk = false; break; }
       }
-      t('rep: 30-step unique progression all executes (no numeric ceiling)', allOk === true, '');
+      t('rep: 30-step unique progression all executes', allOk === true, '');
     }
-
-    // Canonical key: key order must not matter
-    toolLoop.resetSeenCalls();
-    const k1 = toolLoop.canonicalArgsKey({ b: 1, a: 2 });
-    const k2 = toolLoop.canonicalArgsKey({ a: 2, b: 1 });
-    t('dedup: canonical key order-insensitive', k1 === k2, k1);
 
     // ---- anti-spam nets (chmod on .py / pre-reading logs) ------------------
     {
@@ -419,7 +354,6 @@ function restoreState() {
     {
       const m1 = await toolLoop.executeTool('read_file', { path: 'logs/__never.log' });
       t('anti-spam: missing logs/ read explains the schedule', m1.ok === false && /schedule/.test(m1.error || ''), JSON.stringify(m1));
-      toolLoop.resetSeenCalls();
       const m2 = await toolLoop.executeTool('read_file', { path: 'src/__absent.txt' });
       t('anti-spam: non-log missing file keeps the generic error', m2.ok === false && !/schedule/.test(m2.error || ''), JSON.stringify(m2));
     }
@@ -442,7 +376,6 @@ function restoreState() {
   // =========================================================================
   // 3b) Strict argument validation (unit level, real registry)
   // =========================================================================
-  toolLoop.resetSeenCalls();
   {
     const junk = path.join(process.env.PLIFE_WORK_ROOT, '?');
     const v1 = await toolLoop.executeTool('write_file', { content: 'x' });
@@ -458,7 +391,7 @@ function restoreState() {
     const v5b = await toolLoop.executeTool('write_file', { path: 'ok.txt', content: [] });
     t('valid: empty content array rejected', !v5b.ok && v5b.invalidArgs === true, JSON.stringify(v5b));
     const v6 = await toolLoop.executeTool('write_file', { path: 'ok.txt', content: 'hello' });
-    t('valid: corrected retry executes (ledger not poisoned)', v6.ok === true && !v6.skippedDuplicate, JSON.stringify(v6));
+    t('valid: corrected retry executes', v6.ok === true && !v6.skippedDuplicate, JSON.stringify(v6));
     t('valid: no junk ? file created', !fs.existsSync(junk) && !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, '<path>')));
 
     // Type coercion: numeric string -> number; placeholder in OPTIONAL arg
@@ -478,13 +411,12 @@ function restoreState() {
     const c3 = await toolLoop.executeTool('create_automation', { name: null, schedule_type: 'interval', action_type: 'script', script: 's.js' });
     t('valid: null required name rejected', !c3.ok && c3.invalidArgs === true, JSON.stringify(c3));
     createDef.execute = origExec;
-    toolLoop.resetSeenCalls();
     const l1 = await toolLoop.executeTool('list_automations', {});
     t('valid: no-required tool with {} passes', l1.ok === true, JSON.stringify(l1));
     const l2 = await toolLoop.executeTool('read_file', { path: 'ok.txt' });
     t('valid: first read executes after validation', l2.ok === true);
     const l3 = await toolLoop.executeTool('read_file', { path: 'ok.txt' });
-    t('valid: read_file dedup still active after validation', !l3.ok && l3.skippedDuplicate === true, JSON.stringify(l3));
+    t('valid: repeated read executes (fresh result, no dedup)', l3.ok === true && !l3.skippedDuplicate, JSON.stringify(l3));
   }
 
   // =========================================================================
@@ -611,11 +543,10 @@ function restoreState() {
     // also contain the first write's ok-result (full history is re-sent).
     const finalHistory = callLog[callLog.length - 1].messages.map((m) => m.content || '');
     const okWrites = finalHistory.filter((c) => c.includes('write_file: {"ok":true')).length;
-    const dupSkips = finalHistory.filter((c) => c.includes('duplicate tool call skipped')).length;
     t('e2e-A: final answer streamed', /All set!/.test(text), text.slice(0, 80));
     t('e2e-A: completed in 5 steps', steps === 5, `steps=${steps}`);
-    t('e2e-A: duplicate write reported to model', dupResultVisible);
-    t('e2e-A: exactly one successful write result', okWrites === 1 && dupSkips === 1, `ok=${okWrites} skips=${dupSkips}`);
+    t('e2e-A: duplicate write EXECUTED — two successful write results', okWrites === 2, `ok=${okWrites}`);
+    t('e2e-A: no duplicate-skip message anywhere', !dupResultVisible);
     t('e2e-A: no forcing rounds triggered', !statuses.some((s) => s.includes('forcing a tool call')), statuses.join(' | '));
     t('e2e-A: no interception triggered', !statuses.some((s) => s.includes('intercepted')), statuses.join(' | '));
     t('e2e-A: file written once to temp workRoot', fs.readFileSync(path.join(process.env.PLIFE_WORK_ROOT, 'scripts', 't.js'), 'utf8') === 'console.log(new Date());');
@@ -687,7 +618,6 @@ function restoreState() {
   // (and the user) can inspect them, and logs/ is ensured to exist
   {
     const automationManager = require(path.join(ROOT, 'services', 'automationManager'));
-    toolLoop.resetSeenCalls();
     const stamp = Date.now();
     const probe = `scripts/__logprobe_${stamp}.sh`;
     const logName = `__logprobe_${stamp}.log`;
@@ -720,8 +650,9 @@ function restoreState() {
     try { fs.unlinkSync(path.join(process.env.PLIFE_WORK_ROOT, 'logs', logName)); } catch {}
   }
 
-  // ----- F) anti-spam abort: consecutive duplicate-only rounds freeze the
-  // loop and force the final answer (no more than the canned rounds run)
+  // ----- F) identical repeated calls keep executing: no duplicate-skip and
+  // no duplicate-based freeze (the reported failure mode — a model re-
+  // checking a file gets fresh results every time, never a block)
   {
     const dupCall = {
       index: 0,
@@ -730,29 +661,23 @@ function restoreState() {
       arguments: '{"path":"logs/__e2e_missing.log"}',
     };
     const { statuses, text, steps, callLog } = await runChat('check the file logs/__e2e_missing.log for me', [
-      { toolCalls: [dupCall] }, // round 1: real (sharpened) error
-      { toolCalls: [dupCall] }, // round 2: duplicate — skipped
-      { toolCalls: [dupCall] }, // round 3: duplicate — skipped -> freeze armed
-      { toolCalls: [dupCall] }, // round 4: STILL calling -> freeze fires (⛔, no exec)
+      { toolCalls: [dupCall] }, // round 1: executes (fresh error result)
+      { toolCalls: [dupCall] }, // round 2: executes again
+      { toolCalls: [dupCall] }, // round 3: executes again
+      { toolCalls: [dupCall] }, // round 4: executes again
       { content: 'No log yet — I checked and it is not there.', finishReason: 'stop' },
     ]);
-    t('e2e-F: final answer served after the freeze', text.includes('I checked'), text.slice(0, 120));
-    t('e2e-F: anti-spam stop status shown', statuses.some((s) => s.includes('⛔')), JSON.stringify(statuses).slice(0, 700));
-    t(
-      'e2e-F: frozen round tells the model to stop calling',
-      callLog[callLog.length - 1].messages.some((m) => m.content.includes('Execution stopped')),
-      JSON.stringify(callLog[callLog.length - 1].messages.map((m) => m.content.slice(0, 60)))
+    const executed = callLog.filter((c) =>
+      c.messages.some((m) => m.content && m.content.includes('read_file: {"ok":false'))
+    ).length;
+    const scheduleHint = callLog.every((c) =>
+      c.messages.some((m) => m.content && m.content.includes('schedule'))
     );
-    t(
-      'e2e-F: loop did not burn extra rounds',
-      steps === 5,
-      `steps=${steps}`
-    );
-    t(
-      'e2e-F: missing-logs read carried the schedule hint',
-      statuses.some((s) => s.includes('duplicate tool call skipped')),
-      JSON.stringify(statuses).slice(0, 300)
-    );
+    t('e2e-F: final answer served after four identical re-checks', text.includes('I checked'), text.slice(0, 120));
+    t('e2e-F: NO freeze status (no duplicate-based stop)', !statuses.some((s) => s.includes('⛔')), JSON.stringify(statuses).slice(0, 700));
+    t('e2e-F: all four identical reads executed', executed >= 4, `executed=${executed}`);
+    t('e2e-F: every re-check carried the schedule hint', scheduleHint);
+    t('e2e-F: loop bounded by the canned rounds', steps === 5, `steps=${steps}`);
   }
 
   // ----- G) live streaming: reasoning relay + round boundary events

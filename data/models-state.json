@@ -1,5 +1,5 @@
 {
-  "activeId": "nemotron-3-5",
+  "activeId": "nemotron-3-ultra-550b-a55b",
   "models": [
     {
       "id": "qwen-coder",
@@ -156,8 +156,18 @@
       "role": "",
       "templateId": "",
       "hasKey": true
+    },
+    {
+      "id": "qwen-hg-2-5-7b",
+      "name": "Qwen2.5-Coder-7B-Instruct",
+      "provider": "remote",
+      "endpoint": "https://router.huggingface.co/v1",
+      "model": "Qwen/Qwen2.5-Coder-7B-Instruct:featherless-ai",
+      "contextLength": 32000,
+      "role": "",
+      "templateId": "",
+      "hasKey": true
     }
   ]
 }
-
 

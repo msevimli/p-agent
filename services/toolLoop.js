@@ -26,272 +26,6 @@ function getTool(name) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool-call deduplication
-// ---------------------------------------------------------------------------
-//
-// Small models (and chunked-continuation loops) frequently re-issue the same
-// call — e.g. write_file to the same path with identical content — after the
-// result was already fed back, because the tool result is compressed to a
-// short summary in history. Re-running such calls is wasteful at best and
-// harmful at worst (duplicate automations, append-amplified log files,
-// clobbered state). We therefore track every executed call per session and
-// refuse exact repeats: the FIRST execution wins, a duplicate is reported as
-// a no-op result the model can understand and move on from.
-//
-// Non-idempotent tools are exempt so legitimate repeated triggers still work:
-// run_automation, run_skill and run_shell may be intentionally repeated
-// (running a script twice on purpose must not be blocked). Every other tool
-// (file reads/writes/edits, listings, automations CRUD, skills writes) is
-// deduplicated by (name, canonical JSON args).
-//
-// run_shell additionally carries a CONSECUTIVE-duplicate guard: a shell
-// command that just succeeded is not executed again back-to-back with the
-// same (quotes/whitespace-normalized) command — small models often re-emit
-// the same curl/script in the next loop round, and each re-run is redundant
-// (result already in history) and may have side effects. A repeat after
-// other steps in between still executes, so intentional double runs remain
-// possible; a repeat of a FAILED command also still executes (recovery).
-
-// Read-only queries are idempotent and cheap: a repeated list after a state
-// change must return FRESH data (and must never surface as a confusing
-// "duplicate tool call skipped" error), so they are exempt from the ledger.
-const DEDUP_EXEMPT = new Set([
-  'run_automation',
-  'run_skill',
-  'run_shell',
-  'list_automations',
-  'list_skills',
-  'list_files',
-  'list_library_files',
-]);
-// Per-chat-request execution ledger: { name, argsKey } of every executed call
-// (non-exempt only — exempt tools are intentionally repeatable and are
-// handled by the repetition detector below instead).
-const seenCalls = [];
-
-// Per-chat-request FINGERPRINT HISTORY: { name, argsKey, ok } of EVERY
-// executed call, exempt or not, in execution order. This is the input to
-// detectRepetition() — exempt tools (run_shell/run_skill/run_automation)
-// may legitimately re-run a UNIQUE call, but identical consecutive calls and
-// A-B-A ping-pong patterns are model loops and must be caught.
-const callHistory = [];
-
-// Normalized key of the last successfully executed shell command (null when
-// none yet / after the ledger reset). Reset with resetSeenCalls().
-let lastShellCommandKey = null;
-// Whether that last recorded shell run produced ANY visible output.
-let lastShellHadOutput = false;
-// Whether the last recorded shell command contained unquoted shell operators
-// (& ; | < > ` ( )). If it did, the command was parsed differently than a
-// quoted variant of it — a same-key quoted re-emission is a CORRECTED retry
-// (e.g. `curl URL?ids=x&v=y` backgrounds the fetch and 'succeeds' on a stray
-// assignment) and must execute, not be blocked as a duplicate.
-let lastShellHadOps = false;
-
-/**
- * Normalize a shell command into a comparison key: tokenize on whitespace
- * (respecting quotes), canonicalize quote characters, and strip quotes from
- * fully-quoted single tokens — so `curl -s 'URL'`, `curl -s "URL"` and
- * `curl -s URL` compare equal, while `echo "a b"` and `echo a b` stay
- * distinct (quoted whitespace is semantically meaningful).
- */
-function normalizeShellCommandKey(cmd) {
-  if (typeof cmd !== 'string') return '';
-  const s = cmd.trim();
-  if (!s) return '';
-  const tokens = [];
-  let cur = '';
-  let q = null;
-  const flush = () => { if (cur !== '') { tokens.push(cur); cur = ''; } };
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (q) { cur += ch; if (ch === q) q = null; }
-    else if (ch === '"' || ch === "'") { q = ch; cur += ch; }
-    else if (/\s/.test(ch)) flush();
-    else cur += ch;
-  }
-  flush();
-  return tokens
-    .map((t) => {
-      const tok = t.replace(/"/g, "'"); // canonical quote char
-      const inner = tok.slice(1, -1);
-      // Quotes are cosmetic for fully-quoted single tokens ONLY when they do
-      // not change shell semantics — a $ / ` / backslash inside survives
-      // quoting (expansion, command substitution) and must keep the token
-      // distinct, so a quoted retry of `curl "$URL"` vs `curl $URL` is not
-      // misread as the same command.
-      const hasExpansion = /\$|`|\\/.test(inner);
-      if (tok.length >= 2 && tok[0] === "'" && tok[tok.length - 1] === "'" && !inner.includes("'") && !/\s/.test(inner) && !hasExpansion) {
-        return inner; // fully-quoted single token: quotes are cosmetic here
-      }
-      return tok;
-    })
-    .join(' ');
-}
-
-/** Stable key for an args object: sorted keys, stable-JSON, trimmed. */
-function canonicalArgsKey(args) {
-  if (args === null || args === undefined) return '';
-  if (typeof args !== 'object') return String(args);
-  const walk = (v) => {
-    if (Array.isArray(v)) return `[${v.map(walk).join(',')}]`;
-    if (v && typeof v === 'object') {
-      return `{${Object.keys(v)
-        .sort()
-        .map((k) => `${JSON.stringify(k)}:${walk(v[k])}`)
-        .join(',')}}`;
-    }
-    if (typeof v === 'string') return JSON.stringify(v.trim());
-    return JSON.stringify(v);
-  };
-  return walk(args);
-}
-
-/**
- * True when a shell command contains shell operators OUTSIDE quotes — i.e.
- * & ; | < > ` ( ) — so quoting them CHANGES what the shell actually runs
- * (`curl URL?ids=x&v=y` backgrounds the fetch and runs `v=y` as an
- * assignment; `curl "URL?ids=x&v=y"` fetches the whole URL). Such a command
- * is structurally ambiguous, so a quoted re-emission is a CORRECTED retry,
- * not a duplicate. (Expansion/globbing cases like $VAR or globs are already
- * kept distinct by normalizeShellCommandKey's quote rules.)
- */
-function shellCommandHasUnquotedOps(cmd) {
-  if (typeof cmd !== 'string') return false;
-  let q = null;
-  for (let i = 0; i < cmd.length; i++) {
-    const ch = cmd[i];
-    if (q) {
-      if (ch === q) q = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      q = ch;
-      continue;
-    }
-    if ('&;|<>`()'.includes(ch)) return true;
-  }
-  return false;
-}
-
-/** True if this exact (name, args) pair was already executed this session. */
-function wasCallExecuted(name, args) {
-  const key = canonicalArgsKey(args);
-  return seenCalls.some((c) => c.name === name && c.argsKey === key);
-}
-
-// Repetition detection is for EXEC-class repeatable tools ONLY — read-only
-// exempt tools (list_*) must always re-run: a repeated list after a state
-// change returns FRESH data and is the point of their exemption.
-const REPETITION_TRACKED = new Set(['run_shell', 'run_skill', 'run_automation']);
-
-/**
- * Repetition detection for DEDUP_EXEMPT exec tools (run_shell, run_skill,
- * run_automation — intentionally repeatable, so the plain ledger never
- * blocks them). Two loop shapes are caught:
- *
- *  1. consecutive: the exact same (name, args) fingerprint as the LAST
- *     executed call — a redundant re-emission of the just-finished step.
- *  2. alternation (A-B-A-B-A): the current fingerprint matches the call TWO
- *     positions back AND the two in-between entries are themselves an
- *     identical pair — the model is ping-ponging A → B → A → B instead of
- *     progressing. A single A-B-A round-trip is NOT caught: repeating a
- *     call after one different step can be intentional (re-checking a value
- *     after an action); only a provable cycle is a loop.
- *
- * Both triggers require the earlier same-fingerprint call to have
- * SUCCEEDED: a repeat after a failure is recovery, not a loop.
- * Returns { skip:true, kind:'consecutive'|'alternation' } or { skip:false }.
- */
-function detectRepetition(name, argsKey) {
-  const n = callHistory.length;
-  if (n === 0) return { skip: false };
-  const last = callHistory[n - 1];
-  if (last.name === name && last.argsKey === argsKey) {
-    if (!last.ok) return { skip: false };
-    // run_shell additionally requires the old guard's PROOF conditions: a
-    // no-output repeat may be an uncertain-outcome retry and must re-run.
-    if (name === 'run_shell' && !(lastShellHadOutput && !lastShellHadOps)) return { skip: false };
-    return { skip: true, kind: 'consecutive' };
-  }
-  // Cycle check: history ends [A, B, A, B] and the candidate is A —
-  // the A-B pair has now alternated twice, i.e. a provable ping-pong loop.
-  if (n >= 4) {
-    const aPrev = callHistory[n - 2];
-    const bPrev = callHistory[n - 1];
-    const aPrev2 = callHistory[n - 4];
-    const bPrev2 = callHistory[n - 3];
-    if (
-      aPrev.name === name && aPrev.argsKey === argsKey && aPrev.ok &&
-      aPrev2.name === name && aPrev2.argsKey === argsKey && aPrev2.ok &&
-      bPrev.name === bPrev2.name && bPrev.argsKey === bPrev2.argsKey
-    ) {
-      return { skip: true, kind: 'alternation' };
-    }
-  }
-  return { skip: false };
-}
-
-/** Forget all recorded calls (start of a new chat request). */
-function resetSeenCalls() {
-  seenCalls.length = 0;
-  callHistory.length = 0;
-  lastShellCommandKey = null;
-  lastShellHadOutput = false;
-  lastShellHadOps = false;
-}
-
-/** Remember an executed (name, args) pair. */
-function recordCall(name, args, ok) {
-  seenCalls.push({ name, args, argsKey: canonicalArgsKey(args), ok: ok !== false });
-}
-
-/** Slug an automation name into its id (mirrors the store's slugify). */
-function slugifyId(s) {
-  return String(s || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
-/** Skill names compare slash-normalized (cleanSkillName contract). */
-function stripLeadingSlash(s) {
-  return typeof s === 'string' ? s.replace(/^\/+/, '') : s;
-}
-
-/**
- * Redundant-churn guard: `name` deletes a target that THIS request already
- * created — write_file→delete_file (same path), write_skill→delete_skill
- * (same name, slash-normalized), create_automation→delete_automation (same
- * id, name slugified). Observed live: a multi-step task burned minutes on
- * create → "already exists" → delete → recreate loops. The creation STAYS;
- * the delete is skipped with a directive to proceed forward.
- */
-function createdEarlierInRequest(name, args, ledger) {
-  const seen = ledger || seenCalls;
-  if (name === 'delete_automation') {
-    const id = args && args.id;
-    if (!id) return null;
-    const hit = seen.find((x) => x.name === 'create_automation' && slugifyId(x.args && x.args.name) === id);
-    return hit ? `automation ${JSON.stringify(hit.args && hit.args.name)}` : null;
-  }
-  if (name === 'delete_skill') {
-    const nm = stripLeadingSlash(args && args.name);
-    if (!nm) return null;
-    const hit = seen.find((x) => x.name === 'write_skill' && stripLeadingSlash(x.args && x.args.name) === nm);
-    return hit ? `skill ${JSON.stringify(nm)}` : null;
-  }
-  if (name === 'delete_file') {
-    const p = args && args.path;
-    if (!p) return null;
-    const np = normPath(p);
-    const hit = seen.find((x) => x.name === 'write_file' && normPath(x.args && x.args.path) === np);
-    return hit ? `file ${JSON.stringify(p)}` : null;
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
 // Strict pre-execution argument validation
 // ---------------------------------------------------------------------------
 //
@@ -302,8 +36,8 @@ function createdEarlierInRequest(name, args, ledger) {
 // an empty string; create_automation would fail validation mid-loop. So every
 // call is schema-checked BEFORE execution: required parameters must be
 // present, type-coerced, non-empty and free of placeholder tokens; rejected
-// calls return a corrective error the model can act on (and never poison the
-// dedup ledger, so the corrected retry runs normally).
+// calls return a corrective error the model can act on, and the corrected
+// retry executes normally.
 
 // Placeholder tokens small models substitute for real values they cannot
 // decide: '?', '...', '<path>', 'N/A', 'TODO', 'your_file_name', 'null' as a
@@ -433,10 +167,8 @@ function validateArgs(name, args) {
  * Small models routinely emit file paths under alias keys ('file',
  * 'filepath', 'filename', 'src', 'target') or as a bare unkeyed string
  * instead of the schema's 'path' key, and the rejected call then gets
- * repeated unchanged until the anti-repetition freeze. Normalizing here
- * makes the call EXECUTE, and because the dedup ledger records the
- * normalized args, alias-keyed repeats of the same path also dedup
- * identically instead of re-running.
+ * repeated unchanged. Normalizing here makes the call EXECUTE; repeated
+ * reads after an edit then hit the real path and return fresh state.
  */
 const FILE_PATH_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'delete_file', 'list_files']);
 const FILE_PATH_ALIASES = ['file', 'filepath', 'file_path', 'filename', 'src', 'target'];
@@ -454,11 +186,8 @@ const ARG_FORMATS = {
  * Normalize run_shell arguments the same way file tools are normalized:
  * small models (Gemma 4B etc.) emit the command under alias keys (cmd, exec,
  * script, c, shell_command) or as a bare unkeyed string instead of the
- * schema's 'command' key, and the rejected call then gets repeated unchanged
- * until the anti-repetition freeze. Normalizing here makes the call EXECUTE;
- * the dedup ledger and the consecutive-command guard see the canonical
- * command, so alias-keyed repeats of the same command are recognized as the
- * same command (run_shell is DEDUP_EXEMPT, the consecutive guard applies).
+ * schema's 'command' key, and the rejected call then gets repeated unchanged.
+ * Normalizing here makes the call EXECUTE with the canonical command.
  */
 const SHELL_COMMAND_ALIASES = ['cmd', 'exec', 'script', 'c', 'shell_command'];
 function normalizeShellToolArgs(name, args) {
@@ -503,13 +232,14 @@ function normalizeFileToolArgs(name, args) {
  * 1. Schema validation first: required params must be present, non-empty and
  *    free of placeholder tokens; invalid calls are rejected with a corrective
  *    message (invalidArgs:true) and NEVER run — so write_file can't create a
- *    junk file named '?' or write an empty file. Rejected calls are also not
- *    recorded, so the corrected retry executes normally.
- * 2. Deduplication guard: an exact repeat of a previously executed call (same
- *    tool, same canonical args) is short-circuited and reported as an already-
- *    done no-op instead of executing again — unless the tool is in
- *    DEDUP_EXEMPT (intentionally repeatable: run_automation, run_skill,
- *    run_shell). The guard applies per chat request (resetSeenCalls).
+ *    junk file named '?' or write an empty file, and the corrected retry
+ *    executes normally.
+ * 2. There is NO duplicate suppression: every call executes as emitted, no
+ *    matter how often the same (name, args) was already run in this request.
+ *    A re-run of a read/grep after an edit returns FRESH state (the reported
+ *    workflow — verification must never be blocked). The only bounds are the
+ *    per-request execution-round ceiling and the static anti-spam guardrails
+ *    (chmod-on-.py, missing-logs hint) in the tools themselves.
  */
 async function executeTool(name, args) {
   const tool = getTool(name);
@@ -525,78 +255,10 @@ async function executeTool(name, args) {
     };
   }
   const nargs = v.args;
-  // Consecutive-duplicate guard for shell commands: if the SAME command
-  // (quotes/whitespace-normalized) just executed successfully, a back-to-back
-  // repeat is a redundant model re-emission — skip it with a corrective note
-  // instead of re-running side-effectful shell. Repeats after other steps,
-  // and repeats of FAILED commands (recovery), still execute.
-  if (name === 'run_shell' && typeof nargs.command === 'string') {
-    const key = normalizeShellCommandKey(nargs.command);
-    if (key && key === lastShellCommandKey && lastShellHadOutput && !lastShellHadOps) {
-      return {
-        ok: false,
-        error:
-          `duplicate shell command skipped: "${nargs.command.slice(0, 90)}" was just executed with the same command — ` +
-          'do NOT run it again; interpret the existing result and continue towards the final answer',
-        skippedDuplicate: true,
-      };
-    }
-  }
-  // Repetition detection for DEDUP_EXEMPT exec tools (intentionally
-  // repeatable — the plain ledger below never blocks them, but a model loop
-  // that re-emits the exact same call consecutively or ping-pongs A-B-A-B is
-  // not progress). Read-only exempt tools (list_*) keep running freely.
-  // Repeats of FAILED calls are recovery and always execute.
-  if (REPETITION_TRACKED.has(name)) {
-    const rep = detectRepetition(name, canonicalArgsKey(nargs));
-    if (rep.skip) {
-      const hint =
-        rep.kind === 'consecutive'
-          ? `${name} was just executed with these exact arguments — you already ran this tool ` +
-            'with these exact arguments; use the previous output or proceed to the next step'
-          : `${name} is looping: you are alternating between the same two calls (A → B → A → B) with ` +
-            'identical arguments — stop and use the results you already have; either write the final answer ' +
-            'now or take a genuinely new step';
-      return { ok: false, skippedDuplicate: true, error: hint, repetition: rep.kind };
-    }
-  }
-  if (!DEDUP_EXEMPT.has(name)) {
-    if (wasCallExecuted(name, nargs)) {
-      return {
-        ok: false,
-        error:
-          `duplicate tool call skipped: ${name} was already executed with these exact arguments in this request — ` +
-          'you already ran this tool with these exact arguments; use the previous output or proceed to the next step',
-        skippedDuplicate: true,
-      };
-    }
-    recordCall(name, nargs);
-  }
-  // Redundant-churn guard (before any side effect): deleting a target this
-  // request created is an undo-loop, not progress — the original creation
-  // stays and the delete is skipped with a directive. Not recorded, so a
-  // repeated churn delete still hits this guard (never the ledger).
-  const churn = createdEarlierInRequest(name, nargs);
-  if (churn) {
-    return {
-      ok: false,
-      skippedRedundant: true,
-      error:
-        `${name} skipped: you created ${churn} earlier in this request — deleting it now is a redundant undo. ` +
-        'Keep it and continue; do NOT delete-and-recreate.',
-    };
-  }
   try {
     const result = await Promise.resolve(tool.execute(nargs));
-    if (name === 'run_shell' && result && result.ok) {
-      lastShellCommandKey = normalizeShellCommandKey(nargs.command);
-      lastShellHadOutput = !!(result.stdout || result.stderr);
-      lastShellHadOps = shellCommandHasUnquotedOps(nargs.command);
-    }
-    callHistory.push({ name, argsKey: canonicalArgsKey(nargs), ok: !!(result && result.ok) });
     return result;
   } catch (e) {
-    callHistory.push({ name, argsKey: canonicalArgsKey(nargs), ok: false });
     return { ok: false, error: e && e.message ? e.message : String(e) };
   }
 }
@@ -877,15 +539,17 @@ function buildSystemPrompt(base) {
     'they are all executed together, which saves round trips. Only wait for a result when a ' +
     'later call depends on an earlier one (running a file you just wrote, reading a file before ' +
     'replying, checking output before continuing). Complete, real values only — no placeholders ' +
-    '(?, ..., <path>, N/A, TODO). Calls with missing or placeholder arguments are rejected. ' +
-    'Never repeat a tool call that already succeeded, and never re-list or re-read what a tool ' +
-    'result already told you.\n' +
+    'Calls with missing or placeholder arguments are rejected. ' +
+        'You MAY re-run a read, list or grep to verify after an edit — re-reading is cheap and ' +
+        'returns fresh state. What you must not do is redo finished side-effectful work: do not ' +
+        'create an automation or append to a log twice because you forgot it already ran — check ' +
+        'the results you have and proceed.\\n' +
     'PLAN multi-step work BEFORE calling tools: decide the exact file names, skill names and ' +
     'arguments once, then emit the independent calls together. NEVER churn: do not re-create, ' +
     're-write or delete-and-recreate what a tool result already created — if a call reports ' +
     '"already exists" or a name collision, use the existing item or pick a NEW name and move on. ' +
     'Never delete something you created earlier in the same task, and do not repeat similar ' +
-    'calls with only trivial changes. One verification at the end is enough. Paths are ' +
+    'calls with only trivial changes. Paths are ' +
     'workspace-relative: write scripts into the workspace (e.g. scripts/...), never absolute ' +
     'system paths like /workspace or /tmp.\n' +
     'WORKSPACE ACCESS: you ALWAYS have direct, live access to the workspace and every file in ' +
@@ -913,21 +577,28 @@ function buildSystemPrompt(base) {
     'files in the same task — logs are only written when the automation runs on its schedule ' +
     'LATER, so a missing log right after creation is NORMAL, not an error. NEVER run chmod on ' +
     '.py files (the python runner does not need the executable bit). NEVER rewrite a script ' +
-    'you just wrote, NEVER re-create an automation that already exists, and NEVER retry a call ' +
-    'that a tool result just told you was skipped as a duplicate — treat skips as done and ' +
-    'move forward.\n' +
+    'you just wrote, and NEVER re-create an automation that already exists. If a call failed, ' +
+    'fix it and retry; if something already exists, use it or pick a new name — never re-create. \n' +
     'SHELL URL QUOTING — MANDATORY: any URL containing a query string (? or &) passed to curl ' +
     'or wget MUST be enclosed in DOUBLE QUOTES: `curl -s "https://api.example.com/v1/price?ids=solana&vs_currencies=usd"`. ' +
     'An unquoted & is a shell background/separator operator, so the request breaks or truncates. ' +
     'For JSON APIs, embedding a small python3 one-liner is often more reliable: ' +
     '`python3 -c "import urllib.request,json; d=json.load(urllib.request.urlopen(\'https://api.example.com/v1/price?ids=solana&vs_currencies=usd\')); print(d)"`. ' +
-    'If a fetch failed, retry the corrected quoted command — a corrected retry is NOT a duplicate.\n' +
+    'If a fetch failed, retry the corrected quoted command.\n' +
     'INLINE vs SCRIPT FILES: keep run_shell commands SHORT and single-line. For anything multi-line ' +
     'or containing quotes (node -e, python3 -c, awk, heredocs, nested "quotes in quotes"), write a ' +
     'script file FIRST (write_file to scripts/, e.g. scripts/tmp_check.js) and then run it with ' +
     '`node scripts/tmp_check.js` or `bash scripts/tmp_check.sh`. Inline one-liners with nested ' +
-    'quotes are fragile — their JSON escapes get corrupted mid-task — while a script file has no ' +
-    'quote-nesting problem at all. Do not re-write the same script; reuse what is already there.\n' +
+        'quotes are fragile — their JSON escapes get corrupted mid-task — while a script file has no ' +
+        'quote-nesting problem at all. Do not re-write the same script; reuse what is already there.\\n' +
+        'JSON-ARGUMENT QUOTE RULE: whenever code or file text is embedded in a tool-call JSON string ' +
+        '(write_file content, write_skill files, run_shell commands), every internal double quote MUST ' +
+        'be escaped as \\" — e.g. the code line data["solana"]["usd"] must be sent as data[\\"solana\\"][\\"usd\\"], ' +
+        'and f"{x}" as f\\"{x}\\". Write code with single quotes inside (Python: data[\'solana\']; JS: \'solana\') ' +
+        'where possible — single quotes need no escaping. NEVER emit backtick-fenced, raw multi-line code ' +
+        'inside a JSON string value. For multiple script files, prefer sequential write_file calls (one ' +
+        'file each) over nesting many unescaped code blocks in a deep files map — a single malformed quote ' +
+        'rejects the whole call.\\n' +
     'If a call fails, fix it and retry once, then keep going. After the tool results, work until ' +
     'the task is done, then reply with a short plain-text final answer.\n' +
     'You execute shell commands yourself with the run_shell tool and have internet access through curl. ' +
@@ -1185,7 +856,7 @@ function inferAutomationFromUser(text) {
 //
 // chat.js executes a round's calls group-by-group: calls INSIDE a group may
 // run concurrently, groups run in emission order. The conflict rules below
-// guarantee that concurrency can never corrupt state or the dedup ledger:
+// guarantee that concurrency can never corrupt state:
 //   - exec tools (run_shell, run_skill, run_automation) run arbitrary code →
 //     they serialize with EVERYTHING (including each other);
 //   - file tools conflict only on path overlap (same file, or a listing of a
@@ -1195,8 +866,7 @@ function inferAutomationFromUser(text) {
 //     serialize within their class;
 //   - unknown tools are conservative: serialize with everything.
 // An exact-duplicate call pair can never land in the same group (identical
-// args ⇒ same target ⇒ conflict ⇒ split across groups ⇒ the dedup ledger,
-// which records sequentially, catches the repeat).
+// args ⇒ same target ⇒ conflict ⇒ split across groups ⇒ sequential order).
 // ---------------------------------------------------------------------------
 function callClass(name) {
   if (name === 'run_shell' || name === 'run_skill' || name === 'run_automation') return 'exec';
@@ -1245,10 +915,6 @@ module.exports = {
   getTool,
   executeTool,
   registry,
-  resetSeenCalls,
-  canonicalArgsKey,
-  normalizeShellCommandKey,
-  shellCommandHasUnquotedOps,
   validateArgs,
   toOpenAITools,
   hasTool,
@@ -1267,6 +933,4 @@ module.exports = {
   groupIndependent,
   callClass,
   pathsOverlap,
-  createdEarlierInRequest,
-  slugifyId,
 };

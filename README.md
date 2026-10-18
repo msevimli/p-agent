@@ -373,12 +373,11 @@ short refusal and never trigger the agent.
   (`{"tool": "...", "args": {...}}`, fenced or bare) for Content-only
   llama.cpp builds; calls are schema-validated before execution (missing or
   placeholder args are rejected with corrective feedback, never run).
-- **Smart tool deduplication** — exact repeats of a call are skipped
-  (writable/side-effectful tools execute once per request), and `run_shell`
-  carries a consecutive-duplicate guard: a command that just succeeded is not
-  re-run back-to-back, even if the model re-emits it with different quoting
-  (`curl 'URL'` == `curl "URL"` == `curl URL`). Intentional repeats after other
-  steps, and retries of *failed* commands, still execute.
+- **No duplicate suppression** — every tool call executes exactly as
+  emitted, however often the same (tool, args) already ran this request:
+  re-running a grep or re-reading a file after an edit returns fresh state
+  (identical repeats are never skipped; there is no per-request ledger).
+  `run_shell` runs back-to-back repeats verbatim too.
 - **Tool argument normalization** — small models routinely emit the right
   value under the wrong key or as a bare unkeyed string. Before validation,
   `file`/`filepath`/`file_path`/`filename`/`src`/`target` (and bare strings)
@@ -386,27 +385,22 @@ short refusal and never trigger the agent.
   (and bare strings) map to `command` for `run_shell` — the call EXECUTES
   instead of entering a reject-repeat loop. Status labels resolve the same
   aliases, so the activity feed shows the real command/path.
-- **Rejection feedback & anti-loop safeguards** — a rejected call names the
+- **Rejection feedback & safety nets** — a rejected call names the
   missing key AND the expected shape (`Expected format: {"path": …}` /
   `{"command": "your_shell_command_here"}`; placeholder text like
   `your_shell_command_here` itself is never executed). The same invalid call
-  repeated 3× fails fast and forces the final answer. **Repetition
-  detection, not round counting, terminates loops:** an identical tool call
-  repeated back-to-back, or a provable A-B-A-B-A ping-pong cycle between two
-  calls, is skipped with a constructive hint ("you already ran this tool
-  with these exact arguments; use the previous output or proceed to the next
-  step"); two consecutive all-skip rounds freeze tool execution and force
-  the final answer. A single A-B-A round-trip and repeats of FAILED calls
-  still execute (intent/recovery). Numeric ceilings (64 execution rounds,
-  `TOOL_MAX_ITERATIONS` default 64) exist only as safety nets — deep
-  multi-step tasks (read → grep → db check → …) run to completion as long as
-  each step is a genuinely new fingerprint, and the trip notice tells the
-  user the work so far is recorded and a follow-up continues.
+  repeated 3× fails fast and forces the final answer. **There is NO
+  duplicate suppression: every tool call executes exactly as emitted** —
+  identical repeats (re-running a grep or re-reading a file after an edit)
+  return fresh state and are never skipped as "duplicates"; the only bounds
+  are numeric ceilings (64 execution rounds, `TOOL_MAX_ITERATIONS` default
+  64) as pure safety nets, and the trip notice tells the user the work so
+  far is recorded and a follow-up continues.
   Conversation-based path recovery exists ONLY for
   read_file/write_file/edit_file — never inferred for run_shell, delete_file
   or anything else.
-- **Persistent tool-run history (session replay)** — every executed (or
-  dedup-skipped) tool step is streamed as a structured `type:"tool"` SSE
+- **Persistent tool-run history (session replay)** — every executed
+  tool step is streamed as a structured `type:"tool"` SSE
   event (tool name, bounded arguments, outcome preview, exit code,
   timestamp) and persisted by the frontend into the session message store
   as `role:"tool"` records; on refresh/session switch they reload as
@@ -424,7 +418,16 @@ short refusal and never trigger the agent.
   would swallow a `,"key":` boundary is rejected — the repair never merges
   two key/value pairs into one mangled string), so no corrupted shape is
   ever executed. Valid JSON is never touched (fast path); unrepairable
-  input keeps the strict corrective-round flow. Wired into every parse
+  input keeps the strict corrective-round flow. Embedded script code in
+  `write_file`/`write_skill` values (`data["solana"]["usd"]`, `f"{x}"`,
+  multi-file `files` maps) is a dedicated step: it locates every
+  `"key": "` value span and escapes all non-delimiter quotes between the
+  opening and the structural closing quote (`]`-ambiguity, array-literal
+  and dict-literal false closers are tried as separate candidates, all
+  parse-verified; a candidate whose escaped quote sits at a `,"key":`
+  boundary is dropped). The system prompt and tool schemas instruct models
+  to escape internal quotes (`data[\"solana\"]`) or write one file per
+  `write_file` call instead of deep unescaped code nests. Wired into every parse
   site: `toolLoop.safeParseArgs` (native `tool_calls`), `extractToolCalls`,
   `parseCallPayloads`, `normalizeCallObject` and `toolCallParser` (tilde
   tags/fences + double-encoded arguments).
@@ -481,7 +484,7 @@ p-agent/
 │   ├── skills.js          #   /api/skills registry + run
 │   ├── library.js         #   /api/library CRUD + upload
 │   ├── channels.js        #   /api/channels — Telegram config/status
-│   ├── fs.js              #   /api/fs/list, /api/fs/read (file explorer)
+│   ├── fs.js              #   /api/fs list/read/write/patch (file explorer + editor)
 │   ├── health.js          #   GET /api/health
 │   ├── queue.js           #   GET /api/queue — request-queue stats
 │   ├── system.js          #   GET /api/system/metrics — RAM + CPU (os module)
@@ -489,7 +492,7 @@ p-agent/
 ├── services/              # business logic (no HTTP)
 │   ├── llamaClient.js     #   upstream client: payload, SSE parse, probes
 │   ├── requestQueue.js    #   strict FIFO + transient retries/backoff
-│   ├── toolLoop.js        #   tool registry dispatch, extractor, dedup guards
+│   ├── toolLoop.js        #   tool registry dispatch, extractor, args guards
 │   ├── chatLoopback.js    #   HTTP loopback into /api/chat (channel bridge)
 │   ├── telegramBot.js     #   Telegram long-polling channel (no deps)
 │   ├── libraryManager.js  #   persistent file library
@@ -528,7 +531,9 @@ p-agent/
 | POST | `/api/channels/telegram/toggle` | Enable/disable |
 | POST | `/api/channels/telegram/token` | Set/clear token (`.env`) |
 | POST | `/api/channels/telegram/test` | getMe connection test |
-| GET | `/api/fs/list`, `/api/fs/read` | File explorer |
+| GET | `/api/fs/list`, `/api/fs/read` (`?full=1` = uncapped for the editor) | File explorer + editor load |
+| POST | `/api/fs/write` | Save file content (editor) — sandboxed, 2 MB cap |
+| POST | `/api/fs/patch` | Targeted `old_text`→`new_text` in-place edit |
 | GET | `/api/queue` | Queue stats |
 | GET | `/api/system/metrics` | Host RAM + CPU usage (os module) |
 

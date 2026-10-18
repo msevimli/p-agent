@@ -63,7 +63,7 @@ const seededSession = {
       skipped: true,
       code: undefined,
       out: undefined,
-      error: 'duplicate shell command skipped: you already ran this tool with these exact arguments',
+      error: 'chmod +x on a .py file is unnecessary (the python3 runner does not use the executable bit) — skipped',
       ts: Date.now() - 58000,
     },
     { role: 'assistant', content: 'Disk is **40% used**.', reasoning: 'checked df', meta: '8s' },
@@ -130,7 +130,7 @@ const seededSession = {
   t('replay: failed card shows ✗ failed + error detail', !!errCard && /✗ failed/.test(errCard.textContent) && /ENOENT/.test(errCard.textContent), errCard && errCard.textContent.slice(0, 120));
 
   const skipCard = cards[2];
-  t('replay: skipped card shows ⏭ skipped + hint', !!skipCard && /⏭ skipped/.test(skipCard.textContent) && /already ran/.test(skipCard.textContent), skipCard && skipCard.textContent.slice(0, 160));
+  t('replay: skipped card shows ⏭ skipped + hint', !!skipCard && /⏭ skipped/.test(skipCard.textContent) && /.py file is unnecessary/.test(skipCard.textContent), skipCard && skipCard.textContent.slice(0, 160));
 
   // --- expandable body ------------------------------------------------------
   const details = cards[0];

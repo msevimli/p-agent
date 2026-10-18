@@ -63,7 +63,7 @@ p-agent/
 │   ├── skills.js             #   /api/skills CRUD, toggle, run
 │   ├── library.js            #   /api/library CRUD + upload (raw body)
 │   ├── channels.js           #   /api/channels — Telegram config/status/toggle
-│   ├── fs.js                 #   /api/fs/list, /api/fs/read (file explorer)
+│   ├── fs.js                 #   /api/fs list/read/write/patch (explorer + editor)
 │   ├── queue.js              #   GET /api/queue — LLM queue stats
 │   ├── system.js             #   GET /api/system/metrics — RAM/CPU (os module)
 │   └── systemPrompt.js       #   GET/POST/DELETE /api/system/prompt — prompt override
@@ -214,21 +214,17 @@ p-agent/
     and `arguments`/`args` key aliases; several calls per completion execute in
     emission order). Fragmented native `tool_calls.arguments` are re-joined on
     JSON token boundaries (`joinToolCallArgs`).
-  **Deduplication (per chat request):**
-  - *Exact-args ledger* — writable/side-effectful tools (file writes,
-    automations CRUD) execute once per request; exact repeats are refused with
-    a corrective result (`skippedDuplicate`) fed back to the model.
-  - *Consecutive `run_shell` guard* — a shell command that just succeeded is
-    not executed again back-to-back with the same normalized command, even if
-    the model re-emits it re-quoted: `curl -s 'URL'`, `curl -s "URL"` and
-    `curl -s URL` compare equal (quote-char + whitespace-insensitive key,
-    quoted inner whitespace stays distinct). A repeat after other steps still
-    executes (intentional double runs work), and retries of FAILED commands
-    still execute (recovery).
+  **No duplicate suppression:** every tool call executes exactly as emitted,
+  however often the same (tool, args) already ran in the request — a model
+  re-running a grep or re-reading a file after an edit gets FRESH state and
+  is never skipped as a "duplicate" (the old per-request exact-args ledger,
+  the consecutive-`run_shell` guard, the alternation detector and the
+  redundant-churn guard were removed; only the 64-round execution ceiling
+  and the 3×-identical-invalid freeze remain as safety nets).
   **Validation before execution:** required parameters must be present,
   type-coerced, non-empty and free of placeholder tokens; an invalid call is
-  rejected with a corrective `invalidArgs` error (never executed, never
-  recorded in the ledger) and surfaces live as a “Tool call rejected” event.
+  rejected with a corrective `invalidArgs` error (never executed) and
+  surfaces live as a “Tool call rejected” event.
   The rejection names the missing key AND the expected shape
   (`Expected format: {"path": …}` / `{"command": "your_shell_command_here"}`
   — the hint's own placeholder text is itself caught by the placeholder gate,
@@ -238,20 +234,16 @@ p-agent/
   maps `file`/`filepath`/`file_path`/`filename`/`src`/`target` and bare strings
   → `path` (file tools); `normalizeShellToolArgs` maps
   `cmd`/`exec`/`script`/`c`/`shell_command` and bare strings → `command`
-  (run_shell). Normalized args feed the ledger/guards, so an alias-keyed
-  repeat of the same command is recognized as the same command. Status labels
+  (run_shell). Status labels
   resolve the same aliases (`labelPath`/`labelCommand` in routes/chat.js), so
   the feed shows the real path/command pre-execution.
-  **Anti-loop safeguards:** the same invalid call repeated 3× in one request
+  **Anti-loop safety nets:** the same invalid call repeated 3× in one request
   fails fast and forces the final answer instead of looping;
-  **repetition detection** terminates loops — an identical call
-  back-to-back or a provable A-B-A-B-A cycle between two calls is skipped
-  with a constructive hint, and two consecutive all-skip rounds freeze
-  tool execution (single A-B-A round-trips and repeats after FAILED calls
-  still execute); `MAX_TOOL_ROUNDS=64` + `TOOL_MAX_ITERATIONS` (default 64)
+  `MAX_TOOL_ROUNDS=64` + `TOOL_MAX_ITERATIONS` (default 64)
   are pure
-  safety nets, so multi-step tasks run as long as each step is a new
-  fingerprint; conversation-based path recovery is
+  safety nets — there is no repetition detection, so identical repeats of
+  any tool call execute (verification re-runs after edits are legitimate);
+  conversation-based path recovery is
   whitelisted to read_file/write_file/edit_file ONLY — never inferred for
   run_shell, delete_file, skills, or automations (exactly one unique
   workRoot-resolving candidate, non-URL, real content still required for

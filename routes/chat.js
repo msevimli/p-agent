@@ -463,9 +463,6 @@ async function streamPlainAnswer(res, agentMessages, gen, onUsage, lost, firstAt
 const EMPTY_STREAM_RE = /empty stream/i;
 
 router.post('/', async (req, res) => {
-  // Fresh per-request tool-call ledger (deduplication scope).
-  toolLoop.resetSeenCalls();
-
   const { messages, stream = true, attachments } = req.body || {};
   // Session id for the turn-state registry (GET /api/chat/state/:sessionId):
   // purely a re-attachment key, never part of the model history.
@@ -807,22 +804,19 @@ router.post('/', async (req, res) => {
       let stageTarget = cascade.enabled ? cascade.targets.router : null;
       let stageSystem = cascade.enabled ? cascade.routerSystem : systemPrompt;
       let firstRoundDone = false; // never re-await the pre-queued firstPromise
-      // Anti-spam abort state (per user message): a structural stop when the
-      // model repeats only already-skipped calls instead of making progress.
+      // Loop safety state (per user message): the ONLY loop bounds are the
+      // per-request execution-round ceiling below and the repeated-invalid-
+      // call freeze (rejectedCalls). Tool calls are NEVER suppressed by
+      // history — identical repeats execute, so a model re-running a grep or
+      // re-reading a file after an edit gets fresh state (the dedup/anti-
+      // repetition guards were removed for exactly this workflow).
       let execRounds = 0; // safety ceiling on rounds that execute tool calls
-      let dupStreak = 0; // consecutive rounds whose calls were ALL skips
       let frozen = false; // tool execution locked out; final answer forced
       let frozenRounds = 0;
       // Per-request count of IDENTICAL rejected emissions (name -> argsKey ->
       // count): the model repeating the exact same invalid call 3 times gets
       // frozen instead of burning rounds on the same mistake.
       const rejectedCalls = new Map();
-      // Safety ceiling ONLY — loops are terminated by repetition detection
-      // (exact-repeat and A-B-A-B guards in toolLoop.executeTool + the
-      // dupStreak freeze below), never by counting rounds. 64 execution
-      // rounds allows deep multi-step probes (read → grep → db check →
-      // …) with unique progressive steps; only a genuinely runaway model
-      // ever reaches it.
       const MAX_TOOL_ROUNDS = 64;
       // Live-streaming bookkeeping: loop rounds stream their deltas to the
       // client in real time (see onDelta/onReasoning below); the round
@@ -1280,19 +1274,19 @@ router.post('/', async (req, res) => {
             }
           }
 
-          // --- anti-spam abort (structural stop) ----------------------------
-          // Two consecutive rounds whose calls were ALL already-skipped
-          // duplicates (or the per-request execution-round cap): freeze tool
-          // execution, tell the model to write the final answer from what it
-          // has, and after one more non-compliant round close deterministically.
+          // --- safety-net abort (structural stop) -------------------------
+          // Per-request execution-round ceiling (or the repeated-invalid-call
+          // freeze above): stop tool execution, tell the model to write the
+          // final answer from what it has, and after one more non-compliant
+          // round close deterministically.
           if (frozen || execRounds >= MAX_TOOL_ROUNDS) {
             if (frozenRounds >= 1) {
               // The stop notice was ignored and tool calls were emitted again:
               // deterministic close — no further LLM/execution rounds.
               finalText =
-                'The task was stopped by the anti-repetition guard after ' +
+                'The task was stopped by the tool-loop safety net after ' +
                 execRounds +
-                ' execution round(s) of repeating or duplicate tool calls. Everything that ran is ' +
+                ' execution round(s). Everything that ran is ' +
                 'shown in the tool results above; anything not listed there was not completed. ' +
                 'Please rephrase the request or ask for a specific step if something is missing.';
               endRound(false); // raw attempt text — the deterministic close follows
@@ -1304,7 +1298,7 @@ router.post('/', async (req, res) => {
             const why =
               execRounds >= MAX_TOOL_ROUNDS
                 ? `reached the ${MAX_TOOL_ROUNDS}-round execution limit`
-                : 'only repeated or duplicate calls were emitted';
+                : 'the tool loop was stopped by the safety guard';
             const frozenCallText = calls
               .map((c) => JSON.stringify({ tool: c.name, args: c.args }))
               .join('\n');
@@ -1346,11 +1340,10 @@ router.post('/', async (req, res) => {
         // Parallel-safe execution: independent calls of the round run
         // concurrently (single group), dependent/same-target/share-state
         // calls run in later groups in emission order. Results are
-        // reassembled in EMISSION order, so history messages, the dedup
-        // ledger and log lines are identical to a fully sequential run —
-        // only wall-clock time shrinks. (groupIndependent guarantees
-        // identical duplicates can never share a group, so the ledger's
-        // sequential recording stays race-free.)
+        // reassembled in EMISSION order, so history messages and log lines
+        // are identical to a fully sequential run — only wall-clock time
+        // shrinks. (groupIndependent guarantees identical duplicates can
+        // never share a group, so same-target calls stay ordered.)
         const groups = toolLoop.groupIndependent(calls);
         const slots = new Array(calls.length);
         for (const group of groups) {
@@ -1426,18 +1419,7 @@ router.post('/', async (req, res) => {
                   );
                 }
               }
-              // Dedup intercepts (exact-args ledger / consecutive-run_shell guard)
-              // also deserve a visible note: the ⚙ "Running command" line above is
-              // emitted pre-execution, so without this the UI would look like the
-              // command ran multiple times when it was actually deduplicated.
-              if (result && result.skippedDuplicate) {
-                safeWrite(
-                  res,
-                  statusChunk('⚠ ' + ((result.error || 'duplicate tool call skipped').slice(0, 220))),
-                  lost
-                );
-              }
-              // Durable tool-step record (executed or dedup-skipped). Emitted
+              // Durable tool-step record (executed). Emitted
               // for every real outcome so the UI history shows what ran, with
               // what arguments and what result, at what time.
               safeWrite(res, toolChunk(toolRunEvent(c.name, c.args, result)), lost);
@@ -1447,20 +1429,7 @@ router.post('/', async (req, res) => {
         }
         for (const r of slots) results.push(r);
 
-        // Anti-spam streak bookkeeping: a round whose calls were ALL skips
-        // (dedup/churn/anti-spam) performs no new work — two of those in a
-        // row freezes the loop above. Any round with a real execution or a
-        // real error resets the streak (fresh feedback counts as progress).
-        const allSkipped =
-          results.length > 0 &&
-          results.every((r) => {
-            const res = r.result;
-            return res && (res.skippedDuplicate || res.skippedRedundant || res.skippedAntiSpam);
-          });
         execRounds++;
-        if (allSkipped) dupStreak++;
-        else dupStreak = 0;
-        if (dupStreak >= 2) frozen = true;
 
         const resultsText = historyManager.formatToolResults(results);
         agentMessages.push({ role: 'user', content: resultsText });
