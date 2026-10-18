@@ -397,33 +397,35 @@ function createSlotSupervisor(onAbort) {
 }
 
 /**
- * Join two tool-call argument fragments, splitting on JSON token boundaries
- * instead of raw concatenation. llama.cpp's streaming tokenizer (and some
- * OpenAI-compatible remotes) splits identifiers mid-token, e.g. stream
- * `"scripts/c`, `urrent`, `-time.js"` — naive concatenation would miss the
- * leading `\"`, corrupt the JSON, and make `safeParseArgs` silently produce
- * `{}` (which then runs tools with empty args, e.g. a write_file with no
- * content). Re-joining the fragments and re-balancing the quote re-creates
- * the exact JSON the model emitted.
+ * Join two tool-call argument fragments. OpenAI-compatible streaming splits
+ * `function.arguments` at arbitrary token boundaries, so the fragments
+ * concatenate verbatim — except for one real defect: some tokenizers (llama.cpp
+ * and some remotes) emit the SAME quote character twice when the stream
+ * boundary falls on a quote (…" + "… → …""…). That is the only case that
+ * needs repair, and it is detectable LOCALLY at the join point: both fragments
+ * start/end with a quote.
+ *
+ * A global quote-parity check is WRONG here: a JSON string value streaming in
+ * multiple tokens legitimately has an odd running quote count until its
+ * closing quote arrives ("upt" + "ime" inside "uptime"), and a parity-driven
+ * "rebalance" then eats the value's opening quote and corrupts the JSON
+ * (e.g. {"command": "uptime} — which then fails parse, runs the tool with
+ * empty args, or both). Never rebalance — only collapse an actual boundary
+ * double-quote.
  */
 function joinToolCallArgs(a, b) {
   if (!a) return b;
   if (!b) return a;
-  const joined = a + b;
-  const even = (s) => ((s.match(/"/g) || []).length % 2 === 0);
-  if (even(joined)) return joined; // balanced — plain concatenation is fine
-  // Unbalanced quotes: the join point sits inside a JSON string boundary and
-  // one quote char was doubled ('"x"' + '",' -> ...x"",...) or swallowed.
-  // Try the plausible re-joins and take the first that re-balances:
-  //  - drop both boundary quotes, or
-  //  - drop both and re-insert exactly one (keeps the quoted value intact).
-  // Whichever candidate balances the JSON is the one the model intended.
-  const head = a.replace(/\\?"$/, '');
-  const tail = b.replace(/^\\?"/, '');
-  for (const cand of [joined, head + tail, head + '"' + tail]) {
-    if (even(cand)) return cand;
+  // Doubled quote at the join point: the previous fragment ended on a quote
+  // and the next starts with one. The tokenizer emitted the same character
+  // twice — keep one. (Applies to both plain and \"-escaped quotes: the
+  // boundary char itself is a quote either way.)
+  if (a.endsWith('"') && b.startsWith('"')) {
+    return a + b.slice(1);
   }
-  return joined; // nothing better — leave as-is, extractor validation catches it
+  // Everything else (mid-token splits, strings that are still open, keys,
+  // punctuation) concatenates verbatim — that is what the provider emitted.
+  return a + b;
 }
 
 /**
