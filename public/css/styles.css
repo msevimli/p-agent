@@ -445,6 +445,44 @@ html.dark .fe-file-meta { color: #6b7280; }
 }
 .fe-fileview:hover .code-copy { opacity: 1; }
 
+/* File editor (edit mode: textarea + save/cancel bar) */
+/* #fsList is a block scroll container; while editing it becomes a flex
+   column so .fe-editor-wrap's flex:1 resolves against a real height and
+   the textarea fills the pane (block context made flex:1 a no-op and left
+   the editor stuck at its min-height). */
+#fsList.fe-editing { display: flex; flex-direction: column; }
+#fsList.fe-editing .fe-filehead { flex-shrink: 0; }
+.fe-file-actions {
+  margin-left: auto; display: flex; align-items: center; gap: 0.4rem;
+  flex-shrink: 0;
+}
+.fe-editor-wrap {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 0.55rem;
+  padding: 0.25rem 1rem 1rem;
+}
+.fe-editor {
+  flex: 1; min-height: 5rem; width: 100%; resize: none; overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem; line-height: 1.6; tab-size: 2;
+  background: #0d1117; color: #e6edf3; border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 0.6rem; padding: 1rem; outline: none;
+  transition: border-color 0.15s;
+}
+.fe-editor:focus { border-color: #3b82f6; }
+html.dark .fe-editor { background: #0d1117; border-color: rgba(255,255,255,0.14); }
+.fe-editbar { display: flex; align-items: center; gap: 0.55rem; }
+.fe-action-btn.disabled { opacity: 0.55; cursor: not-allowed; }
+.fe-save-feedback {
+  font-size: 0.8rem; color: #6b7280; margin-left: 0.2rem;
+}
+html.dark .fe-save-feedback { color: #9ca3af; }
+.fe-save-feedback.saving { color: #b45309; }
+html.dark .fe-save-feedback.saving { color: #fbbf24; }
+.fe-save-feedback.saved { color: #16a34a; font-weight: 600; }
+html.dark .fe-save-feedback.saved { color: #4ade80; }
+.fe-save-feedback.error { color: #dc2626; }
+html.dark .fe-save-feedback.error { color: #f87171; }
+
 /* ==================================================================
    Skills Management view
    ================================================================== */

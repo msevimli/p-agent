@@ -115,6 +115,13 @@ module.exports = {
   // Max entries list_files returns in one call (the rest is counted, not
   // listed, to keep the prompt small).
   listFilesMaxEntries: Number(process.env.LIST_FILES_MAX_ENTRIES || 200),
+  // File explorer (dashboard) write cap: the editor refuses to save larger
+  // payloads than this (bytes). The agentic write_file tool is unaffected.
+  fsWriteMaxChars: Number(process.env.FS_WRITE_MAX_CHARS || 2097152),
+  // File explorer editor full-read cap: ?full=1 refuses files larger than
+  // this (bytes) so the browser editor can never silently truncate a big
+  // file (the preview read_file cap still applies to the plain view).
+  fsReadFullMaxChars: Number(process.env.FS_READ_FULL_MAX_CHARS || 1048576),
   // How often the slot-liveness supervisor polls GET /slots during stream
   // silence (ms).
   llamaSlotPollMs: Number(process.env.LLAMA_SLOT_POLL_MS || 4000),

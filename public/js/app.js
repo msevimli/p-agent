@@ -1247,6 +1247,9 @@
       <path stroke-linecap="round" stroke-linejoin="round" d="M14 3v5h5" /></svg>`;
   const FE_UP_ICON = `<svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
       <path stroke-linecap="round" stroke-linejoin="round" d="M5 15l7-7 7 7" /></svg>`;
+  const FE_EDIT_ICON = `<svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round"
+        d="M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>`;
 
   function fsParent(rel) {
     const i = rel.lastIndexOf('/');
@@ -1301,6 +1304,7 @@
 
   async function loadFsDir(rel) {
     state.fsDir = rel || '';
+    fsList.classList.remove('fe-editing'); // leaving any open editor
     renderBreadcrumb();
     fsList.innerHTML = '<div class="fs-muted">Loading…</div>';
     let data;
@@ -1334,6 +1338,7 @@
   }
 
   async function openFsFile(entry) {
+    fsList.classList.remove('fe-editing'); // leaving any open editor
     fsList.innerHTML = '<div class="fs-muted">Loading file…</div>';
     let data;
     try {
@@ -1349,8 +1354,11 @@
 
   function renderFileView(entry, data) {
     fsList.innerHTML = '';
+    // latestContent is the content the preview shows; it is replaced after a
+    // successful save so the view reflects what is actually on disk.
+    let latestContent = data.content;
 
-    // header: back-to-folder + filename + meta
+    // header: back-to-folder + filename + meta + edit action
     const head = document.createElement('div');
     head.className = 'fe-filehead';
     const back = document.createElement('button');
@@ -1366,32 +1374,146 @@
     meta.className = 'fe-file-meta';
     meta.textContent = `${formatBytes(data.bytes)} · ${data.path}`;
     titleWrap.append(name, meta);
-    head.append(back, titleWrap);
-    fsList.appendChild(head);
+    const actions = document.createElement('div');
+    actions.className = 'fe-file-actions';
+    const editBtn = document.createElement('button');
+    editBtn.className = 'fe-btn-back';
+    editBtn.innerHTML = `${FE_EDIT_ICON}<span>edit</span>`;
+    editBtn.title = 'Edit this file';
+    editBtn.addEventListener('click', enterEditMode);
+    actions.appendChild(editBtn);
+    head.append(back, titleWrap, actions);
 
-    // code block
-    const pre = document.createElement('pre');
-    pre.className = 'fe-fileview';
-    const code = document.createElement('code');
-    code.textContent = data.content;
-    try {
-      if (typeof hljs !== 'undefined') hljs.highlightElement(code);
-    } catch { /* keep plain text */ }
-    pre.appendChild(code);
-
-    // copy button
-    const btn = document.createElement('button');
-    btn.className = 'code-copy';
-    btn.textContent = 'copy';
-    btn.addEventListener('click', () => {
-      navigator.clipboard.writeText(data.content).then(() => {
-        btn.textContent = 'copied!';
-        setTimeout(() => (btn.textContent = 'copy'), 1500);
+    // plain preview (code block + copy button); previewEl is kept so the
+    // edit-mode error banner can insert ABOVE the intact preview.
+    let previewEl = null;
+    function showPreview(content) {
+      fsList.classList.remove('fe-editing');
+      fsList.innerHTML = '';
+      fsList.appendChild(head);
+      const pre = document.createElement('pre');
+      previewEl = pre;
+      pre.className = 'fe-fileview';
+      const code = document.createElement('code');
+      code.textContent = content;
+      try {
+        if (typeof hljs !== 'undefined') hljs.highlightElement(code);
+      } catch { /* keep plain text */ }
+      pre.appendChild(code);
+      const btn = document.createElement('button');
+      btn.className = 'code-copy';
+      btn.textContent = 'copy';
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(content).then(() => {
+          btn.textContent = 'copied!';
+          setTimeout(() => (btn.textContent = 'copy'), 1500);
+        });
       });
-    });
-    pre.appendChild(btn);
+      pre.appendChild(btn);
+      fsList.appendChild(pre);
+    }
 
-    fsList.appendChild(pre);
+    // edit mode: fetch the FULL content (preview may be truncation-capped —
+    // saving a truncated buffer back would corrupt the file), then swap the
+    // code block for a monospace textarea + save/cancel bar.
+    async function enterEditMode() {
+      let full;
+      try {
+        const res = await fetch('/api/fs/read?path=' + encodeURIComponent(entry.path) + '&full=1');
+        full = await res.json();
+        if (!res.ok || !full.ok) throw new Error(full.error || 'Could not load the full file content');
+      } catch (err) {
+        const errEl = document.createElement('div');
+        errEl.className = 'fe-muted fs-error';
+        errEl.textContent = `⚠️ ${err.message}`;
+        if (previewEl && previewEl.isConnected) fsList.insertBefore(errEl, previewEl);
+        else fsList.appendChild(errEl);
+        return;
+      }
+      buildEditor(full.content);
+    }
+
+    function buildEditor(content) {
+      fsList.classList.add('fe-editing');
+      fsList.innerHTML = '';
+      fsList.appendChild(head);
+
+      const wrap = document.createElement('div');
+      wrap.className = 'fe-editor-wrap';
+
+      const ta = document.createElement('textarea');
+      ta.className = 'fe-editor';
+      ta.value = content;
+      ta.spellcheck = false;
+      ta.setAttribute('aria-label', `Edit ${entry.name}`);
+      ta.setAttribute('data-hook', 'fe-editor');
+
+      const bar = document.createElement('div');
+      bar.className = 'fe-editbar';
+
+      const fb = document.createElement('span');
+      fb.className = 'fe-save-feedback';
+
+      const cancel = document.createElement('button');
+      cancel.className = 'fe-btn-back';
+      cancel.textContent = 'cancel';
+      cancel.setAttribute('data-hook', 'fe-cancel');
+
+      const save = document.createElement('button');
+      save.className = 'fe-action-btn';
+      save.textContent = 'Save';
+      save.setAttribute('data-hook', 'fe-save');
+
+      let saving = false;
+      const setSaving = (on) => {
+        saving = on;
+        save.disabled = cancel.disabled = on;
+        save.classList.toggle('disabled', on);
+      };
+      const onCancel = () => {
+        if (saving) return;
+        if (ta.value !== content && !window.confirm('Discard unsaved changes?')) return;
+        showPreview(latestContent);
+      };
+      cancel.addEventListener('click', onCancel);
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && !saving) {
+          e.preventDefault();
+          onCancel();
+        }
+      });
+      save.addEventListener('click', async () => {
+        if (saving) return;
+        setSaving(true);
+        fb.className = 'fe-save-feedback saving';
+        fb.textContent = 'Saving…';
+        try {
+          const res = await fetch('/api/fs/write', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ path: entry.path, content: ta.value }),
+          });
+          const out = await res.json();
+          if (!res.ok || !out.ok) throw new Error(out.error || 'Save failed');
+          latestContent = ta.value;
+          fb.className = 'fe-save-feedback saved';
+          fb.textContent = 'Saved ✓';
+          // brief visual confirmation, then back to the fresh preview
+          setTimeout(() => showPreview(latestContent), 800);
+        } catch (err) {
+          fb.className = 'fe-save-feedback error';
+          fb.textContent = `⚠️ ${err.message}`;
+          setSaving(false);
+        }
+      });
+
+      bar.append(cancel, save, fb);
+      wrap.append(ta, bar);
+      fsList.appendChild(wrap);
+      ta.focus();
+    }
+
+    showPreview(data.content);
   }
 
   fileExplorerBtn.addEventListener('click', () => {
