@@ -1,5 +1,5 @@
 {
-  "activeId": "nemotron-3-ultra-550b-a55b",
+  "activeId": "hf-DeepSeek-V4-Flash-0731",
   "models": [
     {
       "id": "qwen-coder",
@@ -167,7 +167,17 @@
       "role": "",
       "templateId": "",
       "hasKey": true
+    },
+    {
+      "id": "hf-DeepSeek-V4-Flash-0731",
+      "name": "DeepSeek-V4-Flash-0731",
+      "provider": "remote",
+      "endpoint": "https://router.huggingface.co/v1",
+      "model": "deepseek-ai/DeepSeek-V4-Flash-0731:deepinfra",
+      "contextLength": 500000,
+      "role": "",
+      "templateId": "",
+      "hasKey": true
     }
   ]
 }
-

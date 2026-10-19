@@ -169,7 +169,7 @@ function resolveModelMiB(modelStr) {
   add(String(modelStr));
   add(path.isAbsolute(String(modelStr)) ? null : path.join(config.workRoot, String(modelStr)));
   add(path.join(os.homedir(), 'models', path.basename(String(modelStr))));
-  const llamaCppDir = '/home/openclaw/llama.cpp';
+  const llamaCppDir = '/home/hermesai/llama.cpp';
   if (fs.existsSync(llamaCppDir)) add(path.join(llamaCppDir, 'models', path.basename(String(modelStr))));
   add(path.join(config.workRoot, 'models', path.basename(String(modelStr))));
   for (const p of candidates) {
@@ -693,7 +693,7 @@ function resolveLlamaServerBin() {
   const candidates = [
     config.llamaCppDir && path.join(config.llamaCppDir, 'build', 'bin', 'llama-server'),
     path.join(os.homedir(), 'llama.cpp', 'build', 'bin', 'llama-server'),
-    '/home/openclaw/llama.cpp/build/bin/llama-server',
+    '/home/hermesai/llama.cpp/build/bin/llama-server',
   ].filter(Boolean);
   for (const c of candidates) {
     try { if (fs.statSync(c).isFile()) return c; } catch { /* next */ }
