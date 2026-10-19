@@ -64,6 +64,7 @@ p-agent/
 │   ├── library.js            #   /api/library CRUD + upload (raw body)
 │   ├── channels.js           #   /api/channels — Telegram config/status/toggle
 │   ├── fs.js                 #   /api/fs list/read/write/patch (explorer + editor)
+│   ├── memory.js             #   /api/memory — global facts + workspace MEMORY.md
 │   ├── queue.js              #   GET /api/queue — LLM queue stats
 │   ├── system.js             #   GET /api/system/metrics — RAM/CPU (os module)
 │   └── systemPrompt.js       #   GET/POST/DELETE /api/system/prompt — prompt override
@@ -87,7 +88,11 @@ p-agent/
 │   ├── cascade.js            # two-stage cascade orchestration (router → primary units)
 │   ├── systemPrompt.js       # system-prompt override persistence (data/system-prompt.txt)
 │   ├── skillManager.js       # SKILL.md registry, run/validate/migrate
-│   └── automationManager.js  # cron/interval engine, script/skill/prompt actions
+│   ├── automationManager.js  # cron/interval engine, script/skill/prompt actions
+│   ├── embedder.js           # memory embeddings: xenova → ollama → hash chain
+│   ├── vectorMemory.js       # global memory store (node:sqlite, cosine top-k)
+│   ├── workspaceMemory.js    # workspace MEMORY.md store (fixed path, 48 KiB cap)
+│   └── memoryContext.js      # per-turn memory tail builder (cache-safe append)
 │
 ├── tools/                    # agent tool registry (uniform shape)
 │   ├── fileTools.js          #   read_file / write_file / edit_file (sandboxed)
@@ -95,7 +100,9 @@ p-agent/
 │   ├── skillsTools.js        #   list/run/write/delete_skill
 │   ├── automationsTools.js   #   create/list/run/delete_automation
 │   ├── libraryTools.js       #   list/read/upload_library_file
-│   └── index.js              #   registry = concat of the above (16 tools)
+│   ├── globalMemory.js       #   manage_global_memory (add/delete/search/list)
+│   ├── workspaceMemory.js    #   update_workspace_memory (read/append/overwrite)
+│   └── index.js              #   registry = concat of the above (18 tools)
 │
 ├── public/                   # frontend (no build step)
 │   ├── index.html            #   single page, CDN Tailwind/marked/highlight.js
@@ -494,9 +501,38 @@ p-agent/
 7. **Persistence & UI:** the channel owner persists the exchange — browser:
    client POSTs to `/api/sessions`; Telegram: `telegramBot.js` appends to
    `tg-<chat_id>`; CLI: `bin/pagent.js` appends to `cli` — all into
-   `data/sessions.json`, visible in the dashboard sidebar.
+     `data/sessions.json`, visible in the dashboard sidebar.
 
-## 6. Resilience Notes (learned in production)
+   ### 5.1 Two-tier semantic memory
+
+   - **Workspace memory** (`MEMORY.md` at the workspace root): project facts,
+     decisions, conventions. Read into the request context on EVERY turn while
+     present; managed via `update_workspace_memory` (read/append/overwrite,
+     fixed path, 48 KiB cap — the file rides inside every prompt).
+   - **Global memory** (`data/vector-memory.db`, `node:sqlite`): facts with
+     categories and Float32 embeddings (384-dim). The per-turn builder embeds
+     the user's latest message and retrieves the top-k (default 3) by cosine
+     similarity; managed via `manage_global_memory`
+     (add/delete/search/list) or the sidebar Memory tab.
+   - **Embedding chain** (`services/embedder.js`): `auto` → xenova
+     (all-MiniLM-L6-v2, local, ~90 MB one-time download) → ollama
+     (OLLAMA_URL) → deterministic hash fallback (stemmed word + n-gram
+     hashing, 384-dim, deps-free; keyword-overlap quality). Boot pre-warms
+     the provider so the first real turn never pays the model load.
+   - **Cache-safe injection (deliberate deviation from "system prompt"
+     placement)**: dynamic memory blocks ride as the LAST message of the
+     request (`[Memory context …] <workspace_memory>…</workspace_memory>
+     <global_user_memory>…</global_user_memory>`), NEVER inside the system
+     message — dynamic content in the prefix would invalidate the llama.cpp
+     KV cache every turn (minutes of CPU prefill on this host). The system
+     prompt (template AND the data/system-prompt.txt override) carries only
+     STATIC guidance about the blocks. The tail is appended at call time by
+     `withMemory(msgs)` in routes/chat.js on primary rounds (the router
+     stage stays byte-stable); it never enters session history/compaction.
+     Failure-hard: embedding errors/timeouts degrade to "no context", chat
+     proceeds unchanged.
+
+   ## 6. Resilience Notes (learned in production)
 
 - Diagnostic dump (exact upstream payload + raw chunks) is opt-in via
   `PLIFE_DEBUG_DUMP=1` writing `/tmp/plife-dump.log`.

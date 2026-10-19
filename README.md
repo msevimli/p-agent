@@ -485,6 +485,7 @@ p-agent/
 │   ├── library.js         #   /api/library CRUD + upload
 │   ├── channels.js        #   /api/channels — Telegram config/status
 │   ├── fs.js              #   /api/fs list/read/write/patch (file explorer + editor)
+│   ├── memory.js          #   /api/memory — semantic memory (facts + workspace MEMORY.md)
 │   ├── health.js          #   GET /api/health
 │   ├── queue.js           #   GET /api/queue — request-queue stats
 │   ├── system.js          #   GET /api/system/metrics — RAM + CPU (os module)
@@ -503,8 +504,12 @@ p-agent/
 │   ├── cascade.js         #   two-stage router→primary cascade
 │   ├── systemPrompt.js    #   system-prompt override persistence
 │   ├── skillManager.js    #   SKILL.md registry
-│   └── automationManager.js # cron/interval engine
-├── tools/                 # 16 agent tools (uniform {name,desc,parameters,execute})
+│   ├── automationManager.js # cron/interval engine
+│   ├── embedder.js        #   memory embeddings (xenova/ollama/hash chain)
+│   ├── vectorMemory.js    #   global memory store (node:sqlite + cosine top-k)
+│   ├── workspaceMemory.js #   workspace MEMORY.md store (capped)
+│   └── memoryContext.js   #   per-turn memory tail builder (cache-safe)
+├── tools/                 # 18 agent tools (uniform {name,desc,parameters,execute})
 ├── public/                # vanilla-JS dashboard (no build step)
 ├── data/                  # gitignored runtime state (JSON files + library blobs)
 └── skills/                # user-authored skills (SKILL.md)
@@ -534,6 +539,8 @@ p-agent/
 | GET | `/api/fs/list`, `/api/fs/read` (`?full=1` = uncapped for the editor) | File explorer + editor load |
 | POST | `/api/fs/write` | Save file content (editor) — sandboxed, 2 MB cap |
 | POST | `/api/fs/patch` | Targeted `old_text`→`new_text` in-place edit |
+| GET/POST/DELETE | `/api/memory[/:id]` (`?q=` = semantic search) | Global memory facts |
+| GET/PUT/DELETE | `/api/memory/workspace` | Workspace `MEMORY.md` (editor + clear) |
 | GET | `/api/queue` | Queue stats |
 | GET | `/api/system/metrics` | Host RAM + CPU usage (os module) |
 
@@ -546,3 +553,25 @@ p-agent/
 `LIBRARY_MAX_UPLOAD_MB`,
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `PAGENT_BASE_URL` (CLI),
 `PLIFE_DOTENV_FILE` (alternate .env path). See `.env-example` for the full list.
+
+## Semantic memory (two tiers)
+
+1. **Workspace memory** — `MEMORY.md` at the workspace root: project facts,
+   decisions and conventions, injected into every request while the file
+   exists. Manage it with the `update_workspace_memory` tool
+   (read/append/overwrite, capped at 48 KiB — it rides inside every prompt)
+   or the Memory tab in the sidebar.
+2. **Global memory** — long-term user facts (preferences, style, personal
+   instructions) embedded locally and retrieved semantically (top-k, default
+   3) per turn, injected as a `<global_user_memory>` block. Store is
+   `data/vector-memory.db` (Node's built-in SQLite; JS cosine search —
+   swap-ready for a SQLite vector extension). Facts are added by the
+   `manage_global_memory` tool, automatically from conversation, or the
+   Memory tab.
+
+Cache-safe by design: the system prompt carries only **static** guidance;
+the dynamic memory blocks are appended as the LAST message of each request
+(never into history), so the llama.cpp KV prefix stays byte-stable and only
+the short tail is re-evaluated. Embedder chain (`VECTOR_MEMORY_EMBEDDER`):
+`xenova` (all-MiniLM-L6-v2, real semantics) → `ollama` → `hash`
+(deterministic n-gram fallback, no deps); `auto` picks the first available.
