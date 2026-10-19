@@ -207,4 +207,32 @@ module.exports = {
   // File/shell tools may operate strictly inside this sandbox root
   // (defaults to the plife project directory; override with PLIFE_WORK_ROOT).
   workRoot: path.resolve(process.env.PLIFE_WORK_ROOT || ROOT_DIR),
+
+  // --- semantic memory -----------------------------------------------------
+  // Two-tier memory: (1) WORKSPACE memory = MEMORY.md inside workRoot
+  // (project facts; injected into every prompt while present);
+  // (2) GLOBAL vector memory = SQLite store of (fact, category, embedding)
+  // with local embeddings, top-k retrieved per turn.
+  // SQLite DB path (node:sqlite; env-redirectable for tests).
+  vectorMemoryDb: process.env.VECTOR_MEMORY_DB || path.join(ROOT_DIR, 'data', 'vector-memory.db'),
+  // Embedding provider: auto | xenova | ollama | hash.
+  //  - xenova: @xenova/transformers all-MiniLM-L6-v2 (local, 384-dim,
+  //    ~90 MB weights downloaded to the HF cache on first use)
+  //  - ollama: POST /api/embeddings on OLLAMA_URL (default localhost:11434)
+  //  - hash: built-in deterministic 384-dim n-gram hashing (no deps; the
+  //    offline/CI fallback — keyword-overlap similarity, not semantic)
+  //  - auto: xenova when importable, else ollama if reachable, else hash.
+  memoryEmbedder: process.env.VECTOR_MEMORY_EMBEDDER || 'auto',
+  memoryEmbedderOllamaUrl: process.env.OLLAMA_URL || 'http://127.0.0.1:11434',
+  // How many global facts the per-turn context injection may include.
+  memoryTopK: Number(process.env.MEMORY_TOP_K || 3),
+  // MEMORY.md cap — the file is injected into EVERY request, so it must
+  // stay small (writes/append beyond this are rejected; reads capped too).
+  memoryFileMaxChars: Number(process.env.MEMORY_FILE_MAX_CHARS || 49152),
+  // Active workspace memory file (fixed name by default; env override is
+  // for tests only).
+  workspaceMemoryFile: path.join(
+    path.resolve(process.env.PLIFE_WORK_ROOT || ROOT_DIR),
+    process.env.WORKSPACE_MEMORY_FILE || 'MEMORY.md'
+  ),
 };

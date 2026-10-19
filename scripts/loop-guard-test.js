@@ -37,6 +37,10 @@ const path = require('path');
 // the real data dir.
 process.env.PLIFE_WORK_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'plife-work-'));
 process.env.SYSTEM_PROMPT_FILE = path.join(os.tmpdir(), 'plife-sysprompt-' + process.pid + '.txt');
+// Semantic memory: hermetically redirected so e2e-N (memory-context
+// injection) never touches the real vector store (env binds at require).
+process.env.VECTOR_MEMORY_DB = path.join(os.tmpdir(), 'plife-vecmem-' + process.pid + '.db');
+process.env.VECTOR_MEMORY_EMBEDDER = 'hash';
 
 const ROOT = path.join(__dirname, '..');
 const results = [];
@@ -853,6 +857,31 @@ function restoreState() {
 
     // the real override file must not exist afterwards
     t('e2e-L: override file cleaned up (no pollution)', !fs.existsSync(systemPromptSvc.FILE), systemPromptSvc.FILE);
+  }
+
+  // ----- N) semantic-memory context reaches the PRIMARY payload (memory
+  // tail rides the LAST message; the system prefix stays byte-stable)
+  {
+    const vectorMemory = require(path.join(ROOT, 'services', 'vectorMemory'));
+    const workspaceMemory = require(path.join(ROOT, 'services', 'workspaceMemory'));
+    await vectorMemory.addFact('the user prefers TypeScript for backend projects', 'preference');
+    workspaceMemory.writeMemory('# Project notes\n- The deployment is docker-based');
+    const { callLog: memLog } = await runChat('project language choice', [
+      { content: 'TypeScript it is.', finishReason: 'stop' },
+    ]);
+    const last = memLog[0].messages[memLog[0].messages.length - 1];
+    t('e2e-N: payload carries the memory-context tail as the last message',
+      last.role === 'user' && /Memory context/.test(last.content), JSON.stringify(last && last.content && last.content.slice(0, 60)));
+    t('e2e-N: <workspace_memory> block with the file contents',
+      /<workspace_memory>/i.test(last.content) && last.content.includes('docker-based'), '');
+    t('e2e-N: <global_user_memory> block with the retrieved fact',
+      /<global_user_memory>/i.test(last.content) && last.content.includes('TypeScript'), '');
+    const sys = memLog[0].messages[0];
+    t('e2e-N: system message carries only static guidance (no dynamic memory content)',
+      sys.role === 'system' && !sys.content.includes('TypeScript') && !sys.content.includes('docker-based'), '');
+    // Cleanup: later nets must see pristine payloads (no memory tail).
+    workspaceMemory.clearMemory();
+    vectorMemory.reset();
   }
 
   // ----- M) NO round ceiling: 70 identical valid calls all execute and the

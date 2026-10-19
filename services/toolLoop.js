@@ -295,7 +295,7 @@ function safeParseArgs(str) {
   const p = jsonRepair.parseJsonRepaired(str);
   if (p.ok) {
     if (p.repaired) {
-      console.log(`[tool-call] repaired malformed JSON args (${(p.steps || []).join(',')}) — ${String(str).slice(0, 90).replace(/\n/g, '\\n')}`);
+      console.log(`[tool-call] repaired malformed JSON args (${(p.steps || []).join(',')}) — ${String(str).slice(0, 90).replace(/\n/g, '\n')}`);
     }
     const j = p.value;
     return j && typeof j === 'object' && !Array.isArray(j) ? j : {};
@@ -371,7 +371,7 @@ function tryParseTool(t, outsideTags) {
   const p = jsonRepair.parseJsonRepaired(t);
   if (p.ok) {
     if (p.repaired) {
-      console.log(`[tool-call] repaired malformed tool-call JSON (${(p.steps || []).join(',')}) — ${String(t).slice(0, 90).replace(/\n/g, '\\n')}`);
+      console.log(`[tool-call] repaired malformed tool-call JSON (${(p.steps || []).join(',')}) — ${String(t).slice(0, 90).replace(/\n/g, '\n')}`);
     }
     const c = normalizeCallObject(p.value, outsideTags);
     if (c) return c;
@@ -546,7 +546,7 @@ function buildSystemPrompt(base) {
         'You MAY re-run a read, list or grep to verify after an edit — re-reading is cheap and ' +
         'returns fresh state. What you must not do is redo finished side-effectful work: do not ' +
         'create an automation or append to a log twice because you forgot it already ran — check ' +
-        'the results you have and proceed.\\n' +
+        'the results you have and proceed.\n' +
     'PLAN multi-step work BEFORE calling tools: decide the exact file names, skill names and ' +
     'arguments once, then emit the independent calls together. NEVER churn: do not re-create, ' +
     're-write or delete-and-recreate what a tool result already created — if a call reports ' +
@@ -593,7 +593,7 @@ function buildSystemPrompt(base) {
     'script file FIRST (write_file to scripts/, e.g. scripts/tmp_check.js) and then run it with ' +
     '`node scripts/tmp_check.js` or `bash scripts/tmp_check.sh`. Inline one-liners with nested ' +
         'quotes are fragile — their JSON escapes get corrupted mid-task — while a script file has no ' +
-        'quote-nesting problem at all. Do not re-write the same script; reuse what is already there.\\n' +
+        'quote-nesting problem at all. Do not re-write the same script; reuse what is already there.\n' +
         'JSON-ARGUMENT QUOTE RULE: whenever code or file text is embedded in a tool-call JSON string ' +
         '(write_file content, write_skill files, run_shell commands), every internal double quote MUST ' +
         'be escaped as \\" — e.g. the code line data["solana"]["usd"] must be sent as data[\\"solana\\"][\\"usd\\"], ' +
@@ -601,7 +601,7 @@ function buildSystemPrompt(base) {
         'where possible — single quotes need no escaping. NEVER emit backtick-fenced, raw multi-line code ' +
         'inside a JSON string value. For multiple script files, prefer sequential write_file calls (one ' +
         'file each) over nesting many unescaped code blocks in a deep files map — a single malformed quote ' +
-        'rejects the whole call.\\n' +
+        'rejects the whole call.\n' +
     'If a call fails, fix it and retry once, then keep going. After the tool results, work until ' +
     'the task is done, then reply with a short plain-text final answer.\n' +
     'You execute shell commands yourself with the run_shell tool and have internet access through curl. ' +
@@ -611,9 +611,17 @@ function buildSystemPrompt(base) {
         'with the automation tools — never suggest OS crontab entries. To stop one rule use ' +
         'set_automation_enabled (enabled:false); to stop ALL rules at once use set_automations_paused ' +
         '(paused:true); both keep the rules and allow manual run_automation. Re-enable with ' +
-        'enabled:true / paused:false.\\n' +
+        'enabled:true / paused:false.\n' +
     'Library: attached files are usually inlined in your input; use the library tools to list, ' +
-    'read or save documents.\n' +
+        'read or save documents.\n' +
+        'MEMORY: you have TWO persistent memory layers. (1) WORKSPACE memory: requests carry a ' +
+        '<workspace_memory> block (when MEMORY.md exists) with project facts/conventions — read it ' +
+        'and follow it; maintain it with update_workspace_memory (append, never rewrite history unless ' +
+        'asked; keep entries short). (2) GLOBAL memory: requests carry a <global_user_memory> block ' +
+        'with the user\'s semantically-retrieved long-term facts — treat them as instructions; add ' +
+        'durable user preferences/coding-style facts with manage_global_memory when they surface ' +
+        'during a task, delete only what the user explicitly wants forgotten, and never claim you ' +
+        '"remember" something that is not in these blocks — absent blocks mean empty memory.\n' +
     'Skills: skills are plain user-managed folders in the workspace skills/ directory — they are ' +
     'NOT built-in tools or core functionality. List them with list_skills, create or update them ' +
     'with write_skill, run them with run_skill, and permanently DELETE any user skill with ' +
@@ -659,6 +667,11 @@ const TOPIC_TOOLS = [
     topic: 'library',
     re: /library|attach|upload|stored file/i,
     tools: ['list_library_files', 'read_library_file', 'upload_library_file'],
+  },
+  {
+    topic: 'memory',
+    re: /memor|rememb|forget|recall/i,
+    tools: ['manage_global_memory', 'update_workspace_memory'],
   },
 ];
 

@@ -33,6 +33,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 const systemPromptSvc = require('../services/systemPrompt');
+const memoryContextSvc = require('../services/memoryContext');
 const { complete, buildChatPayload } = require('../services/llamaClient');
 const toolLoop = require('../services/toolLoop');
 const historyManager = require('../services/historyManager');
@@ -511,6 +512,11 @@ router.post('/', async (req, res) => {
   const lastUserMsg = [...(messages || [])].reverse().find((m) => m && m.role === 'user');
   const firstUserText = (lastUserMsg && lastUserMsg.content) || '';
   const automationIntent = !!toolsEnabled && !!firstUserText && toolLoop.isAutomationCreationRequest(firstUserText);
+  // Semantic memory context: build STARTED here (in parallel with the budget
+  // probe below) so the await before firstCall costs ~nothing; bounded by
+  // memoryContextSvc.EMBED_TIMEOUT_MS and failure-safe (text:null => no
+  // context message, chat proceeds unchanged).
+  const memCtxPromise = memoryContextSvc.buildMemoryContext(firstUserText);
 
   // Tool selection — prompt-cache-friendly. DEFAULT: ALL tools, always, in a
   // fixed name-sorted order (identical serialization across requests, warmed
@@ -663,9 +669,19 @@ router.post('/', async (req, res) => {
   };
   const streamReasoning = (r) => safeWrite(res, reasoningChunk(r), lost);
 
+  // Memory context tail: appended at CALL time (never pushed into
+  // agentMessages — it must not leak into history/compaction/persistence),
+  // on PRIMARY rounds only — the ROUTER keeps its byte-stable prefix.
+  // Same block for every round of the turn (query-embedded once).
+  const memoryContext = await memCtxPromise;
+  const withMemory = (msgs) => {
+    if (!memoryContext || !memoryContext.text) return msgs;
+    return [...msgs, { role: 'user', content: memoryContext.text }];
+  };
+
   const firstCall = toolsEnabled
     ? {
-        payload: buildChatPayload(cascade.enabled ? withRouterSystem(agentMessages) : agentMessages, gen, cascade.enabled
+        payload: buildChatPayload(cascade.enabled ? withRouterSystem(agentMessages) : withMemory(agentMessages), gen, cascade.enabled
           ? { system: cascade.routerSystem, tools: routerToolsArr, target: cascade.targets.router, maxTokens: config.routerMaxTokens, temperature: config.routerTemperature }
           : { system: systemPrompt, tools }),
         // Target override for the SOCKET layer (doComplete/streamCompletions) —
@@ -748,7 +764,7 @@ router.post('/', async (req, res) => {
       if (u && Number.isFinite(u.prompt_tokens)) histTokens = u.prompt_tokens - config.promptPrefixTokens;
     };
     try {
-      return await streamPlainAnswer(res, agentMessages, gen, onUsageCb, lost, firstAttempt, plainSys, (t) => { lastTimings = t; }, target);
+      return await streamPlainAnswer(res, withMemory(agentMessages), gen, onUsageCb, lost, firstAttempt, plainSys, (t) => { lastTimings = t; }, target);
     } catch (e) {
       if (!historyManager.isContextError(e) || ctxRetried || lost) throw e;
       ctxRetried = true;
@@ -764,7 +780,7 @@ router.post('/', async (req, res) => {
       historyManager.rememberLastCompactOutput(agentMessages);
       logCompaction('post-overflow(plain)', c.before, c.after, c.removed, rePrefill, budget, () => lastTimings);
       safeWrite(res, statusChunk('⚠ Context limit reached — history trimmed, retrying once.'), lost);
-      return await streamPlainAnswer(res, agentMessages, gen, onUsageCb, lost, null, plainSys, (t) => { lastTimings = t; }, target);
+      return await streamPlainAnswer(res, withMemory(agentMessages), gen, onUsageCb, lost, null, plainSys, (t) => { lastTimings = t; }, target);
     }
   };
 
@@ -846,7 +862,7 @@ router.post('/', async (req, res) => {
           acc = await (i === 0 && !firstRoundDone
                     ? firstPromise
                     : complete({
-                        payload: buildChatPayload(stage === 'route' && cascade.enabled ? withRouterSystem(agentMessages) : agentMessages, gen, (() => {
+                        payload: buildChatPayload(stage === 'route' && cascade.enabled ? withRouterSystem(agentMessages) : withMemory(agentMessages), gen, (() => {
                           const o = { system: stageSystem, tools: stage === 'route' && cascade.enabled ? routerToolsArr : tools, target: stageTarget };
                           if (stage === 'route' && cascade.enabled) {
                             o.maxTokens = config.routerMaxTokens;

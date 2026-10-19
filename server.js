@@ -12,6 +12,7 @@ const automationManager = require('./services/automationManager');
 const telegramBot = require('./services/telegramBot');
 const modelLifecycle = require('./services/modelLifecycle');
 const modelManager = require('./services/modelManager');
+const embedder = require('./services/embedder');
 
 const app = express();
 
@@ -24,6 +25,7 @@ app.use('/api/health', require('./routes/health'));
 app.use('/api/chat', require('./routes/chat'));
 app.use('/api/sessions', require('./routes/sessions'));
 app.use('/api/fs', require('./routes/fs'));
+app.use('/api/memory', require('./routes/memory'));
 app.use('/api/library', require('./routes/library'));
 app.use('/api/skills', require('./routes/skills'));
 app.use('/api/models/templates', require('./routes/templates'));
@@ -99,6 +101,9 @@ app.listen(config.port, () => {
     warmBoot(bootModelIds());
   }
 });
+
+// Semantic-memory embedder preload (background; never blocks boot).
+embedder.warm();
 
 // Stop the scheduler cleanly on shutdown signals.
 for (const sig of ['SIGINT', 'SIGTERM']) {
