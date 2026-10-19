@@ -6,9 +6,11 @@
  *     any tool call — including back-to-back run_shell commands, repeated
  *     reads, and delete-after-create — all EXECUTE. The reported failure
  *     mode was the opposite: a model re-running a grep or re-reading a file
- *     after an edit got blocked as a "duplicate". The only remaining bounds
- *     are the per-request execution-round ceiling and the static anti-spam
- *     guardrails (chmod-on-.py, missing-logs hint).
+ *     after an edit got blocked as a "duplicate". Since 2026-10-18 there is
+ *     no repetition detection AND no round ceiling: the only bounds are the
+ *     repeated-invalid-call freeze in routes/chat.js (identical broken
+ *     emissions) and the static anti-spam guardrails (chmod-on-.py,
+ *     missing-logs hint).
  *  2. joinToolCallArgs (services/llamaClient.js): re-joins fragmented
  *     streaming tool-call arguments on JSON token boundaries.
  *  3. Automation enforcement settle (routes/chat.js): a model that creates
@@ -293,10 +295,9 @@ function restoreState() {
     t('repeat: identical create_automation executes again (no skip)', ca2.ok === true && !ca2.skippedDuplicate, JSON.stringify(ca2));
     t('repeat: create_automation executed twice (real repeat)', execCount === 2);
 
-    // ---- no repetition detection ------------------------------------------
-    // Identical consecutive calls and A-B-A-B-A cycles all EXECUTE: the
-    // loop ceiling is the only bound, and a model re-running a check after
-    // an edit is legitimate, not a loop.
+    // ---- no repetition detection, no round ceiling ---------------------
+    // Identical consecutive calls and A-B-A-B-A cycles all EXECUTE: a model
+    // re-running a check after an edit is legitimate, not a loop.
     {
       const g1 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(10)"' });
       const g2 = await toolLoop.executeTool('run_shell', { command: 'node -e "console.log(10)"' });
@@ -331,8 +332,8 @@ function restoreState() {
       t('rep: run_automation identical repeat executes (no exempt guard)', r1.ok === true && r2.ok === true && !r2.skippedDuplicate, JSON.stringify(r2));
     }
     {
-      // Long unique multi-step progression — no numeric ceiling: every step
-      // executes as long as the loop ceiling is not reached.
+      // Long unique multi-step progression — no ceiling anywhere: every step
+      // executes until the model naturally answers.
       let allOk = true;
       for (let i = 100; i < 130; i++) {
         const r = await toolLoop.executeTool('run_shell', { command: `node -e "console.log(${i})"` });
@@ -740,8 +741,8 @@ function restoreState() {
   }
 
   // ----- I) fail-fast: the SAME invalid emission repeated 3 times freezes
-  // the loop immediately (previously it burned the full 7-round budget on
-  // the identical broken call, which is the reported 2-minute freeze)
+  // the loop immediately (the only structural stop left — identical broken
+  // emissions make zero progress, so they must never spin forever)
   {
     const broken = { index: 0, id: 'i1', name: 'read_file', arguments: '{}' };
     const { statuses, text, steps, callLog } = await runChat('check the file for me please', [
@@ -852,6 +853,30 @@ function restoreState() {
 
     // the real override file must not exist afterwards
     t('e2e-L: override file cleaned up (no pollution)', !fs.existsSync(systemPromptSvc.FILE), systemPromptSvc.FILE);
+  }
+
+  // ----- M) NO round ceiling: 70 identical valid calls all execute and the
+  // loop keeps going past the old 64-round cap until the model answers
+  // naturally (the mock exhausts if the loop overruns its canned rounds, so
+  // this also pins that the router never stops on its own)
+  {
+    const dupCall = {
+      index: 0,
+      id: 'm1',
+      name: 'read_file',
+      arguments: '{"path":"ok.txt"}',
+    };
+    const canned = [];
+    for (let i = 0; i < 70; i++) canned.push({ toolCalls: [dupCall] });
+    canned.push({ content: 'Done after many checks.', finishReason: 'stop' });
+    const { statuses, text, steps } = await runChat('check ok.txt seventy times then answer', canned);
+    const executed = callLog.filter((c) =>
+      c.messages.some((m) => m.content && m.content.includes('read_file: {"ok":true'))
+    ).length;
+    t('e2e-M: all 70 identical reads executed (no dedup, no early stop)', executed === 70, `executed=${executed}`);
+    t('e2e-M: loop ran past the old 64-round cap (71 steps total)', steps === 71, `steps=${steps}`);
+    t('e2e-M: no freeze anywhere on valid repeats', !statuses.some((s) => s.includes('⛔')), JSON.stringify(statuses).slice(0, 200));
+    t('e2e-M: final answer served naturally', /Done after many checks/.test(text), text.slice(0, 80));
   }
 
   await new Promise((resolve) => server.close(resolve));

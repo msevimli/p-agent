@@ -237,9 +237,12 @@ function normalizeFileToolArgs(name, args) {
  * 2. There is NO duplicate suppression: every call executes as emitted, no
  *    matter how often the same (name, args) was already run in this request.
  *    A re-run of a read/grep after an edit returns FRESH state (the reported
- *    workflow — verification must never be blocked). The only bounds are the
- *    per-request execution-round ceiling and the static anti-spam guardrails
- *    (chmod-on-.py, missing-logs hint) in the tools themselves.
+ *    workflow — verification must never be blocked). There is NO round
+ *    ceiling and no repetition detection: the loop ends only when the
+ *    model answers in plain text (or the repeated-invalid-call freeze in
+ *    routes/chat.js trips on 3× identical broken emissions); the static
+ *    anti-spam guardrails (chmod-on-.py, missing-logs hint) live in the
+ *    tools themselves.
  */
 async function executeTool(name, args) {
   const tool = getTool(name);

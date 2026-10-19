@@ -335,7 +335,7 @@ async function cmdConfig(positional) {
     `work root ............. ${c.workRoot}`,
     `data dir .............. ${c.dataDir}`,
     `active model .......... ${modelsFromFile().activeId || '(none)'}`,
-    `tool calling .......... ${c.toolCallingEnabled ? 'on' : 'off'} (max ${c.toolMaxIterations} iters)`,
+    `tool calling .......... ${c.toolCallingEnabled ? 'on' : 'off'} (no round cap)`,
     `queue ................. limit ${c.queueLimit}, retries ${c.queueRetries}`,
     `max tokens/call ....... ${c.llamaMaxTokens} (continuation ${c.continuationMaxRounds} rounds)`,
     `sse heartbeat ......... ${c.sseHeartbeatMs} ms`,

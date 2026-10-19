@@ -175,9 +175,11 @@ p-agent/
   calls (native `tool_calls` first, else the JSON-block extractor) → execute
   via the registry → feed results back as alternating assistant/user messages
   (this llama build rejects `role:"tool"`) → repeat until a plain-text final
-  answer or `toolMaxIterations` (default 10). `type:"status"` SSE events
-  stream tool activity (”⚙ Running command: …”) live, and dedup intercepts
-  surface as explicit ”⚠ duplicate … skipped” events.
+  answer. There is **no round ceiling and no duplicate suppression** —
+  identical repeat calls execute with fresh state, and the loop runs until
+  the model answers, the client stops the turn, or the repeated-invalid-call
+  freeze trips. `type:"status"` SSE events stream tool activity (”⚙ Running
+  command: …”) live.
   **Reasoning relay:** reasoning-capable models stream their thinking
   separately — llama.cpp/OpenRouter `reasoning_content` deltas (and locally
   emitted ` thinking... ` / `.../thinking` tags) are extracted every round and
@@ -214,13 +216,15 @@ p-agent/
     and `arguments`/`args` key aliases; several calls per completion execute in
     emission order). Fragmented native `tool_calls.arguments` are re-joined on
     JSON token boundaries (`joinToolCallArgs`).
-  **No duplicate suppression:** every tool call executes exactly as emitted,
-  however often the same (tool, args) already ran in the request — a model
-  re-running a grep or re-reading a file after an edit gets FRESH state and
-  is never skipped as a "duplicate" (the old per-request exact-args ledger,
-  the consecutive-`run_shell` guard, the alternation detector and the
-  redundant-churn guard were removed; only the 64-round execution ceiling
-  and the 3×-identical-invalid freeze remain as safety nets).
+  **No duplicate suppression, no round ceiling:** every tool call executes
+  exactly as emitted, however often the same (tool, args) already ran in the
+  request — a model re-running a grep or re-reading a file after an edit gets
+  FRESH state and is never skipped as a "duplicate", and the tool loop has no
+  iteration cap: it ends only on a plain-text final answer, a lost client, a
+  manual stop, or the repeated-invalid-call freeze (the old per-request
+  exact-args ledger, the consecutive-`run_shell` guard, the alternation
+  detector, the redundant-churn guard and the 64-round execution ceiling
+  were all removed).
   **Validation before execution:** required parameters must be present,
   type-coerced, non-empty and free of placeholder tokens; an invalid call is
   rejected with a corrective `invalidArgs` error (never executed) and
@@ -237,11 +241,10 @@ p-agent/
   (run_shell). Status labels
   resolve the same aliases (`labelPath`/`labelCommand` in routes/chat.js), so
   the feed shows the real path/command pre-execution.
-  **Anti-loop safety nets:** the same invalid call repeated 3× in one request
-  fails fast and forces the final answer instead of looping;
-  `MAX_TOOL_ROUNDS=64` + `TOOL_MAX_ITERATIONS` (default 64)
-  are pure
-  safety nets — there is no repetition detection, so identical repeats of
+  **Anti-loop safety:** the only structural stop is the repeated-invalid-call
+  freeze — the SAME invalid emission repeated 3× in one request fails fast
+  and forces the final answer instead of looping forever. There is no
+  repetition detection and no round ceiling, so identical repeats of
   any tool call execute (verification re-runs after edits are legitimate);
   conversation-based path recovery is
   whitelisted to read_file/write_file/edit_file ONLY — never inferred for
@@ -317,7 +320,7 @@ p-agent/
   `services/skillManager.js`): flat JSON persistence — sessions, model
   registry (re-read per request, masked keys), automations state + bounded
   logs, skills state, channels state, library index + blobs. The config layer
-  is env-driven end to end (PORT, LLAMA_*, TOOL_CALLING, TOOL_MAX_ITERATIONS,
+  is env-driven end to end (PORT, LLAMA_*, TOOL_CALLING,
   QUEUE_*, TELEGRAM_*, LIBRARY_*, PLIFE_WORK_ROOT, PLIFE_DOTENV_FILE, …).
 
 - **Local LLM Integration** (`services/llamaClient.js` + `requestQueue.js` +
@@ -347,7 +350,7 @@ p-agent/
   systemd *user unit* `~/.config/systemd/user/llama-<id>.service` from the
   model's launch template (`services/templateStore.js` + Templates tab; flags
   validated: `-m`/`--host`/`--port` may not appear in templates), resolves the
-  GGUF path (config → `~/llama.cpp` → `/home/openclaw/llama.cpp`), and always
+  GGUF path (config → `~/llama.cpp` → `/home/hermesai/llama.cpp`), and always
   appends `-m <path> --host 0.0.0.0` LAST — llama.cpp's last-wins parsing
   makes the bind authoritative over any template arg, and loopback health
   probes still work against 0.0.0.0. Auto-generated units carry a

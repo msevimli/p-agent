@@ -31,7 +31,7 @@ const path = require('path');
   }
 })();
 
-// Project root = the directory that holds server.js (/home/openclaw/plife).
+// Project root = the directory that holds server.js (/home/hermesai/p-agent).
 const ROOT_DIR = path.resolve(__dirname);
 
 module.exports = {
@@ -139,15 +139,10 @@ module.exports = {
   // generation (queue waits, tool steps, slow TTFT) while work is alive.
   sseHeartbeatMs: Number(process.env.SSE_HEARTBEAT_MS || 15000),
   llamaSystemPrompt: process.env.LLAMA_SYSTEM_PROMPT || 'You are a helpful AI assistant.',
-  // Tool calling: enable/disable the agentic loop and cap its iterations so a
-  // runaway model can't loop forever.
+  // Tool calling: enable/disable the agentic loop. There is NO iteration
+  // cap — the loop ends only on a plain-text final answer, a lost client,
+  // a manual stop, or the repeated-invalid-call freeze in routes/chat.js.
   toolCallingEnabled: process.env.TOOL_CALLING !== 'false',
-  // Outer tool-loop ceiling (rounds incl. escalations/corrections). Safety
-  // net only: real loop termination is repetition detection (identical
-  // consecutive calls, A-B-A-B ping-pong, all-skip rounds) in toolLoop/chat.js,
-  // so deep multi-step tasks (read → grep → db → …) run as long as each
-  // step is unique progress; 64 rounds rarely binds, the env override stays.
-  toolMaxIterations: Number(process.env.TOOL_MAX_ITERATIONS || 64),
   // Guard retry (step 3): when the model answers with a shell/curl description
   // instead of a tool call, retry once with tool_choice:"required". Requires a
   // llama.cpp build that accepts the field on the OpenAI-compat API; set

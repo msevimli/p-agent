@@ -388,14 +388,14 @@ short refusal and never trigger the agent.
 - **Rejection feedback & safety nets** — a rejected call names the
   missing key AND the expected shape (`Expected format: {"path": …}` /
   `{"command": "your_shell_command_here"}`; placeholder text like
-  `your_shell_command_here` itself is never executed). The same invalid call
-  repeated 3× fails fast and forces the final answer. **There is NO
-  duplicate suppression: every tool call executes exactly as emitted** —
-  identical repeats (re-running a grep or re-reading a file after an edit)
-  return fresh state and are never skipped as "duplicates"; the only bounds
-  are numeric ceilings (64 execution rounds, `TOOL_MAX_ITERATIONS` default
-  64) as pure safety nets, and the trip notice tells the user the work so
-  far is recorded and a follow-up continues.
+  `?` is also refused), and the model gets the corrective error to retry
+  with complete arguments. The tool loop has **no round ceiling and no
+  repetition detection** — identical repeats (re-running a grep or
+  re-reading a file after an edit) return fresh state and are never
+  skipped as "duplicates", and deep multi-step investigations run until
+  the model answers naturally, the client stops the turn, or the
+  repeated-invalid-call freeze trips (the SAME broken emission 3× makes
+  zero progress, so it forces the final answer instead of spinning).
   Conversation-based path recovery exists ONLY for
   read_file/write_file/edit_file — never inferred for run_shell, delete_file
   or anything else.
@@ -541,7 +541,8 @@ p-agent/
 
 `PORT`, `LLAMA_BASE_URL`, `LLAMA_API_KEY` (+ `LLAMA_API_KEY_<MODEL_ID>`),
 `LLAMA_MODEL`, `LLAMA_MAX_TOKENS`, `LLAMA_SYSTEM_PROMPT`, `TOOL_CALLING`
-(`false` disables tools), `TOOL_MAX_ITERATIONS`, `QUEUE_LIMIT`,
-`QUEUE_RETRIES`, `PLIFE_WORK_ROOT` (sandbox), `LIBRARY_MAX_UPLOAD_MB`,
+(`false` disables tools), `QUEUE_LIMIT`,
+`QUEUE_RETRIES`, `PLIFE_WORK_ROOT` (sandbox),
+`LIBRARY_MAX_UPLOAD_MB`,
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `PAGENT_BASE_URL` (CLI),
 `PLIFE_DOTENV_FILE` (alternate .env path). See `.env-example` for the full list.

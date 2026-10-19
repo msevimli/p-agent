@@ -8,8 +8,11 @@
  *   2. Intercepts a tool call (native delta.tool_calls OR JSON block in text),
  *      executes it via the toolLoop service, and feeds the result back as a
  *      `tool` message.
- *   3. Loops up to config.toolMaxIterations, streaming `type:"status"` events
- *      so the frontend shows what the agent is doing in real time.
+ *   3. Loops until the model answers in plain text (no round ceiling) —
+ *      streaming `type:"status"` events so the frontend shows what the
+ *      agent is doing in real time. The only structural stop is the
+ *      repeated-invalid-call freeze; otherwise the loop ends only on a
+ *      final answer, a lost client, or a manual stop.
  *   4. When the model finally answers with plain text, streams it as normal
  *      OpenAI content chunks + usage, then `data: [DONE]`.
  *
@@ -804,20 +807,21 @@ router.post('/', async (req, res) => {
       let stageTarget = cascade.enabled ? cascade.targets.router : null;
       let stageSystem = cascade.enabled ? cascade.routerSystem : systemPrompt;
       let firstRoundDone = false; // never re-await the pre-queued firstPromise
-      // Loop safety state (per user message): the ONLY loop bounds are the
-      // per-request execution-round ceiling below and the repeated-invalid-
-      // call freeze (rejectedCalls). Tool calls are NEVER suppressed by
-      // history — identical repeats execute, so a model re-running a grep or
-      // re-reading a file after an edit gets fresh state (the dedup/anti-
-      // repetition guards were removed for exactly this workflow).
-      let execRounds = 0; // safety ceiling on rounds that execute tool calls
+      // Loop termination (per user message): there is NO round ceiling —
+      // the loop runs until the model answers in plain text, the client
+      // disconnects, or the repeated-invalid-call freeze below stops it
+      // (identical broken emissions make zero progress, so a 3× repeat
+      // forces the final answer instead of spinning forever). Tool calls
+      // are NEVER suppressed by history — identical repeats execute, so a
+      // model re-running a grep or re-reading a file after an edit gets
+      // fresh state (the dedup/anti-repetition guards were removed for
+      // exactly this workflow).
       let frozen = false; // tool execution locked out; final answer forced
       let frozenRounds = 0;
       // Per-request count of IDENTICAL rejected emissions (name -> argsKey ->
       // count): the model repeating the exact same invalid call 3 times gets
-      // frozen instead of burning rounds on the same mistake.
+      // frozen instead of repeating the same mistake forever.
       const rejectedCalls = new Map();
-      const MAX_TOOL_ROUNDS = 64;
       // Live-streaming bookkeeping: loop rounds stream their deltas to the
       // client in real time (see onDelta/onReasoning below); the round
       // boundary events tell the frontend which text to keep. The FINAL
@@ -832,7 +836,9 @@ router.post('/', async (req, res) => {
         stageSystem = systemPrompt;
         console.log(`[cascade] stage=primary (${why})`);
       };
-      for (let i = 0; i < config.toolMaxIterations; i++) {
+      // No round ceiling: the loop ends only on a plain-text final answer,
+      // a lost client, or the repeated-invalid-call freeze below.
+      for (let i = 0; ; i++) {
         if (lost) break; // client gone — don't spend queue slots on nobody
         roundStreamed = false; // per-round: did THIS round's deltas reach the client?
         let acc;
@@ -1099,7 +1105,8 @@ router.post('/', async (req, res) => {
               safeWrite(res, statusChunk('⚠ The model did not produce a create_automation call and the schedule/action could not be inferred — automation NOT created.'), lost);
             }
             // Last resort: free the queue slot and end the loop with a
-            // truthful summary instead of burning the remaining iterations.
+            // truthful summary instead of burning further rounds without
+            // progress.
             safeWrite(res, statusChunk(`Automation request aborted after ${automationRetries} forced round(s).`), lost);
             endRound(false);
             finalText += 'I could not complete the automation creation this time. Please try again or check the request wording.';
@@ -1274,19 +1281,18 @@ router.post('/', async (req, res) => {
             }
           }
 
-          // --- safety-net abort (structural stop) -------------------------
-          // Per-request execution-round ceiling (or the repeated-invalid-call
-          // freeze above): stop tool execution, tell the model to write the
+          // --- repeated-invalid-call freeze (structural stop) -------------
+          // The SAME invalid call was rejected 3× in this request: tool
+          // execution is locked out (no progress is possible while the
+          // model repeats a broken emission). Tell the model to write the
           // final answer from what it has, and after one more non-compliant
           // round close deterministically.
-          if (frozen || execRounds >= MAX_TOOL_ROUNDS) {
+          if (frozen) {
             if (frozenRounds >= 1) {
               // The stop notice was ignored and tool calls were emitted again:
               // deterministic close — no further LLM/execution rounds.
               finalText =
-                'The task was stopped by the tool-loop safety net after ' +
-                execRounds +
-                ' execution round(s). Everything that ran is ' +
+                'The task was stopped because the same invalid tool call was repeated 3 times. Everything that ran is ' +
                 'shown in the tool results above; anything not listed there was not completed. ' +
                 'Please rephrase the request or ask for a specific step if something is missing.';
               endRound(false); // raw attempt text — the deterministic close follows
@@ -1295,10 +1301,6 @@ router.post('/', async (req, res) => {
             }
             frozen = true;
             frozenRounds++;
-            const why =
-              execRounds >= MAX_TOOL_ROUNDS
-                ? `reached the ${MAX_TOOL_ROUNDS}-round execution limit`
-                : 'the tool loop was stopped by the safety guard';
             const frozenCallText = calls
               .map((c) => JSON.stringify({ tool: c.name, args: c.args }))
               .join('\n');
@@ -1306,9 +1308,8 @@ router.post('/', async (req, res) => {
             agentMessages.push({
               role: 'user',
               content:
-                '[System] Execution stopped: ' +
-                why +
-                ', and no new work was done. No further tool calls will execute. Write your final ' +
+                '[System] Execution stopped: the same invalid tool call was repeated 3 times, so ' +
+                'no further tool calls will execute. Write your final ' +
                 'answer NOW from the results you already have — say honestly what was completed and ' +
                 'what was not.',
             });
@@ -1317,7 +1318,7 @@ router.post('/', async (req, res) => {
             compactIfNeeded('anti-spam-stop');
             safeWrite(
               res,
-              statusChunk(`⛔ Tool loop stopped after ${execRounds} execution round(s) — ${why}; forcing the final answer.`),
+              statusChunk('⛔ Tool execution frozen — forcing the final answer.'),
               lost
             );
             endRound(false); // frozen round's raw text — next round's stream replaces it
@@ -1429,8 +1430,6 @@ router.post('/', async (req, res) => {
         }
         for (const r of slots) results.push(r);
 
-        execRounds++;
-
         const resultsText = historyManager.formatToolResults(results);
         agentMessages.push({ role: 'user', content: resultsText });
         histTokens += historyManager.estimateTokens(resultsText);
@@ -1441,21 +1440,6 @@ router.post('/', async (req, res) => {
           safeWrite(res, statusChunk(`🧠 ${cascade.primary.name} — tools executed, generating the final response.`), lost);
           switchToPrimary('tools-executed');
         }
-      }
-      if (!answered) {
-        // Safety-net trip: the loop made steady (unique) progress but the
-        // model never produced a final answer within the (generous) ceiling.
-        // Surface it as a visible event, not just a silent final text.
-        safeWrite(
-          res,
-          statusChunk(
-            `⏹ Reached the tool-step safety ceiling (${config.toolMaxIterations} rounds) with steady progress but no final answer — everything that ran is recorded above; send a follow-up to continue.`
-          ),
-          lost
-        );
-        finalText =
-          finalText ||
-          '⏹ Reached the tool-step safety ceiling without a final answer. The tool steps above are complete and recorded; tell me what to do next to continue.';
       }
     }
 
