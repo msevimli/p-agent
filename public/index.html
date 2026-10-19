@@ -80,6 +80,13 @@
                 </svg>
                 <span>File Explorer</span>
               </button>
+              <button id="memoryBtn" class="sidebar-tool-item" title="Manage the two-tier memory (global facts + workspace MEMORY.md)">
+                <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round"
+                    d="M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM9 7h6M9 11h6M9 15h3" />
+                </svg>
+                <span>Memory</span>
+              </button>
               <button id="modelsBtn" class="sidebar-tool-item" title="Manage LLM models">
                 <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
                   <rect x="5" y="8" width="14" height="8" rx="1.5" />
@@ -542,6 +549,74 @@
         <div id="skillsList" class="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
         </div>
       </main><!-- /skillsView -->
+
+      <!-- ===== Memory view ===== -->
+      <main id="memoryView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
+        <!-- top bar: back to chat + title + refresh -->
+        <div class="fe-topbar shrink-0">
+          <button id="memoryBackChat" class="fe-btn-back" title="Back to chat">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            <span>Chat</span>
+          </button>
+          <div class="fe-view-title">Memory</div>
+          <button id="memoryRefresh" class="fe-btn-back" title="Refresh memory">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round"
+                d="M4 4v6h6M20 20v-6h-6M20 9a8 8 0 0 0-14.5-3M4 15a8 8 0 0 0 14.5 3" />
+            </svg>
+            <span>Refresh</span>
+          </button>
+        </div>
+        <div class="px-4 sm:px-6 py-2.5 max-w-3xl mx-auto shrink-0 w-full">
+          <p class="text-[13px] text-gray-500 dark:text-gray-400">
+            Two-tier memory: <strong class="text-gray-700 dark:text-gray-200">global facts</strong> (embedded,
+            retrieved semantically and injected into relevant turns) and the workspace
+            <code class="sc-code">MEMORY.md</code> (injected into every turn of this workspace).
+            The agent can add to both directly while working.
+          </p>
+        </div>
+        <!-- body: global facts + workspace editor -->
+        <div id="memoryList" class="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 pb-6 max-w-3xl mx-auto w-full">
+          <div class="flex items-center justify-between mt-1 mb-2">
+            <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-200">Global memory</h3>
+            <span id="memCount" class="text-[11px] text-gray-400 dark:text-gray-500 tabular-nums">0 facts</span>
+          </div>
+          <div class="flex gap-2 mb-2">
+            <input id="memSearchInput" type="text" placeholder="Search facts semantically…"
+              class="flex-1 min-w-0 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-white/5
+                     px-3 py-1.5 text-sm outline-none focus:border-blue-500" />
+            <button id="memSearchClear" class="fe-btn-back hidden" title="Clear search">✕</button>
+          </div>
+          <div class="flex gap-2 mb-3">
+            <input id="memAddFact" type="text" placeholder="Add a durable fact… (e.g. \"User prefers TypeScript\")"
+              class="flex-1 min-w-0 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-white/5
+                     px-3 py-1.5 text-sm outline-none focus:border-blue-500" />
+            <input id="memAddCategory" type="text" placeholder="category"
+              class="w-28 shrink-0 rounded-lg border border-gray-200 dark:border-white/10 bg-white dark:bg-white/5
+                     px-3 py-1.5 text-sm outline-none focus:border-blue-500" />
+            <button id="memAddBtn" class="fe-action-btn shrink-0" title="Add fact">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" d="M12 5v14M5 12h14" />
+              </svg>
+              <span>Add</span>
+            </button>
+          </div>
+          <div id="memFactsList" class="space-y-1.5 mb-5"></div>
+          <div class="flex items-center justify-between mt-1 mb-2">
+            <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-200">Workspace memory</h3>
+            <span id="memWsStatus" class="text-[11px] text-gray-400 dark:text-gray-500"></span>
+          </div>
+          <textarea id="memWsEditor" spellcheck="false"
+            class="fe-editor" style="min-height: 9rem" placeholder="# Workspace memory&#10;&#10;Project facts, architectural decisions and conventions…"></textarea>
+          <div class="flex gap-2 mt-2">
+            <button id="memWsSave" class="fe-action-btn" title="Save MEMORY.md">Save</button>
+            <button id="memWsClear" class="fe-btn-back" title="Delete MEMORY.md">Clear file</button>
+            <span id="memWsFlash" class="fe-muted hidden self-center text-[12px]"></span>
+          </div>
+        </div>
+      </main><!-- /memoryView -->
 
       <!-- ===== Library view ===== -->
       <main id="libraryView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">

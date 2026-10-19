@@ -108,6 +108,23 @@
   const skillsBackChat = $('#skillsBackChat');
   const skillsRefresh = $('#skillsRefresh');
 
+  // Memory view refs (two-tier: global vector facts + workspace MEMORY.md)
+  const memoryBtn = $('#memoryBtn');
+  const memoryViewEl = $('#memoryView');
+  const memoryRefresh = $('#memoryRefresh');
+  const memFactsList = $('#memFactsList');
+  const memCount = $('#memCount');
+  const memSearchInput = $('#memSearchInput');
+  const memSearchClear = $('#memSearchClear');
+  const memAddFact = $('#memAddFact');
+  const memAddCategory = $('#memAddCategory');
+  const memAddBtn = $('#memAddBtn');
+  const memWsEditor = $('#memWsEditor');
+  const memWsSave = $('#memWsSave');
+  const memWsClear = $('#memWsClear');
+  const memWsStatus = $('#memWsStatus');
+  const memWsFlash = $('#memWsFlash');
+
   // Models view + editor modal refs
   const modelsViewEl = $('#modelsView');
   const modelsBtn = $('#modelsBtn');
@@ -278,6 +295,7 @@
     chat: chatViewEl,
     files: fileExplorerViewEl,
     skills: skillsViewEl,
+    memory: memoryViewEl,
     models: modelsViewEl,
     library: libraryViewEl,
     automations: automationsViewEl,
@@ -288,6 +306,7 @@
     chat: 'Local AI Agent',
     files: 'File Explorer',
     skills: 'Skills',
+    memory: 'Memory',
     models: 'Models',
     library: 'Library',
     automations: 'Automations',
@@ -298,6 +317,7 @@
     chat: null,
     files: fileExplorerBtn,
     skills: skillsBtn,
+    memory: memoryBtn,
     models: modelsBtn,
     library: libraryBtn,
     automations: automationsBtn,
@@ -314,6 +334,7 @@
     closePopovers();
     if (name === 'files') loadFsDir(state.fsDir);
     if (name === 'skills') loadSkills();
+    if (name === 'memory') loadMemory();
     if (name === 'models') loadModels();
     if (name === 'library') loadLibrary();
     if (name === 'automations') loadAutomations();
@@ -461,8 +482,173 @@
   }
 
   skillsBtn.addEventListener('click', () => { showView('skills'); closeSidebar(); });
+  memoryBtn.addEventListener('click', () => { showView('memory'); closeSidebar(); });
   skillsBackChat.addEventListener('click', () => showView('chat'));
+  $('#memoryBackChat').addEventListener('click', () => showView('chat'));
+  memoryRefresh.addEventListener('click', () => loadMemory());
   skillsRefresh.addEventListener('click', () => loadSkills());
+
+  // ------------------------------------------------------------- memory view
+  // Two-tier memory: (1) GLOBAL semantic facts (embedded, top-k retrieved
+  // per turn) and (2) the workspace MEMORY.md (injected into every turn).
+  // REST-backed: GET/POST/DELETE /api/memory + GET/PUT/DELETE
+  // /api/memory/workspace — same layer the agent tools and prompt
+  // injection use, so the UI can never disagree with the model.
+
+  let memSearchTimer = null;
+  let memSearchQuery = '';
+
+  async function loadMemory() {
+    // Global facts (+ semantic search) and the workspace file in parallel.
+    try {
+      const [factsRes, wsRes] = await Promise.all([
+        fetch(memSearchQuery.trim() ? `/api/memory?q=${encodeURIComponent(memSearchQuery.trim())}` : '/api/memory'),
+        fetch('/api/memory/workspace'),
+      ]);
+      const data = await factsRes.json();
+      if (!factsRes.ok || !data.ok) throw new Error(data.error || 'Could not load memory');
+      const ws = await wsRes.json();
+      if (!wsRes.ok || !ws.ok) throw new Error(ws.error || 'Could not load workspace memory');
+      renderMemFacts(data.facts, data.count);
+      renderMemWorkspace(ws);
+    } catch (err) {
+      memFactsList.innerHTML = `<div class="fe-muted fs-error">⚠️ ${escapeHtml(err.message)}</div>`;
+      memWsStatus.textContent = '';
+      memWsEditor.value = '';
+      memWsEditor.disabled = true;
+    }
+  }
+
+  function renderMemFacts(facts, count) {
+    memCount.textContent = `${count} fact${count === 1 ? '' : 's'}`;
+    memSearchClear.classList.toggle('hidden', !memSearchQuery.trim());
+    if (!facts || !facts.length) {
+      memFactsList.innerHTML = memSearchQuery.trim()
+        ? '<div class="fe-muted">No matching facts.</div>'
+        : '<div class="fe-muted">No global facts yet — add one below or ask the agent to remember something.</div>';
+      return;
+    }
+    memFactsList.innerHTML = '';
+    for (const f of facts) {
+      const row = document.createElement('div');
+      row.className = 'memory-fact-row';
+      row.setAttribute('data-mem-id', f.id);
+      row.innerHTML =
+        `<span class="memory-cat">${escapeHtml(f.category || 'general')}</span>` +
+        `<span class="memory-fact-text">${escapeHtml(f.fact)}</span>` +
+        `<button class="memory-del" data-mem-del="${escapeHtml(f.id)}" title="Delete fact">${TRASH_ICON}</button>`;
+      memFactsList.appendChild(row);
+    }
+  }
+
+  function renderMemWorkspace(ws) {
+    memWsEditor.disabled = false;
+    memWsEditor.value = ws.content || '';
+    if (ws.exists) {
+      memWsStatus.textContent = `${ws.truncated ? '⚠ truncated ' : ''}MEMORY.md · ${ws.bytes} bytes` +
+        (ws.truncated ? ' — injected into every prompt, keep it under the cap' : ' — injected into every turn');
+    } else {
+      memWsStatus.textContent = 'no MEMORY.md yet — created on first save';
+    }
+  }
+
+  function memFlash(msg, err) {
+    memWsFlash.textContent = msg;
+    memWsFlash.classList.remove('hidden', 'fs-error');
+    if (err) memWsFlash.classList.add('fs-error');
+    clearTimeout(memFlash._t);
+    memFlash._t = setTimeout(() => memWsFlash.classList.add('hidden'), 2600);
+  }
+
+  async function addMemFact() {
+    const fact = memAddFact.value.trim();
+    if (!fact) { memAddFact.focus(); return; }
+    memAddBtn.disabled = true;
+    try {
+      const res = await fetch('/api/memory', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ fact, category: memAddCategory.value.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not add fact');
+      memAddFact.value = '';
+      memAddCategory.value = '';
+      if (memSearchQuery.trim()) { memSearchQuery = ''; memSearchInput.value = ''; }
+      await loadMemory();
+    } catch (err) {
+      memCount.textContent = `⚠ ${escapeHtml(err.message)}`;
+    } finally {
+      memAddBtn.disabled = false;
+    }
+  }
+
+  memAddBtn.addEventListener('click', addMemFact);
+  memAddFact.addEventListener('keydown', (e) => { if (e.key === 'Enter') addMemFact(); });
+  memSearchInput.addEventListener('input', () => {
+    clearTimeout(memSearchTimer);
+    memSearchTimer = setTimeout(() => {
+      memSearchQuery = memSearchInput.value.trim();
+      loadMemory();
+    }, 300);
+  });
+  memSearchClear.addEventListener('click', () => {
+    memSearchQuery = '';
+    memSearchInput.value = '';
+    loadMemory();
+  });
+  memFactsList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-mem-del]');
+    if (!btn) return;
+    const id = btn.getAttribute('data-mem-del');
+    try {
+      const res = await fetch(`/api/memory/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not delete fact');
+      await loadMemory();
+    } catch (err) {
+      memCount.textContent = `⚠ ${escapeHtml(err.message)}`;
+    }
+  });
+
+  async function saveMemWorkspace() {
+    memWsSave.disabled = true;
+    try {
+      const res = await fetch('/api/memory/workspace', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: memWsEditor.value }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not save MEMORY.md');
+      memFlash(`✓ Saved (${data.bytes} bytes) — active on the next turn.`);
+      await loadMemory();
+    } catch (err) {
+      memFlash(err.message, true);
+    } finally {
+      memWsSave.disabled = false;
+    }
+  }
+
+  async function clearMemWorkspace() {
+    if (!window.confirm('Delete MEMORY.md? Workspace memory will no longer be injected.')) return;
+    try {
+      const res = await fetch('/api/memory/workspace', { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Could not clear MEMORY.md');
+      memWsEditor.value = '';
+      memFlash('✓ MEMORY.md removed.');
+      await loadMemory();
+    } catch (err) {
+      memFlash(err.message, true);
+    }
+  }
+
+  memWsSave.addEventListener('click', saveMemWorkspace);
+  memWsClear.addEventListener('click', clearMemWorkspace);
+  memWsEditor.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveMemWorkspace(); }
+  });
 
   // ------------------------------------------------------------- models view
   const MODEL_ICON = `<svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">

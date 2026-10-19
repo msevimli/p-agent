@@ -1588,3 +1588,61 @@ html.dark .sys-reset {
 #genSettingsBtn > svg > circle {
    display:none; 
 }
+/* ============ Memory view (global facts + workspace MEMORY.md) ============ */
+.memory-fact-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(128, 128, 128, 0.18);
+  background: rgba(128, 128, 128, 0.05);
+}
+.memory-fact-row:hover {
+  border-color: rgba(128, 128, 128, 0.35);
+}
+.memory-cat {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 999px;
+  padding: 2px 8px;
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.memory-fact-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: #e6edf3;
+  overflow-wrap: anywhere;
+}
+html:not(.dark) .memory-fact-text {
+  color: #1f2937;
+}
+html:not(.dark) .memory-fact-row {
+  background: rgba(107, 114, 128, 0.07);
+}
+.memory-del {
+  flex-shrink: 0;
+  color: #9ca3af;
+  padding: 3px;
+  border-radius: 6px;
+  display: inline-flex;
+  transition: color 0.15s, background 0.15s;
+}
+.memory-del:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+}
+.memory-del svg {
+  width: 15px;
+  height: 15px;
+}
