@@ -1582,3 +1582,9 @@ html.dark .sys-reset {
   background: rgba(251, 191, 36, 0.1);
   border-color: rgba(251, 191, 36, 0.3);
 }
+#contextBtn > svg {
+   height: 16px;
+}
+#genSettingsBtn > svg > circle {
+   display:none; 
+}

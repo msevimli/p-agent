@@ -22,7 +22,13 @@
       } catch { return 'default'; }
     })(),
     context: { window: 8192, inputTokens: 0, outputTokens: 0, source: 'estimated' },
-    lastUsage: null, // { sessionId, prompt_tokens, completion_tokens } from llama
+    // Per-session reported usage: sessionId -> {prompt_tokens,
+    // completion_tokens} as reported by llama at the end of that session's
+    // LAST turn. Kept per session (NOT one global slot) and persisted with
+    // the session record so the context pill survives session switches and
+    // reloads: switching away and back must show the session's own real
+    // token total, never a stale/estimated fallback.
+    sessionUsage: {},
     pendingDeleteId: null, // session awaiting inline delete confirmation
     abortController: null, // AbortController for the active stream
     // Per-session active-turn registry: sessionId -> stream record while a
@@ -1527,10 +1533,19 @@
     try {
       const res = await fetch('/api/sessions');
       state.sessions = await res.json();
+      // Restore each session's persisted usage record so the context pill
+      // shows reported totals immediately after a reload (before any new
+      // turn is sent).
+      for (const s of state.sessions) {
+        if (s && s.usage && s.usage.prompt_tokens != null) {
+          state.sessionUsage[s.id] = s.usage;
+        }
+      }
     } catch {
       state.sessions = [];
     }
     renderSessionList();
+    updateBudget();
   }
 
   function renderSessionList() {
@@ -1600,9 +1615,9 @@
     state.pendingDeleteId = null;
     state.currentId = id;
     state.currentMessages = s.messages || [];
-    // Reported usage belongs to the session it was captured in — never let
-    // it leak into another session's budget.
-    state.lastUsage = null;
+    // Usage is keyed per session in state.sessionUsage — no global slot to
+    // reset; renderMessages() re-syncs the context pill from this session's
+    // own reported record (or the estimate when none exists yet).
     state.attachments = [];
     renderChips();
     renderMessages();
@@ -1619,7 +1634,6 @@
     state.pendingDeleteId = null;
     state.currentId = null;
     state.currentMessages = [];
-    state.lastUsage = null;
     state.attachments = [];
     renderChips();
     renderMessages();
@@ -1630,14 +1644,16 @@
   async function deleteSession(id) {
     await fetch(`/api/sessions/${id}`, { method: 'DELETE' });
     state.sessions = state.sessions.filter((s) => s.id !== id);
+    delete state.sessionUsage[id];
     if (state.currentId === id) {
       state.currentId = null;
       state.currentMessages = [];
-      state.lastUsage = null;
       renderMessages();
     }
     renderSessionList();
   }
+
+  const PENDING_USAGE_KEY = '__pending_usage__'; // usage captured before a session exists
 
   async function persistSession(messages, id) {
     // A stream finishing while another session is VIEWED must persist into
@@ -1654,15 +1670,30 @@
         id: targetId || undefined,
         title: title + (title.length >= 60 ? '…' : ''),
         messages: target,
+        // Persist this session's last reported usage with the record so a
+        // reload restores the context pill from real token counts. New-chat
+        // usage still sits under the pending key (its sid is null) — send it
+        // along; it is rebased onto the saved id below.
+        usage:
+          (targetId && state.sessionUsage[targetId]) ||
+          state.sessionUsage[PENDING_USAGE_KEY] ||
+          null,
       }),
     });
     const saved = await res.json();
     state.currentId = saved.id;
-    // The usage event is captured mid-stream, when currentId is still null
-    // on a brand-new session. Bind it to the persisted id so the context
-    // pill uses reported prompt_tokens (real session context) instead of
-    // the character estimate.
-    if (state.lastUsage) state.lastUsage.sessionId = state.currentId;
+    // A brand-new chat's stream captured usage under its TEMPORARY client
+    // sid (currentId is null until the first persist) or the pending key.
+    // Rebind that record to the persisted server id — the old global
+    // `lastUsage.sessionId` rebind hack is gone (usage is now a per-session
+    // map).
+    if (targetId && targetId !== saved.id && state.sessionUsage[targetId]) {
+      state.sessionUsage[saved.id] = state.sessionUsage[targetId];
+      delete state.sessionUsage[targetId];
+    } else if (state.sessionUsage[PENDING_USAGE_KEY]) {
+      state.sessionUsage[saved.id] = state.sessionUsage[PENDING_USAGE_KEY];
+      delete state.sessionUsage[PENDING_USAGE_KEY];
+    }
     const idx = state.sessions.findIndex((s) => s.id === saved.id);
     if (idx >= 0) state.sessions[idx] = saved;
     else state.sessions.unshift(saved);
@@ -1842,25 +1873,36 @@
   }
 
   function computeTokens() {
-    // Prefer llama.cpp's reported usage for the current session when available;
-    // otherwise fall back to a character-based estimate.
-    if (state.lastUsage && state.lastUsage.sessionId === state.currentId) {
-      return {
-        input: state.lastUsage.prompt_tokens ?? estimatePromptTokens(),
-        output: state.lastUsage.completion_tokens ?? 0,
-        source: 'reported',
-      };
-    }
-    return { input: estimatePromptTokens(), output: 0, source: 'estimated' };
+    // Per-session usage record (state.sessionUsage[id]):
+    //   prompt_tokens      — ACCUMULATED input across all completed turns
+    //                        (each turn re-reads the whole conversation, so
+    //                        this is the true session input consumption)
+    //   completion_tokens  — ACCUMULATED output across all completed turns
+    //   lastPromptTokens   — the LAST turn's prompt footprint = the active
+    //                        context-window usage (drives the bar/ring/pct)
+    // Before any turn reports usage the window footprint falls back to a
+    // character-based estimate of the visible history; totals stay 0.
+    const u = state.currentId ? state.sessionUsage[state.currentId] : null;
+    const reported = u && u.prompt_tokens != null;
+    return {
+      input: reported && Number(u.lastPromptTokens) > 0 ? Number(u.lastPromptTokens) : estimatePromptTokens(),
+      totals: reported
+        ? { in: Number(u.prompt_tokens) || 0, out: Number(u.completion_tokens) || 0 }
+        : { in: 0, out: 0 },
+      source: reported ? 'reported' : 'estimated',
+    };
   }
 
   function updateBudget() {
     const win = state.context.window || 8192;
-    const { input, output, source } = computeTokens();
-    // Session context usage: cumulative PROMPT tokens in the active window
-    // vs the max context limit (e.g. "2.6k / 65.5k · 4%"). Output tokens of
-    // the last turn belong to the message footer (± this turn's completion
-    // only), never to the session budget shown in the pill/ring/bar.
+    const { input, totals, source } = computeTokens();
+    const total = totals.in + totals.out;
+    // Context-window usage: the ACTIVE session's current footprint (last
+    // turn's prompt tokens) vs the max context limit (e.g. "2.6k / 65.5k ·
+    // 4%") — this is what the ring/bar/pct visualize. The session TOTAL
+    // (accumulated In + Out across ALL turns) is the pill's headline and
+    // the popover breakdown; output tokens of any single turn never touch
+    // the window bar.
     const used = input;
     const pct = Math.min(100, Math.max(0, Math.round((used / win) * 100)));
 
@@ -1872,18 +1914,26 @@
     contextRing.classList.remove('text-emerald-500', 'text-amber-500', 'text-red-500');
     contextRing.classList.add(col);
 
-    contextSummary.textContent = `${formatTok(used)} / ${formatTok(win)} · ${pct}%`;
+    // Pill: accumulated session total + window severity. The window
+    // footprint (used/win) stays in the ring + popover headline.
+    contextSummary.textContent = `${formatTok(total)} tok · ${pct}%`;
+    contextBtn.title =
+      `Session total: In ${formatTok(totals.in)} · Out ${formatTok(totals.out)}. ` +
+      `Context window: ${formatTok(used)} / ${formatTok(win)} (${pct}%).`;
+    // Popover: window footprint headline + bar, then the breakdown.
     $('#ctxTokens').textContent = `${formatTok(used)} / ${formatTok(win)}`;
     $('#ctxPct').textContent = pct + '%';
     const bar = $('#ctxBar');
     bar.style.width = pct + '%';
     bar.classList.remove('bg-emerald-500', 'bg-amber-500', 'bg-red-500');
     bar.classList.add(barCol);
-    $('#ctxInput').textContent = formatTok(input);
-    $('#ctxOutput').textContent = formatTok(output);
+    $('#ctxTotals').textContent =
+      `In ${formatTok(totals.in)} + Out ${formatTok(totals.out)} = ${formatTok(total)}`;
+    $('#ctxInput').textContent = formatTok(totals.in);
+    $('#ctxOutput').textContent = formatTok(totals.out);
     $('#ctxSource').textContent =
       source === 'reported'
-        ? 'From llama.cpp usage stats.'
+        ? 'From llama.cpp usage stats (accumulated per turn).'
         : 'Estimated from message length (~4 chars/token).';
   }
 
@@ -2507,10 +2557,28 @@
     let reqTimings = null; // llama.cpp timings from this request (cache + speeds)
     const captureUsage = (u) => {
       reqUsage = u;
-      state.lastUsage = {
-        sessionId: sid, // the STREAM's session — not state.currentId (view)
-        prompt_tokens: u.prompt_tokens,
-        completion_tokens: u.completion_tokens,
+      // Record under the STREAM's session — not state.currentId (view).
+      // Per-session map: switching sessions never clobbers another
+      // session's totals, and the record persists with the session. A
+      // brand-new chat (sid null) parks under the pending key until the
+      // first persistSession rebinds it to the server id.
+      //
+      // ACCUMULATION: the backend emits one usage chunk per completed turn
+      // (completion_tokens already summed across that turn's tool-loop
+      // rounds; prompt_tokens = the final context footprint). Adding each
+      // turn's numbers to the stored record yields the TRUE total tokens
+      // consumed across the whole session (every turn re-reads the full
+      // conversation, so input truly accumulates). lastPromptTokens keeps
+      // the window FOOTPRINT of the latest turn for the context bar.
+      const key = sid || PENDING_USAGE_KEY;
+      const prev = state.sessionUsage[key];
+      const pIn = Number(u.prompt_tokens) || 0;
+      const pOut = Number(u.completion_tokens) || 0;
+      state.sessionUsage[key] = {
+        prompt_tokens: (prev ? Number(prev.prompt_tokens) || 0 : 0) + pIn,
+        completion_tokens: (prev ? Number(prev.completion_tokens) || 0 : 0) + pOut,
+        lastPromptTokens: pIn || (prev ? prev.lastPromptTokens || 0 : 0),
+        ts: Date.now(),
       };
     };
     const captureTimings = (t) => { reqTimings = t; };
@@ -2771,7 +2839,12 @@
       stream.done = true;
       delete state.activeStreams[sid];
       renderSessionList(); // pulse off for this session
-      if (sid === state.currentId) stopGenTimer();
+      // The footer ⏱ pill is a GLOBAL agent-activity indicator: it keeps
+      // counting while ANY stream is live (a turn finishing for a session
+      // the user is NOT viewing must not strand it), and it hides when the
+      // LAST stream completes — this is the only place a live timer can
+      // end (normal done, error, and abort all funnel through this block).
+      if (!Object.values(state.activeStreams).some((s) => !s.done)) stopGenTimer();
       syncStreamingUI();
       refreshModelStatus(); // badge returns to the real lifecycle state
     }

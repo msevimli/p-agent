@@ -8,6 +8,10 @@ function newSession(body) {
     id: body.id || `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     title: (body.title || 'New chat').slice(0, 120),
     messages: Array.isArray(body.messages) ? body.messages : [],
+    // Last reported token usage for the session (prompt = session context
+    // footprint), persisted with the record so the dashboard context pill
+    // restores real totals after a reload. Optional; old sessions lack it.
+    usage: body.usage && typeof body.usage === 'object' ? body.usage : null,
     createdAt: body.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

@@ -98,7 +98,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const $ = (sel) => window.document.querySelector(sel);
   const $$ = (sel) => [...window.document.querySelectorAll(sel)];
   const clickSession = (id) => {
-    const item = $$('.session-item').find((el) => (el.textContent || '').includes(id === 'sess-a' ? 'Alpha' : 'Beta'));
+    // Title mutates to the first user message after the first persist, so
+    // match ANY of the titles this session can carry over the run.
+    const needles = id === 'sess-a'
+      ? ['Alpha', 'check memory', 'timer regression check', 'hi from A']
+      : ['Beta', 'yo from B'];
+    const item = $$('.session-item').find((el) => {
+      const txt = el.textContent || '';
+      return needles.some((n) => txt.includes(n));
+    });
     if (!item) return false;
     item.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     return true;
@@ -171,6 +179,34 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   t('done: tool record persisted in A (mid-stream, while viewing B)', !!aPersist && aPersist.messages.some((m) => m.role === 'tool' && m.tool === 'run_shell'), '');
   const bPersist = persistedPosts.find((p) => p.id === 'sess-b');
   t('CORRUPTION GUARD: B never received A\'s assistant/tool records', !bPersist || !bPersist.messages.some((m) => m.role === 'assistant' || m.role === 'tool'), JSON.stringify((bPersist || {}).messages));
+
+  // --- 5) THE TIMER REGRESSION: completion while viewing ANOTHER session -----
+  // Repro of the reported bug: the ⏱ footer pill kept counting forever when
+  // a turn completed while the user was looking at a different session
+  // (the old finally only stopped the timer when sid === state.currentId).
+  promptInput.value = 'timer regression check';
+  $('#sendBtn').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await sleep(120);
+  t('timer: pill visible while the new turn streams', !$('#genTimer').classList.contains('hidden'));
+  t('timer: pill shows the live ⏱ format', ($('#genTimer').textContent || '').startsWith('⏱'), $('#genTimer').textContent);
+
+  streamCtrl.enqueue(sse({ choices: [{ delta: { content: 'quiet reply ' } }] }));
+  await sleep(100);
+  t('timer: switched to B mid-turn', clickSession('sess-b'));
+  await sleep(120);
+  t('timer: pill KEEPS counting while B is viewed (agent still busy)', !$('#genTimer').classList.contains('hidden'));
+
+  // complete A's stream while the user is looking at B — the reported bug
+  streamCtrl.enqueue(sse({ choices: [{ delta: { content: 'done.' } }] }));
+  streamCtrl.enqueue(sse({ usage: { prompt_tokens: 10, completion_tokens: 10 } }));
+  streamCtrl.close();
+  await sleep(400); // finalization + persistSession
+  t('timer: pill HIDDEN after A\'s background turn completes', $('#genTimer').classList.contains('hidden'), $('#genTimer').textContent);
+
+  t('timer: switched back to session A', clickSession('sess-a'));
+  await sleep(150);
+  t('timer: pill stays hidden on the finished session (idle, no zombie)', $('#genTimer').classList.contains('hidden'), $('#genTimer').textContent);
+  t('timer: send button back to send mode after background completion', !$('#sendBtn').classList.contains('stop-active'));
 
   const fails = results.filter((x) => x.startsWith('FAIL')).length;
   console.log(results.join('\n'));
