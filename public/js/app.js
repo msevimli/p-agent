@@ -1460,8 +1460,8 @@
     fsBreadcrumb.innerHTML = '';
     // root crumb
     const root = document.createElement('span');
-    root.className = 'fs-bc-seg';
-    root.textContent = 'workspace';
+    root.className = 'fs-bc-seg' + (parts.length === 0 ? ' current' : '');
+    root.textContent = 'Root'; // the project root (contains workspaces/, node_modules, routes…)
     root.addEventListener('click', () => loadFsDir(''));
     fsBreadcrumb.appendChild(root);
     let acc = '';
@@ -1471,9 +1471,10 @@
       sep.textContent = '/';
       fsBreadcrumb.appendChild(sep);
       acc = acc ? acc + '/' + seg : seg;
+      const display = seg === 'workspaces' ? 'workspace' : seg; // friendly label for the agent workspace
       const crumb = document.createElement('span');
       crumb.className = 'fs-bc-seg' + (i === parts.length - 1 ? ' current' : '');
-      crumb.textContent = seg;
+      crumb.textContent = display;
       if (i !== parts.length - 1)
         crumb.addEventListener('click', () => loadFsDir(acc));
       fsBreadcrumb.appendChild(crumb);
@@ -1713,6 +1714,8 @@
     closeSidebar();
   });
   fsBackChat.addEventListener('click', () => showView('chat'));
+  $('#fsGoRoot').addEventListener('click', () => loadFsDir(''));
+  $('#fsGoWs').addEventListener('click', () => loadFsDir('workspaces'));
 
   // ------------------------------------------------------------- sessions
   async function loadSessions() {

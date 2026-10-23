@@ -209,8 +209,8 @@ module.exports = {
   workRoot: path.resolve(process.env.PLIFE_WORK_ROOT || ROOT_DIR),
 
   // --- semantic memory -----------------------------------------------------
-  // Two-tier memory: (1) WORKSPACE memory = MEMORY.md inside workRoot
-  // (project facts; injected into every prompt while present);
+  // Two-tier memory: (1) WORKSPACE memory = MEMORY.md inside the AGENT
+  // WORKSPACE (project facts; injected into every prompt while present);
   // (2) GLOBAL vector memory = SQLite store of (fact, category, embedding)
   // with local embeddings, top-k retrieved per turn.
   // SQLite DB path (node:sqlite; env-redirectable for tests).
@@ -229,10 +229,15 @@ module.exports = {
   // MEMORY.md cap — the file is injected into EVERY request, so it must
   // stay small (writes/append beyond this are rejected; reads capped too).
   memoryFileMaxChars: Number(process.env.MEMORY_FILE_MAX_CHARS || 49152),
-  // Active workspace memory file (fixed name by default; env override is
-  // for tests only).
+  // Active workspace memory file: MEMORY.md inside the agent workspace by
+  // default (env override is for tests only).
   workspaceMemoryFile: path.join(
-    path.resolve(process.env.PLIFE_WORK_ROOT || ROOT_DIR),
+    path.resolve(process.env.WORKSPACE_DIR || path.join(path.resolve(process.env.PLIFE_WORK_ROOT || ROOT_DIR), 'workspaces')),
     process.env.WORKSPACE_MEMORY_FILE || 'MEMORY.md'
   ),
+  // Agent workspace: the default working directory for agent file tools and
+  // run_shell (bare paths land here; "../"-prefixed paths are project-root-
+  // relative). The hard sandbox stays workRoot — zoning only picks where
+  // inside the project a bare path lands.
+  workspaceDir: path.resolve(process.env.WORKSPACE_DIR || path.join(path.resolve(process.env.PLIFE_WORK_ROOT || ROOT_DIR), 'workspaces')),
 };

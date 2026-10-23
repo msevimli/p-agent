@@ -68,14 +68,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       return json({ ok: true, path: 'hello.txt', bytes: Buffer.byteLength(savedContent), content: savedContent });
     }
     if (u.includes('/api/fs/list')) {
+      const q = new URL(u, 'http://x').searchParams.get('path') || '';
+      const entries =
+        q === 'workspaces'
+          ? [{ name: 'ws.txt', path: 'workspaces/ws.txt', type: 'file' }]
+          : [
+              { name: 'hello.txt', path: 'hello.txt', type: 'file' },
+              { name: 'workspaces', path: 'workspaces', type: 'directory' },
+              { name: 'sub', path: 'sub', type: 'directory' },
+            ];
       return json({
         ok: true,
-        path: '',
-        count: 2,
-        entries: [
-          { name: 'hello.txt', path: 'hello.txt', type: 'file' },
-          { name: 'sub', path: 'sub', type: 'directory' },
-        ],
+        path: q,
+        count: entries.length,
+        entries,
         root: '/workspace',
       });
     }
@@ -106,10 +112,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(80);
   const rows = [...window.document.querySelectorAll('#fsList .fs-entry')];
   const fileRow = rows.find((r) => (r.textContent || '').includes('hello.txt'));
-  t('editor: directory listing renders entries', rows.length === 2 && !!fileRow, `rows=${rows.length}`);
+  t('editor: directory listing renders entries', rows.length === 3 && !!fileRow, `rows=${rows.length}`);
   t('editor: folders are clickable separately from files', rows.some((r) => (r.textContent || '').includes('sub')), '');
 
-  fileRow.click();
+  // --- workspace zones: breadcrumb labels + Root/Workspace quick toggles ---
+  const crumbs = () => [...window.document.querySelectorAll('#fsBreadcrumb .fs-bc-seg')].map((c) => c.textContent);
+  t('zone: root crumb is labeled Root', crumbs().length === 1 && crumbs()[0] === 'Root', JSON.stringify(crumbs()));
+  const wsBtn = window.document.querySelector('#fsGoWs');
+  const rootBtn = window.document.querySelector('#fsGoRoot');
+  t('zone: Workspace + Root quick-toggle buttons exist', !!wsBtn && !!rootBtn, '');
+  wsBtn.click();
+  await sleep(80);
+  const wsRows = [...window.document.querySelectorAll('#fsList .fs-entry')];
+  t('zone: Go-to-Workspace lists the agent workspace', wsRows.some((r) => (r.textContent || '').includes('ws.txt')) && !wsRows.some((r) => (r.textContent || '').includes('hello.txt')), `rows=${wsRows.length}`);
+  t('zone: breadcrumb reads Root > workspace', JSON.stringify(crumbs()) === JSON.stringify(['Root', 'workspace']), JSON.stringify(crumbs()));
+  rootBtn.click();
+  await sleep(80);
+  t('zone: Go-to-Root returns to the project root breadcrumb', JSON.stringify(crumbs()) === JSON.stringify(['Root']), JSON.stringify(crumbs()));
+  t('zone: root listing back via toggle', [...window.document.querySelectorAll('#fsList .fs-entry')].length === 3, '');
+
+  // re-query the entry row — the toggles re-rendered the listing and the
+  // old reference is detached (its click would not reach the delegated
+  // listener on #fsList)
+  const freshRow = [...window.document.querySelectorAll('#fsList .fs-entry')].find((r) => (r.textContent || '').includes('hello.txt'));
+  freshRow.click();
   await sleep(80);
   t('editor: preview renders the code block', !!$('#fsList pre.fe-fileview'), '');
   const editBtn = [...window.document.querySelectorAll('#fsList .fe-btn-back')].find((b) => (b.textContent || '').includes('edit'));

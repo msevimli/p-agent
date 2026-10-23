@@ -373,6 +373,14 @@ html.dark .fe-btn-back { color: #9ca3af; }
 .fe-btn-back:hover { background: rgba(128,128,128,0.12); color: #111827; }
 html.dark .fe-btn-back:hover { color: #fff; }
 
+.fe-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+  flex-shrink: 0;
+  padding-left: 0.5rem;
+}
 .fe-breadcrumb {
   flex: 1; display: flex; align-items: center; gap: 0.15rem;
   overflow-x: auto; white-space: nowrap;
@@ -1011,7 +1019,7 @@ html.dark .auto-hint { color: #9ca3af; }
 }
 .modal {
   background: #fff; border: 1px solid #e5e7eb; border-radius: 1rem;
-  width: 100%; max-width: 26rem; max-height: calc(100vh - 2rem); overflow-y: auto;
+  width: 100%; max-width: 50rem; max-height: calc(100vh - 2rem); overflow-y: auto;
   box-shadow: 0 24px 60px rgba(0,0,0,0.3);
   animation: popoverIn 0.16s ease-out;
 }

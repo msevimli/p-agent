@@ -554,6 +554,14 @@ p-agent/
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `PAGENT_BASE_URL` (CLI),
 `PLIFE_DOTENV_FILE` (alternate .env path). See `.env-example` for the full list.
 
+## Agent workspace isolation (workspaces/)
+Agent file tools (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_files`), `run_shell` and the workspace `MEMORY.md` default to the **agent workspace** — `workspaces/` inside the project root — so generated scripts, reports and dynamic files never clutter the project root. Zone rule (two-zone resolution, `services/agentPaths.js`):
+- BARE relative paths (`scripts/foo.py`) → `workspaces/scripts/foo.py`
+- `..` / `../x` → the **project root** (e.g. `../routes/fs.js`) — one level up from the workspace
+- `../../x` or absolute paths → rejected (the hard sandbox is still `workRoot` via `resolveWithin`; zoning only picks where inside the project a bare path lands)
+- `list_files` with no path lists the workspace; `list_files ..` lists the project root; `run_shell` starts in the workspace (`cd ..` reaches the root)
+Automation scripts keep the project root as cwd (user scripts reference e.g. `scripts/date_time_script.py`); agent-written scripts referenced by automations use `workspaces/...` paths. The File Explorer browses the whole project root (breadcrumb `Root` / `Root > workspace`) with Root/Workspace quick-toggle buttons.
+
 ## Semantic memory (two tiers)
 
 1. **Workspace memory** — `MEMORY.md` at the workspace root: project facts,

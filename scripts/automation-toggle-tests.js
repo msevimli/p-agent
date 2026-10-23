@@ -99,15 +99,15 @@ const writeState = (s) => fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2
     const byName = (n) => autTools.tools.find((x) => x.name === n);
     t('tools: registry has set_automation_enabled + set_automations_paused',
       !!byName('set_automation_enabled') && !!byName('set_automations_paused'), '');
-    const t1 = await byName('set_automation_enabled').run({ id: testId, enabled: false });
+    const t1 = await byName('set_automation_enabled').execute({ id: testId, enabled: false });
     t('tool set_automation_enabled: disables + nulls nextRunAt',
       t1.ok === true && t1.automation.enabled === false && t1.automation.nextRunAt === null, JSON.stringify(t1.automation || t1));
-    const t2 = await byName('set_automation_enabled').run({ id: testId, enabled: true });
+    const t2 = await byName('set_automation_enabled').execute({ id: testId, enabled: true });
     t('tool set_automation_enabled: re-enables (summarized)',
       t2.ok === true && t2.automation.enabled === true && !!t2.automation.nextRunAt, '');
-    const t3 = await byName('set_automations_paused').run({ paused: true });
+    const t3 = await byName('set_automations_paused').execute({ paused: true });
     t('tool set_automations_paused: scheduler paused', t3.ok === true && t3.paused === true && manager.isPaused() === true, JSON.stringify(t3));
-    const t4 = await byName('set_automations_paused').run({ paused: false });
+    const t4 = await byName('set_automations_paused').execute({ paused: false });
     t('tool set_automations_paused: resumed', t4.ok === true && t4.paused === false && manager.isPaused() === false, '');
 
     // ---------------- cleanup -------------------------------------------------

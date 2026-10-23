@@ -460,7 +460,7 @@ test('T23 delete_skill is registered, schema-gated, and executes through the loo
 test('T24 delete_file parses and dispatches (file deletion is a core tool)', async () => {
   queue = [acc('```json\n{"tool": "delete_file", "args": {"path": "notes.txt"}}\n```'), acc('ok')];
   await runRequest([user('remove notes.txt')]);
-  assert.deepStrictEqual(executed, [{ name: 'delete_file', args: { path: 'notes.txt' } }]);
+  assert.deepStrictEqual(executed, [{ name: 'delete_file', args: { path: 'workspaces/notes.txt' } }]);
 });
 
 test('T25 multi-call round: all calls dispatched in emission order', async () => {
@@ -470,8 +470,8 @@ test('T25 multi-call round: all calls dispatched in emission order', async () =>
   ];
   await runRequest([user('write two files a.txt and b.txt')]);
   assert.deepStrictEqual(executed, [
-    { name: 'write_file', args: { path: 'a.txt', content: 'A' } },
-    { name: 'write_file', args: { path: 'b.txt', content: 'B' } },
+    { name: 'write_file', args: { path: 'workspaces/a.txt', content: 'A' } },
+    { name: 'write_file', args: { path: 'workspaces/b.txt', content: 'B' } },
   ]);
 });
 
@@ -482,7 +482,7 @@ test('T26 mixed round with a shell call: shell serializes, order preserved', asy
   ];
   await runRequest([user('create a.txt and list it')]);
   assert.deepStrictEqual(executed, [
-    { name: 'write_file', args: { path: 'a.txt', content: 'A' } },
+    { name: 'write_file', args: { path: 'workspaces/a.txt', content: 'A' } },
     { name: 'run_shell', args: { command: 'ls a.txt' } },
   ]);
 });
@@ -496,7 +496,7 @@ test('T27 malformed tool-call final answer gets one corrective round, then execu
     acc('file written'),
   ];
   await runRequest([user('create x.txt with the word fixed')]);
-  assert.deepStrictEqual(executed, [{ name: 'write_file', args: { path: 'x.txt', content: 'fixed' } }]);
+  assert.deepStrictEqual(executed, [{ name: 'write_file', args: { path: 'workspaces/x.txt', content: 'fixed' } }]);
 });
 
 test('T28 second malformed reply is served (correction bounded at once)', async () => {

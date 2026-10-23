@@ -17,7 +17,7 @@ const workspaceMemory = require('../services/workspaceMemory');
 
 const DESCRIPTION =
   'Read, append to or overwrite the workspace MEMORY.md — the persistent project memory ' +
-  'file that is injected into EVERY future request of this workspace. Use it to store ' +
+  'file (inside the agent workspace "workspaces/") that is injected into EVERY future request of this workspace. Use it to store ' +
   'project-specific facts, architectural decisions, technical debt and conventions ' +
   '(NOT user preferences — those belong to manage_global_memory). ' +
   'Actions: read (return the current contents), append (add a section to the end), ' +
@@ -62,4 +62,4 @@ function run(args) {
   return { ok: true, overwritten: true, bytes: w.bytes };
 }
 
-module.exports = { tools: [{ name: 'update_workspace_memory', description: DESCRIPTION, parameters: PARAMETERS, run }] };
+module.exports = { tools: [{ name: 'update_workspace_memory', description: DESCRIPTION, parameters: PARAMETERS, execute: run }] };

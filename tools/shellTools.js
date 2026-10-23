@@ -1,7 +1,9 @@
 /**
  * Shell command execution tool with safety checks.
  *
- * - Runs in the sandbox (config.workRoot) by default, never as a root shell.
+ * - Runs in the agent workspace (config.workspaceDir = <workRoot>/workspaces/)
+ *   by default — the agent's working directory is ISOLATED from the project
+ *   root; "cd .." reaches the project root (same sandbox as before).
  * - Enforces a hard timeout and bounded output so runaway commands can't hang.
  * - Blocks a denylist of destructive/system-fatal commands (shutdown, mkfs,
  *   raw-disk writes, fork bombs, etc.).
@@ -12,8 +14,10 @@
 const { exec } = require('child_process');
 const path = require('path');
 const config = require('../config');
+const fs = require('fs');
 
 const ROOT = path.resolve(config.workRoot);
+const WORKSPACE = config.workspaceDir || path.join(ROOT, 'workspaces');
 
 // Destructive / system-fatal command fragments (case-insensitive substring
 // scan). Add policy as needed; this is a safety net, not a permission system.
@@ -59,7 +63,10 @@ function execute(command, timeout) {
   const t = Number.isFinite(timeout) && timeout > 0
     ? Math.min(timeout, MAX_TIMEOUT_MS)
     : DEFAULT_TIMEOUT_MS;
-  const opts = { cwd: ROOT, timeout: t, maxBuffer: MAX_BUFFER };
+  // The agent workspace may not exist yet (fresh boot, before any write) —
+  // exec would ENOENT on the cwd. Create it so the shell lands somewhere.
+  try { fs.mkdirSync(WORKSPACE, { recursive: true }); } catch { /* best effort */ }
+  const opts = { cwd: WORKSPACE, timeout: t, maxBuffer: MAX_BUFFER };
 
   return new Promise((resolve) => {
     exec(cmd, opts, (error, stdout, stderr) => {

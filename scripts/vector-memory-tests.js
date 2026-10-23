@@ -91,34 +91,34 @@ const t = (name, cond, info) =>
 
   // ---- 4) tool wrappers ---------------------------------------------------------
   {
-    const a = await globalTool.run({ action: 'nope' });
+    const a = await globalTool.execute({ action: 'nope' });
     t('tool-global: invalid action rejected', a.ok === false && /action must be/.test(a.error), a.error);
-    const b = await globalTool.run({ action: 'add' });
+    const b = await globalTool.execute({ action: 'add' });
     t('tool-global: add without fact rejected', b.ok === false, b.error);
-    const c = await globalTool.run({ action: 'add', fact: 'user prefers terse commit messages', category: 'style' });
+    const c = await globalTool.execute({ action: 'add', fact: 'user prefers terse commit messages', category: 'style' });
     t('tool-global: add ok with id', c.ok && c.added && !!c.id, JSON.stringify(c));
-    const lst = await globalTool.run({ action: 'list' });
+    const lst = await globalTool.execute({ action: 'list' });
     t('tool-global: list returns stored facts', lst.ok && lst.count >= 1 && lst.facts.some((f) => f.fact.includes('commit')), JSON.stringify(lst.facts && lst.facts[0]));
-    const s = await globalTool.run({ action: 'search', fact: 'how should commit messages look' });
+    const s = await globalTool.execute({ action: 'search', fact: 'how should commit messages look' });
     t('tool-global: search hits the commit-style fact', s.ok && s.hits[0] && s.hits[0].fact.includes('commit'), JSON.stringify(s.hits && s.hits[0]));
-    const del = await globalTool.run({ action: 'delete', id: c.id });
+    const del = await globalTool.execute({ action: 'delete', id: c.id });
     t('tool-global: delete by id ok', del.ok && del.deleted);
 
-    const w1 = wsTool.run({ action: 'read' });
+    const w1 = wsTool.execute({ action: 'read' });
     t('tool-ws: read absent returns exists:false', w1.ok && w1.exists === false, JSON.stringify(w1));
-    const w2 = wsTool.run({ action: 'slam' });
+    const w2 = wsTool.execute({ action: 'slam' });
     t('tool-ws: invalid action rejected', w2.ok === false, w2.error);
-    const w3 = wsTool.run({ action: 'append', content: '' });
+    const w3 = wsTool.execute({ action: 'append', content: '' });
     t('tool-ws: append without content rejected', w3.ok === false, w3.error);
-    const w4 = wsTool.run({ action: 'append', content: '# Project notes\n- The deployment is docker-based' });
+    const w4 = wsTool.execute({ action: 'append', content: '# Project notes\n- The deployment is docker-based' });
     t('tool-ws: append ok', w4.ok && w4.appended, JSON.stringify(w4));
-    const w5 = wsTool.run({ action: 'read' });
+    const w5 = wsTool.execute({ action: 'read' });
     t('tool-ws: read returns appended content', w5.ok && w5.exists && w5.content.includes('docker-based'), JSON.stringify(w5.content && w5.content.slice(0, 40)));
-    const w6 = wsTool.run({ action: 'overwrite', content: 'DRAFT' });
+    const w6 = wsTool.execute({ action: 'overwrite', content: 'DRAFT' });
     t('tool-ws: overwrite ok', w6.ok && w6.overwritten);
-    const w7 = wsTool.run({ action: 'read' });
+    const w7 = wsTool.execute({ action: 'read' });
     t('tool-ws: overwrite replaced content', w7.ok && w7.content === 'DRAFT', JSON.stringify(w7.content));
-    const w8 = wsTool.run({ action: 'overwrite', content: 'y'.repeat(4000) });
+    const w8 = wsTool.execute({ action: 'overwrite', content: 'y'.repeat(4000) });
     t('tool-ws: cap rejection at 2000 chars', w8.ok === false && /too large/.test(w8.error), w8.error);
   }
 
@@ -199,7 +199,7 @@ const t = (name, cond, info) =>
     r = await j('/workspace', { method: 'DELETE' });
     const ws3 = await r.json();
     t('rest-ws: DELETE workspace cleared (NOT swallowed by /:id)', r.status === 200 && ws3.ok && ws3.cleared, JSON.stringify(ws3));
-    t('rest-ws: file actually gone', fs.existsSync(path.join(WORK, 'MEMORY.md')) === false);
+    t('rest-ws: file actually gone', fs.existsSync(path.join(WORK, 'workspaces', 'MEMORY.md')) === false);
     server.close();
   }
 

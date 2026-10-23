@@ -12,6 +12,7 @@
 const registry = require('../tools');
 const path = require('path');
 const jsonRepair = require('./jsonRepair');
+const agentPaths = require('./agentPaths');
 
 function listTools() {
   return registry.map(({ name, description, parameters }) => ({
@@ -210,18 +211,34 @@ function normalizeShellToolArgs(name, args) {
 
 function normalizeFileToolArgs(name, args) {
   if (!FILE_PATH_TOOLS.has(name)) return args;
+  // Agent workspace zoning (idempotent): bare relative paths default to the
+  // agent workspace (workspaces/ inside the project root); paths starting
+  // with "../" are explicitly project-root-relative; absolute paths stay
+  // rejected (zonePath returns undefined -> the strict escape rejection).
+  // PLACEHOLDER-shaped paths ('?', '<path>', 'your_..._here') are zoned
+  // LAST (after validation) — the placeholder gate must see the RAW value:
+  // zoning '?' -> 'workspaces/?' would make the gate miss it.
+  const zone = (p) => {
+    if (PLACEHOLDER_RE.test(String(p))) return p;
+    const z = agentPaths.zonePath(p);
+    return z === undefined ? p : z;
+  };
   // Bare unkeyed string as the whole args value: read_file "scripts/x.py".
-  if (typeof args === 'string' && args.trim() !== '') return { path: args.trim() };
+  if (typeof args === 'string' && args.trim() !== '') return { path: zone(args.trim()) };
   // Alias keys: first present alias with a real string value becomes path.
   if (args && typeof args === 'object' && !Array.isArray(args) && !Object.prototype.hasOwnProperty.call(args, 'path')) {
     for (const alias of FILE_PATH_ALIASES) {
       if (Object.prototype.hasOwnProperty.call(args, alias) && typeof args[alias] === 'string' && args[alias].trim() !== '') {
         const out = { ...args };
-        out.path = args[alias].trim();
+        out.path = zone(args[alias].trim());
         delete out[alias];
         return out;
       }
     }
+  }
+  if (args && typeof args === 'object' && !Array.isArray(args) && typeof args.path === 'string' && args.path !== '') {
+    const zoned = zone(args.path);
+    if (zoned !== args.path) return { ...args, path: zoned };
   }
   return args;
 }
@@ -247,7 +264,14 @@ function normalizeFileToolArgs(name, args) {
 async function executeTool(name, args) {
   const tool = getTool(name);
   if (!tool) return { ok: false, error: `unknown tool: ${name}` };
-  const norm = normalizeShellToolArgs(name, normalizeFileToolArgs(name, args));
+  let norm = normalizeShellToolArgs(name, normalizeFileToolArgs(name, args));
+  // Agent-workspace default for listings: list_files with NO path lists the
+  // agent workspace (explicit "../" lists the project root). The File
+  // Explorer routes bypass executeTool, so the root listing there is
+  // unaffected.
+  if (name === 'list_files' && (!norm || norm.path === undefined || norm.path === '')) {
+    norm = { ...(norm || {}), path: 'workspaces' };
+  }
   const v = validateArgs(name, norm);
   if (!v.ok) {
     const fmt = ARG_FORMATS[name];
@@ -559,8 +583,9 @@ function buildSystemPrompt(base) {
     'it — list_files, read_file, write_file, edit_file, delete_file and run_shell operate ' +
     'there. NEVER claim you cannot see or check the workspace, and NEVER tell the user to ' +
     'inspect files or run commands manually in a terminal — use your tools and answer from ' +
-    'their real output. Automation and script logs land in the workspace logs/ directory by ' +
-    'default (scripts resolve relative paths against the workspace root). When a user asks ' +
+    'their real output. Automation scripts run with the PROJECT ROOT as their working directory, ' +
+    'so relative log paths land in the root logs/ directory — inspect them as ../logs/.... ' +
+    'When a user asks ' +
     'where a file or log is, or whether it exists, locate it with list_files/read_file and ' +
     'report the actual result.\n' +
     'FILE TOOL PAYLOADS — exact argument shapes, copy these: read_file: {"tool":"read_file","args":{"path":"scripts/get_solana_price.py"}}; ' +
@@ -574,6 +599,13 @@ function buildSystemPrompt(base) {
     'required: never use cmd/exec/script/shell_command, never a bare string, never a placeholder ' +
     '("your_shell_command_here" is a placeholder example, not a value you should send); one ' +
     'command at a time, single line, no pipes-to-nowhere.\n' +
+    'WORKSPACE ZONES — your default working directory is the AGENT WORKSPACE, the "workspaces/" ' +
+    'folder inside the project root. BARE relative paths (e.g. "scripts/foo.py") target the ' +
+    'workspace — generated scripts, reports and dynamic files belong there. Paths starting with ' +
+    '"../" are explicitly PROJECT-ROOT-relative (e.g. "../routes/fs.js") and may read/write ' +
+    'anywhere in the project root; never use absolute paths (rejected). list_files with no path ' +
+    'lists the workspace; use list_files ../ for the project root. run_shell starts in the ' +
+    'workspace ("cd .." reaches the project root).\n' +
     'SCRIPT & AUTOMATION TASKS — strict order, each step EXACTLY ONCE: (1) write the script ' +
     'file once; (2) create the automation pointing to that script once; (3) list the ' +
     'automations once to confirm; (4) STOP and give the final answer. NEVER read output log ' +
@@ -949,4 +981,5 @@ module.exports = {
   groupIndependent,
   callClass,
   pathsOverlap,
+  normalizeFileToolArgs,
 };

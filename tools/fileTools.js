@@ -40,7 +40,7 @@ const readFileTool = {
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Workspace-relative file path, e.g. "scripts/get_solana_price.py"' },
+      path: { type: 'string', description: 'Workspace-relative path (default zone: the agent workspace "workspaces/"; prefix "../" targets the project root explicitly), e.g. "scripts/get_solana_price.py"' },
       offset: { type: 'number', description: 'First line to read (1-based, default 1)' },
       limit: { type: 'number', description: 'Max lines to read (default: to EOF, capped by size)' },
     },
@@ -82,7 +82,7 @@ const readFileTool = {
       // triggered retry loops).
       const rel = relOf(abs);
       const base = String(rel).split(/[\\/]/).pop() || '';
-      const looksLikeLog = /^logs\//.test(String(rel)) || /\.log$/i.test(base) || /^log/i.test(base);
+      const looksLikeLog = /^logs\//.test(String(rel)) || /\/logs\//.test(String(rel)) || /\.log$/i.test(base) || /^log/i.test(base);
       if (e && e.code === 'ENOENT' && looksLikeLog) {
         return {
           ok: false,
@@ -105,7 +105,7 @@ const writeFileTool = {
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Workspace-relative file path, e.g. "scripts/get_solana_price.py"' },
+      path: { type: 'string', description: 'Workspace-relative path (default zone: the agent workspace "workspaces/"; prefix "../" targets the project root explicitly), e.g. "scripts/get_solana_price.py"' },
       content: {
         type: ['string', 'array'],
         description:
@@ -135,7 +135,7 @@ const editFileTool = {
   parameters: {
     type: 'object',
     properties: {
-      path: { type: 'string', description: 'Workspace-relative file path, e.g. "scripts/get_solana_price.py"' },
+      path: { type: 'string', description: 'Workspace-relative path (default zone: the agent workspace "workspaces/"; prefix "../" targets the project root explicitly), e.g. "scripts/get_solana_price.py"' },
       old_text: { type: 'string', description: 'Exact text to replace' },
       new_text: { type: 'string', description: 'Replacement text' },
       replace_all: { type: 'boolean', description: 'Replace every occurrence instead of just the first (default false)' },
@@ -175,7 +175,7 @@ const listFilesTool = {
     properties: {
       path: {
         type: 'string',
-        description: 'Workspace-relative directory path, e.g. "scripts" (defaults to the workspace root)',
+        description: 'Workspace-relative directory (default zone: the agent workspace "workspaces/"; prefix "../" for the project root), e.g. "scripts"',
       },
       recursive: {
         type: 'boolean',

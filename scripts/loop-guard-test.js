@@ -110,7 +110,10 @@ function restoreState() {
   // =========================================================================
   {
     // The reported scenario: write (edit) → re-run checks — all execute.
-    const W = path.join(process.env.PLIFE_WORK_ROOT, 'scripts', '__repeat_probe.txt');
+    // Zone note: bare paths land in the AGENT WORKSPACE now (workRoot/
+    // workspaces/), which is also where run_shell starts — both sides of
+    // the net agree without extra "../" prefixes.
+    const W = path.join(process.env.PLIFE_WORK_ROOT, 'workspaces', 'scripts', '__repeat_probe.txt');
     const r1 = await toolLoop.executeTool('write_file', { path: 'scripts/__repeat_probe.txt', content: 'one' });
     const r2 = await toolLoop.executeTool('write_file', { path: 'scripts/__repeat_probe.txt', content: 'one' });
     const afterDup = fs.readFileSync(W, 'utf8');
@@ -132,15 +135,17 @@ function restoreState() {
     await toolLoop.executeTool('write_file', { path: P, content: 'bye' });
     const d1 = await toolLoop.executeTool('delete_file', { path: P });
     t('delete_file: removes an existing file', d1.ok === true && d1.deleted === true, JSON.stringify(d1));
-    t('delete_file: file really gone', !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, P)));
+    t('delete_file: file really gone', !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, 'workspaces', P)));
     const d2 = await toolLoop.executeTool('delete_file', { path: P });
     t('delete_file: identical repeat executes (clean missing-file error)', !d2.ok && !d2.skippedDuplicate && /no such file/.test(d2.error || ''), JSON.stringify(d2));
     const d2b = await toolLoop.executeTool('delete_file', { path: 'nope.txt' });
     t('delete_file: missing file reports cleanly', !d2b.ok && /no such file/.test(d2b.error || ''), JSON.stringify(d2b));
     const d3 = await toolLoop.executeTool('delete_file', { path: 'scripts' });
     t('delete_file: directory refused (never recursive)', !d3.ok && /directory/.test(d3.error || ''), JSON.stringify(d3));
-    const d4 = await toolLoop.executeTool('delete_file', { path: '../outside.txt' });
-    t('delete_file: traversal outside workspace refused', !d4.ok, JSON.stringify(d4));
+    const d4 = await toolLoop.executeTool('delete_file', { path: '../../outside.txt' });
+    t('delete_file: two-level traversal outside the project refused', !d4.ok, JSON.stringify(d4));
+    const d4b = await toolLoop.executeTool('delete_file', { path: '../outside.txt' });
+    t('delete_file: single ../ is project-root-zone now (missing file, not an escape error)', !d4b.ok && /no such file/.test(d4b.error || '') && !/escape|traversal/i.test(d4b.error || ''), JSON.stringify(d4b));
     const d5 = await toolLoop.executeTool('delete_file', { path: '/etc/passwd' });
     t('delete_file: absolute path outside workspace refused', !d5.ok, JSON.stringify(d5));
 
@@ -149,23 +154,24 @@ function restoreState() {
     // being rejected into a repeated-invalid retry loop
     {
       const D = process.env.PLIFE_WORK_ROOT;
-      fs.mkdirSync(path.join(D, 'scripts'), { recursive: true });
-      fs.writeFileSync(path.join(D, 'scripts', '__norm_probe.txt'), 'norm-probe-content');
-      fs.writeFileSync(path.join(D, 'scripts', '__norm_del.txt'), 'x');
+      const WS = path.join(D, 'workspaces');
+      fs.mkdirSync(path.join(WS, 'scripts'), { recursive: true });
+      fs.writeFileSync(path.join(WS, 'scripts', '__norm_probe.txt'), 'norm-probe-content');
+      fs.writeFileSync(path.join(WS, 'scripts', '__norm_del.txt'), 'x');
       const r1 = await toolLoop.executeTool('read_file', { file: 'scripts/__norm_probe.txt' });
       t('arg-norm: read_file with {file:...} executes', r1.ok === true && /norm-probe-content/.test(r1.content || ''), JSON.stringify(r1).slice(0, 120));
       const r2 = await toolLoop.executeTool('read_file', 'scripts/__norm_probe.txt');
-      t('arg-norm: read_file with bare string args executes', r2.ok === true && r2.path === 'scripts/__norm_probe.txt', JSON.stringify(r2).slice(0, 120));
+      t('arg-norm: read_file with bare string args executes', r2.ok === true && r2.path === 'workspaces/scripts/__norm_probe.txt', JSON.stringify(r2).slice(0, 120));
       const r3 = await toolLoop.executeTool('read_file', { filename: 'scripts/__norm_probe.txt' });
-      t('arg-norm: read_file with {filename:...} executes', r3.ok === true && r3.path === 'scripts/__norm_probe.txt', JSON.stringify(r3).slice(0, 120));
+      t('arg-norm: read_file with {filename:...} executes', r3.ok === true && r3.path === 'workspaces/scripts/__norm_probe.txt', JSON.stringify(r3).slice(0, 120));
       const r4 = await toolLoop.executeTool('write_file', { file: 'scripts/__norm_probe2.txt', content: 'written via alias' });
-      t('arg-norm: write_file with {file, content} executes', r4.ok === true && fs.readFileSync(path.join(D, 'scripts', '__norm_probe2.txt'), 'utf8') === 'written via alias', JSON.stringify(r4));
+      t('arg-norm: write_file with {file, content} executes', r4.ok === true && fs.readFileSync(path.join(WS, 'scripts', '__norm_probe2.txt'), 'utf8') === 'written via alias', JSON.stringify(r4));
       const r4b = await toolLoop.executeTool('write_file', { file: 'scripts/__norm_probe2.txt', content: 'written via alias' });
       t('arg-norm: alias-keyed repeat executes', r4b.ok === true && !r4b.skippedDuplicate, JSON.stringify(r4b));
       const r5 = await toolLoop.executeTool('delete_file', { src: 'scripts/__norm_del.txt' });
       t('arg-norm: delete_file with {src:...} executes', r5.ok === true && r5.deleted === true, JSON.stringify(r5));
       const r6 = await toolLoop.executeTool('edit_file', { file: 'scripts/__norm_probe.txt', old_text: 'norm-probe-content', new_text: 'edited' });
-      t('arg-norm: edit_file with {file,...} executes', r6.ok === true && fs.readFileSync(path.join(D, 'scripts', '__norm_probe.txt'), 'utf8') === 'edited', JSON.stringify(r6));
+      t('arg-norm: edit_file with {file,...} executes', r6.ok === true && fs.readFileSync(path.join(WS, 'scripts', '__norm_probe.txt'), 'utf8') === 'edited', JSON.stringify(r6));
       const r7 = await toolLoop.executeTool('read_file', {});
             t(
               'arg-norm: still-empty args rejected WITH the expected format hint',
@@ -230,7 +236,7 @@ function restoreState() {
     await toolLoop.executeTool('write_file', { path: 'scripts/__churn.txt', content: 'x' });
     const ch1 = await toolLoop.executeTool('delete_file', { path: 'scripts/__churn.txt' });
     t('churn: delete of file created this request executes', ch1.ok === true && ch1.deleted === true, JSON.stringify(ch1));
-    t('churn: the file is really gone', !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, 'scripts/__churn.txt')));
+    t('churn: the file is really gone', !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, 'workspaces', 'scripts/__churn.txt')));
     const ch2 = await toolLoop.executeTool('delete_file', { path: 'scripts/__churn.txt' });
     t('churn: repeated delete reports the missing file cleanly', !ch2.ok && !ch2.skippedDuplicate && /no such file/.test(ch2.error || ''), JSON.stringify(ch2));
 
@@ -425,6 +431,49 @@ function restoreState() {
   }
 
   // =========================================================================
+  // 3c) Workspace zones — the two-zone resolution contract: bare relative
+  // paths land in the AGENT WORKSPACE (workRoot/workspaces/), ".." walks UP
+  // to the project root, two-level traversal and absolute paths stay
+  // rejected. run_shell starts in the workspace.
+  // =========================================================================
+  {
+    const WORK = process.env.PLIFE_WORK_ROOT;
+    const WS = path.join(WORK, 'workspaces');
+    const z1 = await toolLoop.executeTool('write_file', { path: 'zones/a.txt', content: 'zone-a' });
+    t('zone: bare write lands in the agent workspace', z1.ok === true && fs.existsSync(path.join(WS, 'zones', 'a.txt')) && !fs.existsSync(path.join(WORK, 'zones', 'a.txt')), JSON.stringify(z1));
+    const z2 = await toolLoop.executeTool('read_file', { path: 'zones/a.txt' });
+    t('zone: bare read round-trips from the workspace', z2.ok === true && z2.content === 'zone-a' && z2.path === 'workspaces/zones/a.txt', JSON.stringify(z2).slice(0, 100));
+    const z3 = await toolLoop.executeTool('write_file', { path: 'workspaces/zones/b.txt', content: 'zone-b' });
+    t('zone: a path that already names the workspace is not doubled', z3.ok === true && fs.existsSync(path.join(WS, 'zones', 'b.txt')) && !fs.existsSync(path.join(WS, 'workspaces')), JSON.stringify(z3));
+    // project-root zone
+    fs.writeFileSync(path.join(WORK, 'zone-root.txt'), 'root-content');
+    const z4 = await toolLoop.executeTool('read_file', { path: '../zone-root.txt' });
+    t('zone: ../x reaches the project root', z4.ok === true && z4.content === 'root-content' && z4.path === 'zone-root.txt', JSON.stringify(z4).slice(0, 100));
+    const z5 = await toolLoop.executeTool('write_file', { path: '../zone-write.txt', content: 'root-write' });
+    t('zone: ../ write targets the project root', z5.ok === true && fs.existsSync(path.join(WORK, 'zone-write.txt')) && !fs.existsSync(path.join(WS, 'zone-write.txt')), JSON.stringify(z5));
+    const z6 = await toolLoop.executeTool('edit_file', { path: '../zone-root.txt', old_text: 'root-content', new_text: 'root-edited' });
+    t('zone: ../ edit targets the project root', z6.ok === true && fs.readFileSync(path.join(WORK, 'zone-root.txt'), 'utf8') === 'root-edited', JSON.stringify(z6));
+    const z7 = await toolLoop.executeTool('delete_file', { path: '../zone-root.txt' });
+    t('zone: ../ delete targets the project root', z7.ok === true && !fs.existsSync(path.join(WORK, 'zone-root.txt')), JSON.stringify(z7));
+    // listings
+    const z8 = await toolLoop.executeTool('list_files', {});
+    t('zone: list_files with no path lists the agent workspace', z8.ok === true && Array.isArray(z8.entries) && z8.entries.some((e) => /^zones$/.test(e.name)), JSON.stringify(z8).slice(0, 120));
+    const z9 = await toolLoop.executeTool('list_files', { path: '..' });
+    t('zone: list_files .. lists the project root', z9.ok === true && Array.isArray(z9.entries) && z9.entries.some((e) => /^workspaces$/.test(e.name)), JSON.stringify(z9).slice(0, 160));
+    // shell cwd
+    const z10 = await toolLoop.executeTool('run_shell', { command: 'pwd' });
+    t('zone: run_shell starts in the agent workspace', z10.ok === true && /\/workspaces\/?\s*$/.test(z10.stdout || ''), JSON.stringify(z10).slice(0, 140));
+    const z11 = await toolLoop.executeTool('run_shell', { command: 'cd .. && pwd' });
+    t('zone: run_shell cd .. reaches the project root', z11.ok === true && String(z11.stdout || '').trim() === path.resolve(WORK), JSON.stringify(z11).slice(0, 140));
+    // escapes stay rejected
+    const z12 = await toolLoop.executeTool('read_file', { path: '../../esc-probe.txt' });
+    t('zone: two-level traversal still refused', !z12.ok && /escape|outside|traversal/i.test(z12.error || ''), JSON.stringify(z12));
+    const z13 = await toolLoop.executeTool('read_file', { path: '/etc/hostname' });
+    t('zone: absolute path still refused', !z13.ok && /escape|outside|traversal/i.test(z13.error || ''), JSON.stringify(z13));
+    try { fs.unlinkSync(path.join(WORK, 'zone-write.txt')); } catch {}
+  }
+
+  // =========================================================================
   // 4) End-to-end: real chat router + mocked upstream
   // =========================================================================
   const express = require('express');
@@ -536,7 +585,7 @@ function restoreState() {
       [
         { toolCalls: [{ index: 0, id: 'c1', name: 'write_file', arguments: writeArgs }] },
         { toolCalls: [{ index: 0, id: 'c2', name: 'write_file', arguments: writeArgs }] }, // EXACT duplicate
-        { toolCalls: [{ index: 0, id: 'c3', name: 'create_automation', arguments: '{"name":"Time Log","schedule_type":"interval","interval_minutes":5,"action_type":"script","script":"scripts/t.js"}' }] },
+        { toolCalls: [{ index: 0, id: 'c3', name: 'create_automation', arguments: '{"name":"Time Log","schedule_type":"interval","interval_minutes":5,"action_type":"script","script":"workspaces/scripts/t.js"}' }] },
         { toolCalls: [{ index: 0, id: 'c4', name: 'list_automations', arguments: '{}' }] },
         { content: 'All set! The automation is running.', finishReason: 'stop' },
       ]
@@ -554,7 +603,7 @@ function restoreState() {
     t('e2e-A: no duplicate-skip message anywhere', !dupResultVisible);
     t('e2e-A: no forcing rounds triggered', !statuses.some((s) => s.includes('forcing a tool call')), statuses.join(' | '));
     t('e2e-A: no interception triggered', !statuses.some((s) => s.includes('intercepted')), statuses.join(' | '));
-    t('e2e-A: file written once to temp workRoot', fs.readFileSync(path.join(process.env.PLIFE_WORK_ROOT, 'scripts', 't.js'), 'utf8') === 'console.log(new Date());');
+    t('e2e-A: file written once to temp workspace', fs.readFileSync(path.join(process.env.PLIFE_WORK_ROOT, 'workspaces', 'scripts', 't.js'), 'utf8') === 'console.log(new Date());');
   }
 
   // ----- B) model explains repeatedly -> server-side intercept creates it, loop ends cleanly
@@ -614,7 +663,7 @@ function restoreState() {
     t('e2e-D: model retried and succeeded', wroteOnce);
     t('e2e-D: final answer streamed', /Done, notes\.txt is written/.test(text), text.slice(0, 80));
     t('e2e-D: completed in 4 steps', steps === 4, `steps=${steps}`);
-    t('e2e-D: file has the real content', fs.readFileSync(path.join(process.env.PLIFE_WORK_ROOT, 'notes.txt'), 'utf8') === 'hi there');
+    t('e2e-D: file has the real content', fs.readFileSync(path.join(process.env.PLIFE_WORK_ROOT, 'workspaces', 'notes.txt'), 'utf8') === 'hi there');
     t('e2e-D: no junk ? file created', !fs.existsSync(path.join(process.env.PLIFE_WORK_ROOT, '?')));
   }
 
@@ -626,6 +675,7 @@ function restoreState() {
     const stamp = Date.now();
     const probe = `scripts/__logprobe_${stamp}.sh`;
     const logName = `__logprobe_${stamp}.log`;
+    fs.mkdirSync(path.join(process.env.PLIFE_WORK_ROOT, 'scripts'), { recursive: true });
     fs.writeFileSync(path.join(process.env.PLIFE_WORK_ROOT, probe), `#!/bin/sh\ndate '+%Y-%m-%d %H:%M:%S' > logs/${logName}\necho probe-ran\n`);
     const created = await toolLoop.executeTool('create_automation', {
       name: 'Log Probe',
@@ -719,15 +769,16 @@ function restoreState() {
     t('e2e-G: no duplicate re-emission after the final round', afterFinal.length === 0, `after=${afterFinal.length}`);
     const occ = (text.match(/The file is written\./g) || []).length;
     t('e2e-G: final answer appears exactly once end-to-end', occ === 1, `occ=${occ} text=${text.slice(0, 140)}`);
-    try { fs.unlinkSync(path.join(process.env.PLIFE_WORK_ROOT, 'scripts', '__rs_probe.txt')); } catch {}
+    try { fs.unlinkSync(path.join(process.env.PLIFE_WORK_ROOT, 'workspaces', 'scripts', '__rs_probe.txt')); } catch {}
   }
 
   // ----- H) the reported failure mode: alias-keyed read_file args must
   // EXECUTE (not be rejected into a 7-round retry -> anti-spam freeze)
   {
     const D = process.env.PLIFE_WORK_ROOT;
-    fs.mkdirSync(path.join(D, 'scripts'), { recursive: true });
-    fs.writeFileSync(path.join(D, 'scripts', 'get_solana_price.py'), 'import requests\nprint("solana price")\n');
+    const WS = path.join(D, 'workspaces');
+    fs.mkdirSync(path.join(WS, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(WS, 'scripts', 'get_solana_price.py'), 'import requests\nprint("solana price")\n');
     const { statuses, text, steps, callLog } = await runChat('can you check and refactor: scripts/get_solana_price.py', [
       { toolCalls: [{ index: 0, id: 'h1', name: 'read_file', arguments: '{"file":"scripts/get_solana_price.py"}' }] },
       { content: 'I checked the file — it fetches the Solana price via the CoinGecko API.', finishReason: 'stop' },
@@ -739,9 +790,9 @@ function restoreState() {
     t('e2e-H: zero rejections for the alias call', rejected.length === 0, statuses.join(' | '));
     t('e2e-H: no anti-spam freeze', !froze, statuses.join(' | '));
     t('e2e-H: loop completed in exactly 2 steps', steps === 2, `steps=${steps}`);
-    t('e2e-H: status shows the real path (no "Reading file: ?")', statuses.some((s) => s === '⚙ Reading file: scripts/get_solana_price.py'), JSON.stringify(statuses));
+    t('e2e-H: status shows the zoned path (workspace default)', statuses.some((s) => s === '⚙ Reading file: workspaces/scripts/get_solana_price.py'), JSON.stringify(statuses));
     t('e2e-H: final answer streamed', /I checked the file/.test(text), text.slice(0, 100));
-    try { fs.unlinkSync(path.join(D, 'scripts', 'get_solana_price.py')); } catch {}
+    try { fs.unlinkSync(path.join(WS, 'scripts', 'get_solana_price.py')); } catch {}
   }
 
   // ----- I) fail-fast: the SAME invalid emission repeated 3 times freezes
@@ -770,14 +821,15 @@ function restoreState() {
   // works when the conversation names exactly one existing workspace file
   {
     const D = process.env.PLIFE_WORK_ROOT;
-    fs.mkdirSync(path.join(D, 'scripts'), { recursive: true });
-    fs.writeFileSync(path.join(D, 'scripts', 'get_solana_price.py'), 'import requests\nprint("solana price")\n');
+    const WS = path.join(D, 'workspaces');
+    fs.mkdirSync(path.join(WS, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(WS, 'scripts', 'get_solana_price.py'), 'import requests\nprint("solana price")\n');
     const { statuses, text, steps, callLog } = await runChat('can you check and refactor: scripts/get_solana_price.py', [
       { toolCalls: [{ index: 0, id: 'j1', name: 'read_file', arguments: '{}' }] },
       { content: 'I checked the file — it looks fine.', finishReason: 'stop' },
     ]);
     const executed = callLog.some((c) => c.messages.some((m) => m.content && m.content.includes('read_file: {"ok":true')));
-    const inferredStatus = statuses.some((s) => s.includes('Reading file: scripts/get_solana_price.py (path inferred from conversation)'));
+    const inferredStatus = statuses.some((s) => s.includes('Reading file: workspaces/scripts/get_solana_price.py (path inferred from conversation)'));
     t('e2e-J: empty-args read_file executed via conversation path', executed, JSON.stringify(callLog.map((c) => c.messages.map((m) => String(m.content).slice(0, 80)))));
     t('e2e-J: status names the inferred path', inferredStatus, JSON.stringify(statuses));
     t('e2e-J: zero rejections', !statuses.some((s) => s.includes('Tool call rejected')), JSON.stringify(statuses));
@@ -790,13 +842,13 @@ function restoreState() {
       { toolCalls: [{ index: 0, id: 'j3', name: 'write_file', arguments: '{"path":"scripts/get_solana_price.py","content":"print(42)"}' }] },
       { content: 'Refactored.', finishReason: 'stop' },
     ]);
-    const writeInferred = s2.some((s) => s === '⚙ Writing file: scripts/get_solana_price.py (path inferred from conversation)');
+    const writeInferred = s2.some((s) => s === '⚙ Writing file: workspaces/scripts/get_solana_price.py (path inferred from conversation)');
     const contentOnly = s2.some((s) => s.includes('missing required argument \'content\'') && !s.includes('missing required argument \'path\''));
     const wrote = log2.some((c) => c.messages.some((m) => m.content && m.content.includes('write_file: {"ok":true')));
     t('e2e-J: write_file empty args infers the path in the status', writeInferred, JSON.stringify(s2));
     t('e2e-J: write rejected for content only (path no longer the gap)', contentOnly, JSON.stringify(s2));
     t('e2e-J: valid retry with content executes', wrote);
-    try { fs.unlinkSync(path.join(D, 'scripts', 'get_solana_price.py')); } catch {}
+    try { fs.unlinkSync(path.join(WS, 'scripts', 'get_solana_price.py')); } catch {}
   }
 
   // ----- K) the reported gemma failure mode: run_shell with ALIAS keys must

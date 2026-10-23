@@ -267,6 +267,8 @@ function labelPath(a) {
 // anything without the model also supplying real content. delete_file is
 // deliberately excluded (destructive).
 const FILE_PATH_RE = /[\w./-]+\.(?:py|js|ts|sh|md|txt|json|ya?ml|toml|csv|html|css|log)\b/gi;
+// Tools whose path argument goes through workspace-zone normalization.
+const ZONE_PATH_TOOLS = new Set(['read_file', 'write_file', 'edit_file', 'delete_file', 'list_files']);
 function recoverFilePath(msgs) {
   const text = (msgs || [])
     .map((m) => (m && typeof m.content === 'string' ? m.content : ''))
@@ -275,14 +277,34 @@ function recoverFilePath(msgs) {
     (s) => s.includes('/') && !/^https?:\/\//i.test(s)
   );
   if (cands.length !== 1) return null;
-  const abs = path.resolve(config.workRoot, cands[0]);
-  if (!(abs === config.workRoot || abs.startsWith(config.workRoot + path.sep))) return null;
-  try {
-    if (!fs.statSync(abs).isFile()) return null;
-  } catch {
+  const raw = cands[0];
+  // Candidates that already name the agent workspace resolve against the
+  // project root (zone passthrough — the same target either way).
+  if (raw === 'workspaces' || raw.startsWith('workspaces/')) {
+    const abs = path.resolve(config.workRoot, raw);
+    if (abs === config.workRoot || abs.startsWith(config.workRoot + path.sep)) {
+      try {
+        if (fs.statSync(abs).isFile()) return raw;
+      } catch { /* fall through */ }
+    }
     return null;
   }
-  return cands[0];
+  // Default zone first: the agent workspace.
+  const wsAbs = path.resolve(config.workspaceDir, raw);
+  if (wsAbs === config.workspaceDir || wsAbs.startsWith(config.workspaceDir + path.sep)) {
+    try {
+      if (fs.statSync(wsAbs).isFile()) return raw; // bare — zoned by the normalizer
+    } catch { /* fall through to root check */ }
+  }
+  // Explicit project-root zone: return "../" + raw so the normalizer keeps
+  // it root-relative (a bare path would be re-zoned INTO the workspace).
+  const abs = path.resolve(config.workRoot, raw);
+  if (abs === config.workRoot || abs.startsWith(config.workRoot + path.sep)) {
+    try {
+      if (fs.statSync(abs).isFile()) return '../' + raw;
+    } catch { /* no match */ }
+  }
+  return null;
 }
 
 // Order-insensitive serialization of a call's args — used to count repeated
@@ -593,6 +615,7 @@ router.post('/', async (req, res) => {
     config.promptPrefixTokens
   );
   let histTokens = historyManager.historyTokens(agentMessages);
+  let preOpenNotice = null; // compaction notice deferred until SSE is open (see below)
   let ctxRetried = false; // context-overflow recovery: compact + retry ONCE
 
   // Watermarked pre-compaction by deterministic REPLAY: turns are walked
@@ -615,9 +638,12 @@ router.post('/', async (req, res) => {
       // Only announce when the boundary actually MOVED (stubs/drops changed
       // vs the previous request); re-applying the same stubs to the same raw
       // history is a cache no-op and would spam the log + UI every turn.
+      // NOTE: the notice is deferred — safeWrite/res.write would implicitly
+      // send headers, and openSse() below must be the first thing to touch
+      // the response (otherwise ERR_HTTP_HEADERS_SENT).
       if (delta.moved) {
         logCompaction('pre-request', c.before, c.after, c.removed, delta.rePrefill, budget, () => lastTimings);
-        safeWrite(res, statusChunk(trimNotice(delta.rePrefill, () => lastTimings)), lost);
+        preOpenNotice = statusChunk(trimNotice(delta.rePrefill, () => lastTimings));
       }
     } else {
       historyManager.rememberLastCompactOutput(agentMessages);
@@ -707,6 +733,11 @@ router.post('/', async (req, res) => {
   const queuePosition = firstPromise.position || 1;
 
   openSse(res, queuePosition);
+
+  // Deferred pre-request compaction notice (deferred so openSse is the first
+  // header-touching call — see the preOpenNotice comment in the compaction
+  // block). Emitted as the first SSE event, before the queue-position notice.
+  if (preOpenNotice) safeWrite(res, preOpenNotice, lost);
 
   // SSE keep-alive: comment-line heartbeats during stream inactivity so
   // proxies/browsers never drop a long-running request (queue waits, tool
@@ -1381,6 +1412,14 @@ router.post('/', async (req, res) => {
                   c.args = { ...(c.args || {}), path: recovered };
                   inferred = true;
                 }
+              }
+              // Workspace-zone normalization (idempotent, mirrors
+              // executeTool): bare relative paths become workspace paths
+              // ("workspaces/..."), "../"-prefixed paths stay project-root-
+              // relative. Applied HERE so status labels, freeze keys and
+              // execution all agree on the real target.
+              if (toolLoop.normalizeFileToolArgs && ZONE_PATH_TOOLS.has(c.name)) {
+                c.args = toolLoop.normalizeFileToolArgs(c.name, c.args);
               }
               safeWrite(
                 res,

@@ -6,6 +6,7 @@
  * routes/ and services/; this file has no business logic by design.
  */
 const express = require('express');
+const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const automationManager = require('./services/automationManager');
@@ -104,6 +105,10 @@ app.listen(config.port, () => {
 
 // Semantic-memory embedder preload (background; never blocks boot).
 embedder.warm();
+
+// Agent workspace: ensure workspaces/ exists so the File Explorer can show
+// it as a normal folder from the very first boot.
+try { fs.mkdirSync(config.workspaceDir, { recursive: true }); } catch { /* best effort */ }
 
 // Stop the scheduler cleanly on shutdown signals.
 for (const sig of ['SIGINT', 'SIGTERM']) {
