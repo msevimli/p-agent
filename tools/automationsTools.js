@@ -185,7 +185,7 @@ const setAutomationEnabled = {
     },
     required: ['id', 'enabled'],
   },
-  async run(args) {
+  async execute(args) {
     const id = String((args && args.id) || '').trim();
     if (!id) return { ok: false, error: 'id is required (take it from list_automations)' };
     const enabled = args && typeof args.enabled === 'boolean' ? args.enabled : null;
@@ -222,7 +222,7 @@ const setAutomationsPaused = {
     },
     required: ['paused'],
   },
-  async run(args) {
+  async execute(args) {
     const paused = args && typeof args.paused === 'boolean' ? args.paused : null;
     if (paused === null) return { ok: false, error: 'paused must be a boolean' };
     try {

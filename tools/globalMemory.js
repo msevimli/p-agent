@@ -92,4 +92,4 @@ async function run(args) {
   };
 }
 
-module.exports = { tools: [{ name: 'manage_global_memory', description: DESCRIPTION, parameters: PARAMETERS, run }] };
+module.exports = { tools: [{ name: 'manage_global_memory', description: DESCRIPTION, parameters: PARAMETERS, execute: run }] };
