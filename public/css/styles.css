@@ -452,6 +452,61 @@ html.dark .fe-file-meta { color: #6b7280; }
   color: #e6edf3;
 }
 .fe-fileview:hover .code-copy { opacity: 1; }
+/* line-number gutter (rows; the gutter is sticky-left so it stays visible
+   and aligned while the code scrolls horizontally) */
+.fe-fileview code.fe-lines { display: block; }
+.fe-line { display: flex; min-height: 1em; }
+.fe-ln {
+  flex: none; width: 3.2em; text-align: right; padding-right: 0.9em;
+  color: #4b5563; user-select: none;
+  position: sticky; left: 0; z-index: 1;
+  background: #0d1117;
+  border-right: 1px solid rgba(255,255,255,0.07);
+}
+.fe-fileview:hover .fe-ln { border-right-color: rgba(255,255,255,0.12); }
+.fe-lc { flex: none; white-space: pre; padding-left: 0.9em; color: #e6edf3; }
+
+/* Markdown preview (File Explorer) — rendered .md files */
+.fe-mdview {
+  margin: 0.25rem 1rem 1.25rem; padding: 1rem 1.25rem 2rem;
+  background: #0d1117; color: #e6edf3; border-radius: 0.6rem;
+  overflow-x: auto; font-size: 0.9rem; line-height: 1.65; position: relative;
+  max-height: calc(100vh - 14rem); overflow-y: auto;
+}
+.fe-mdview:hover .code-copy { opacity: 1; }
+.fe-mdview h1, .fe-mdview h2, .fe-mdview h3, .fe-mdview h4 {
+  color: #fff; margin: 1.1em 0 0.45em; line-height: 1.3; font-weight: 600;
+}
+.fe-mdview h1 { font-size: 1.4em; padding-bottom: 0.3em; border-bottom: 1px solid rgba(255,255,255,0.12); }
+.fe-mdview h2 { font-size: 1.22em; }
+.fe-mdview h3 { font-size: 1.08em; }
+.fe-mdview h4 { font-size: 1em; }
+.fe-mdview p { margin: 0.55em 0; color: rgba(255,255,255,0.86); }
+.fe-mdview ul, .fe-mdview ol { margin: 0.5em 0; padding-left: 1.4em; color: rgba(255,255,255,0.86); }
+.fe-mdview li { margin: 0.2em 0; }
+.fe-mdview blockquote {
+  margin: 0.7em 0; padding: 0.5em 0.9em;
+  border-left: 3px solid rgba(59,130,246,0.55); background: rgba(255,255,255,0.045);
+  border-radius: 0 6px 6px 0; color: rgba(255,255,255,0.72);
+}
+.fe-mdview code {
+  background: rgba(255,255,255,0.09); border-radius: 4px; padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.88em; color: #93c5fd;
+}
+.fe-mdview pre {
+  background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px; padding: 10px 12px; overflow-x: auto; margin: 0.7em 0;
+}
+.fe-mdview pre code { background: transparent; padding: 0; color: #d6e4ff; font-size: 0.82rem; }
+.fe-mdview a { color: #60a5fa; text-decoration: none; }
+.fe-mdview a:hover { text-decoration: underline; }
+.fe-mdview hr { border: 0; border-top: 1px solid rgba(255,255,255,0.14); margin: 1em 0; }
+.fe-mdview table { border-collapse: collapse; margin: 0.7em 0; }
+.fe-mdview th, .fe-mdview td { border: 1px solid rgba(255,255,255,0.16); padding: 5px 10px; }
+.fe-mdview th { background: rgba(255,255,255,0.07); }
+.fe-mdview img { max-width: 100%; border-radius: 6px; }
+.fe-btn-back.md-on { border-color: rgba(59,130,246,0.45); color: #60a5fa; }
 
 /* File editor (edit mode: textarea + save/cancel bar) */
 /* #fsList is a block scroll container; while editing it becomes a flex

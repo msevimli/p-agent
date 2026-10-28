@@ -1545,11 +1545,96 @@
     renderFileView(entry, data);
   }
 
+  // --- markdown preview (File Explorer) ----------------------------------
+  // marked.parse output is sanitized: only a small tag/attr allowlist
+  // survives (scripts, style, event handlers, form controls … are removed
+  // or unwrapped), so rendered file content can never execute in the UI.
+  const MD_ALLOWED_TAGS = new Set(['H1','H2','H3','H4','H5','H6','P','UL','OL','LI','BLOCKQUOTE','PRE','CODE','STRONG','B','EM','I','A','IMG','HR','BR','TABLE','THEAD','TBODY','TR','TH','TD','DEL','INS','SUP','SUB','DIV','SPAN','DL','DT','DD']);
+  function mdRender(md) {
+    const src = String(md || '');
+    if (typeof marked === 'undefined' || !marked.parse) return escapeHtml(src);
+    const tpl = document.createElement('template');
+    tpl.innerHTML = marked.parse(src); // parsed in an inert template: no script execution
+    const clean = (el) => {
+      [...el.children].forEach((child) => {
+        const tag = child.tagName.toUpperCase();
+        if (!MD_ALLOWED_TAGS.has(tag)) {
+          child.replaceWith(...child.childNodes); // unwrap unknown elements, keep text
+          return;
+        }
+        [...child.attributes].forEach((a) => {
+          const n = a.name.toLowerCase();
+          if (n === 'href') {
+            const href = a.value.trim();
+            if (!/^(https?:|mailto:|#|\/|\.)/i.test(href)) child.removeAttribute('href');
+            else { child.setAttribute('href', href); child.setAttribute('rel', 'noopener noreferrer'); }
+          } else if (n !== 'title' && n !== 'alt' && n !== 'src') {
+            child.removeAttribute(a.name); // drop style/class/on* — everything else
+          }
+        });
+        clean(child);
+      });
+    };
+    clean(tpl.content);
+    return tpl.innerHTML;
+  }
+
+  // --- line-number gutter for the code preview -----------------------------
+  // Splits (syntax-highlighted) HTML into per-line fragments. hljs spans can
+  // wrap ACROSS lines (multi-line comments/strings), so a naive split on '\n'
+  // would produce broken tags; instead each fragment records the tags open at
+  // the line's START (so closes that land on this line are balanced) and at
+  // its END (so they can be closed after the row), and the renderer re-opens /
+  // closes them per row — every row stays balanced and tokens keep color.
+  function splitHighlightedLines(html) {
+    const lines = [];
+    let cur = '';
+    const stack = []; // {name, tag} — full opening markup is kept so a
+    // cross-line span can be re-opened with its class/attrs intact.
+    let startStack = [];
+    const flush = () => {
+      lines.push({ html: cur, start: startStack, end: stack.slice() });
+      cur = '';
+      startStack = stack.slice();
+    };
+    for (let i = 0; i < html.length; i++) {
+      const ch = html[i];
+      if (ch === '<') {
+        const m = /^<\/?([A-Za-z][\w-]*)/.exec(html.slice(i));
+        if (m) {
+          const gt = html.indexOf('>', i);
+          if (gt === -1) { cur += ch; continue; }
+          cur += html.slice(i, gt + 1);
+          if (html[i + 1] === '/') {
+            for (let s = stack.length - 1; s >= 0; s--) {
+              if (stack[s].name === m[1]) { stack.splice(s, 1); break; }
+            }
+          } else if (html[gt - 1] !== '/') {
+            stack.push({ name: m[1], tag: html.slice(i, gt + 1) });
+          }
+          i = gt;
+          continue;
+        }
+      }
+      if (ch === '\n') { flush(); continue; }
+      cur += ch;
+    }
+    if (cur.length || !lines.length) lines.push({ html: cur, start: startStack, end: stack.slice() });
+    return lines;
+  }
+  const buildRowHtml = (row) =>
+    row.start.map((s) => s.tag).join('') + row.html +
+    [...row.end].reverse().map((s) => `</${s.name}>`).join('');
+
   function renderFileView(entry, data) {
     fsList.innerHTML = '';
     // latestContent is the content the preview shows; it is replaced after a
     // successful save so the view reflects what is actually on disk.
     let latestContent = data.content;
+    // .md files default to the rendered markdown preview; Raw/Preview toggles
+    // back to the plain source view. Non-markdown files always stay raw.
+    const isMarkdown = /\.md$/i.test(entry.name);
+    let mdMode = isMarkdown;
 
     // header: back-to-folder + filename + meta + edit action
     const head = document.createElement('div');
@@ -1569,6 +1654,19 @@
     titleWrap.append(name, meta);
     const actions = document.createElement('div');
     actions.className = 'fe-file-actions';
+    const mdToggle = document.createElement('button');
+    mdToggle.className = 'fe-btn-back' + (mdMode ? ' md-on' : '');
+    mdToggle.setAttribute('data-hook', 'fe-md-toggle');
+    mdToggle.title = mdMode ? 'Show the raw source' : 'Show the rendered markdown';
+    mdToggle.innerHTML = `<span>${mdMode ? 'Raw' : 'Preview'}</span>`;
+    mdToggle.addEventListener('click', () => {
+      mdMode = !mdMode;
+      mdToggle.className = 'fe-btn-back' + (mdMode ? ' md-on' : '');
+      mdToggle.title = mdMode ? 'Show the raw source' : 'Show the rendered markdown';
+      mdToggle.innerHTML = `<span>${mdMode ? 'Raw' : 'Preview'}</span>`;
+      showPreview(latestContent);
+    });
+    if (isMarkdown) actions.appendChild(mdToggle);
     const editBtn = document.createElement('button');
     editBtn.className = 'fe-btn-back';
     editBtn.innerHTML = `${FE_EDIT_ICON}<span>edit</span>`;
@@ -1584,26 +1682,53 @@
       fsList.classList.remove('fe-editing');
       fsList.innerHTML = '';
       fsList.appendChild(head);
-      const pre = document.createElement('pre');
-      previewEl = pre;
-      pre.className = 'fe-fileview';
-      const code = document.createElement('code');
-      code.textContent = content;
-      try {
-        if (typeof hljs !== 'undefined') hljs.highlightElement(code);
-      } catch { /* keep plain text */ }
-      pre.appendChild(code);
-      const btn = document.createElement('button');
-      btn.className = 'code-copy';
-      btn.textContent = 'copy';
-      btn.addEventListener('click', () => {
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'code-copy';
+      copyBtn.textContent = 'copy';
+      copyBtn.addEventListener('click', () => {
         navigator.clipboard.writeText(content).then(() => {
-          btn.textContent = 'copied!';
-          setTimeout(() => (btn.textContent = 'copy'), 1500);
+          copyBtn.textContent = 'copied!';
+          setTimeout(() => (copyBtn.textContent = 'copy'), 1500);
         });
       });
-      pre.appendChild(btn);
-      fsList.appendChild(pre);
+      if (mdMode && isMarkdown) {
+        const div = document.createElement('div');
+        div.className = 'fe-mdview';
+        div.setAttribute('data-hook', 'fe-mdview');
+        div.innerHTML = mdRender(content);
+        div.appendChild(copyBtn);
+        previewEl = div;
+        fsList.appendChild(div);
+      } else {
+        const pre = document.createElement('pre');
+        pre.className = 'fe-fileview';
+        const code = document.createElement('code');
+        code.className = 'fe-lines';
+        code.textContent = content;
+        try {
+          if (typeof hljs !== 'undefined') hljs.highlightElement(code);
+        } catch { /* keep plain text */ }
+        // restructure into gutter + code rows; cross-line highlight spans are
+        // re-opened per row so the token colors survive the split.
+        const rows = splitHighlightedLines(code.innerHTML);
+        code.innerHTML = '';
+        rows.forEach((row, i) => {
+          const lineEl = document.createElement('span');
+          lineEl.className = 'fe-line';
+          const ln = document.createElement('span');
+          ln.className = 'fe-ln';
+          ln.textContent = String(i + 1);
+          const lc = document.createElement('span');
+          lc.className = 'fe-lc';
+          lc.innerHTML = buildRowHtml(row);
+          lineEl.append(ln, lc);
+          code.appendChild(lineEl);
+        });
+        pre.appendChild(code);
+        pre.appendChild(copyBtn);
+        previewEl = pre;
+        fsList.appendChild(pre);
+      }
     }
 
     // edit mode: fetch the FULL content (preview may be truncation-capped —

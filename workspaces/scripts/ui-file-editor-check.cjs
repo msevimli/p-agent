@@ -47,6 +47,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let confirmCalls = 0;
   let writePayload = null;
   let savedContent = 'hello world\nfoo world\n'; // mock disk state; writes update it
+  // markdown fixture: exercised by the preview-mode nets (render + sanitize).
+  const MD_SAMPLE = ['# Deep Research Title', '', '**bold** and *italic* text', '', '- item one', '- item two', '',
+    '> a quoted line', '', '<script>window.evil = 1</script>', '', '<img src="pic.png" onerror="window.evil=2">', '',
+    '```js', 'const x = 1;', '```', ''].join('\n');
+  let mdSavedContent = MD_SAMPLE;
+  // tiny stand-in for the real marked CDN: enough structure for the preview
+  // assertions (h1, lists, quotes, bold, fenced code blocks).
+  const richMd = (s) => String(s || '')
+    .replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
+    .replace(/^# (.*)$/gm, '<h1>$1</h1>')
+    .replace(/^- (.*)$/gm, '<ul><li>$1</li></ul>')
+    .replace(/^> (.*)$/gm, '<blockquote>$1</blockquote>')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
 
   window.fetch = async (url, opts) => {
     const u = String(url);
@@ -57,15 +70,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await sleep(150); // simulated network latency so the in-flight state is observable
       if (writeMode === 'fail') return json({ ok: false, error: 'boom: save rejected' }, 400);
       savedContent = writePayload.content;
+      if (writePayload.path === 'readme.md') mdSavedContent = writePayload.content;
       return json({ ok: true, path: writePayload.path, bytes: Buffer.byteLength(writePayload.content), saved: true });
     }
     if (u.includes('/api/fs/read')) {
       const full = u.includes('full=1');
+      const isMd = u.includes('readme.md');
+      const contentSrc = isMd ? mdSavedContent : savedContent;
       if (full && readMode === 'toobig') {
         return json({ ok: false, error: 'file is 5000000 bytes — too large to open in the browser editor (limit 1048576 bytes)' }, 413);
       }
-      if (full) return json({ ok: true, path: 'hello.txt', bytes: Buffer.byteLength(savedContent), full: true, content: savedContent });
-      return json({ ok: true, path: 'hello.txt', bytes: Buffer.byteLength(savedContent), content: savedContent });
+      if (full) return json({ ok: true, path: isMd ? 'readme.md' : 'hello.txt', bytes: Buffer.byteLength(contentSrc), full: true, content: contentSrc });
+      return json({ ok: true, path: isMd ? 'readme.md' : 'hello.txt', bytes: Buffer.byteLength(contentSrc), content: contentSrc });
     }
     if (u.includes('/api/fs/list')) {
       const q = new URL(u, 'http://x').searchParams.get('path') || '';
@@ -74,6 +90,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           ? [{ name: 'ws.txt', path: 'workspaces/ws.txt', type: 'file' }]
           : [
               { name: 'hello.txt', path: 'hello.txt', type: 'file' },
+              { name: 'readme.md', path: 'readme.md', type: 'file' },
               { name: 'workspaces', path: 'workspaces', type: 'directory' },
               { name: 'sub', path: 'sub', type: 'directory' },
             ];
@@ -99,7 +116,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     }
     return json({ ok: true });
   };
-  window.marked = { parse: (s) => String(s || ''), setOptions: () => {}, use: () => {} };
+  window.marked = { parse: richMd, setOptions: () => {}, use: () => {} };
+  window.hljs = {
+    highlightElement(el) {
+      // simulate real hljs output: text is HTML-escaped first (real hljs
+      // escapes entities), then a token span that wraps ACROSS lines
+      // (multi-line comment/string) plus a single-line balanced token.
+      const t = el.textContent
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      el.innerHTML = t
+        .replace('hello world', '<span class="hljs-cross">hello world')
+        .replace('foo world', 'foo world</span>')
+        .replace('hello moon', '<span class="hljs-cross">hello moon</span>');
+    },
+  };
   window.confirm = () => { confirmCalls++; return true; };
   dom.window.eval(appJs);
 
@@ -112,7 +142,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await sleep(80);
   const rows = [...window.document.querySelectorAll('#fsList .fs-entry')];
   const fileRow = rows.find((r) => (r.textContent || '').includes('hello.txt'));
-  t('editor: directory listing renders entries', rows.length === 3 && !!fileRow, `rows=${rows.length}`);
+  t('editor: directory listing renders entries', rows.length === 4 && !!fileRow, `rows=${rows.length}`);
   t('editor: folders are clickable separately from files', rows.some((r) => (r.textContent || '').includes('sub')), '');
 
   // --- workspace zones: breadcrumb labels + Root/Workspace quick toggles ---
@@ -129,7 +159,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   rootBtn.click();
   await sleep(80);
   t('zone: Go-to-Root returns to the project root breadcrumb', JSON.stringify(crumbs()) === JSON.stringify(['Root']), JSON.stringify(crumbs()));
-  t('zone: root listing back via toggle', [...window.document.querySelectorAll('#fsList .fs-entry')].length === 3, '');
+  t('zone: root listing back via toggle', [...window.document.querySelectorAll('#fsList .fs-entry')].length === 4, '');
 
   // re-query the entry row — the toggles re-rendered the listing and the
   // old reference is detached (its click would not reach the delegated
@@ -138,6 +168,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   freshRow.click();
   await sleep(80);
   t('editor: preview renders the code block', !!$('#fsList pre.fe-fileview'), '');
+  t('md: no toggle on non-markdown files', !$('#fsList [data-hook=fe-md-toggle]'), '');
+
+  // --- line-number gutter ----------------------------------------------------
+  const lnRows = () => [...window.document.querySelectorAll('#fsList .fe-line')];
+  const lnNums = () => lnRows().map((r) => (r.querySelector('.fe-ln') || {}).textContent || '');
+  const lnCodes = () => lnRows().map((r) => r.querySelector('.fe-lc'));
+  t('ln: gutter row count matches the file line count', JSON.stringify(lnNums()) === JSON.stringify(['1', '2']), JSON.stringify(lnNums()));
+  t('ln: each row has gutter + code cells', lnRows().every((r) => !!r.querySelector('.fe-ln') && !!r.querySelector('.fe-lc')), '');
+  const ln1 = lnCodes()[0];
+  const ln2 = lnCodes()[1];
+  t('ln: single-line syntax span kept on its row', !!ln1 && /<span class="hljs-cross">hello world/.test(ln1.innerHTML), ln1 ? ln1.innerHTML : 'none');
+  t('ln: cross-line span is re-opened on the next row', !!ln2 && ln2.innerHTML === '<span class="hljs-cross">foo world</span>', ln2 ? ln2.innerHTML : 'none');
+  t('ln: rows reassemble the file content exactly', lnCodes().map((c) => c.textContent).join('\n') === 'hello world\nfoo world', '');
   const editBtn = [...window.document.querySelectorAll('#fsList .fe-btn-back')].find((b) => (b.textContent || '').includes('edit'));
   t('editor: edit button in the file view header', !!editBtn, '');
 
@@ -160,7 +203,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   t('editor: Saved ✓ confirmation shown', !!($('.fe-save-feedback.saved') || false) && /Saved/.test($('.fe-save-feedback').textContent), ($('.fe-save-feedback') || {}).textContent);
   await sleep(900); // 800ms confirmation, then back to preview
   const previewCode = $('#fsList pre.fe-fileview code');
-  t('editor: back to preview showing the SAVED content', !!previewCode && previewCode.textContent === 'hello moon', previewCode ? JSON.stringify(previewCode.textContent) : 'no preview');
+  const codeText = () => [...window.document.querySelectorAll('#fsList pre.fe-fileview .fe-lc')].map((c) => c.textContent).join('\n');
+  t('editor: back to preview showing the SAVED content', !!previewCode && codeText() === 'hello moon', previewCode ? JSON.stringify(codeText()) : 'no preview');
+  t('ln: gutter recalculates for the saved content', [...window.document.querySelectorAll('#fsList .fe-line')].length === 1 && lnNums()[0] === '1', JSON.stringify(lnNums()));
   t('editor: preview mode drops the fe-editing flex class', !$('#fsList').classList.contains('fe-editing'), $('#fsList').className);
 
   // --- too-large refusal -----------------------------------------------------
@@ -218,10 +263,52 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   writeMode = 'ok';
   $('button[data-hook=fe-cancel]').click(); // dirty cancel (confirm again)
   await sleep(30);
-  t('editor: post-failure cancel returns to preview (keep last saved)', !!$('#fsList pre.fe-fileview code') && $('#fsList pre.fe-fileview code').textContent === 'hello moon', '');
+  t('editor: post-failure cancel returns to preview (keep last saved)', !!$('#fsList pre.fe-fileview code') && codeText() === 'hello moon', JSON.stringify(codeText()));
 
   // --- copy button still present in preview ----------------------------------
   t('editor: copy button intact in preview', !!$('#fsList pre.fe-fileview .code-copy'), '');
+
+  // --- markdown preview mode -------------------------------------------------
+  readMode = 'ok';
+  [...window.document.querySelectorAll('#fsList .fe-btn-back')].find((b) => (b.textContent || '').includes('folder')).click();
+  await sleep(80);
+  const mdRow = [...window.document.querySelectorAll('#fsList .fs-entry')].find((r) => (r.textContent || '').includes('readme.md'));
+  t('md: .md file appears in the listing', !!mdRow, '');
+  mdRow.click();
+  await sleep(80);
+  const mdView = () => $('#fsList [data-hook=fe-mdview]');
+  const toggle = () => $('#fsList [data-hook=fe-md-toggle]');
+  t('md: .md files default to the rendered preview', !!mdView() && !$('#fsList pre.fe-fileview'), '');
+  t('md: preview toggle button sits next to edit', !!toggle() && /Raw/.test(toggle().textContent), '');
+  t('md: renders headings', !!(mdView() && mdView().querySelector('h1')) && /Deep Research Title/.test(mdView().querySelector('h1').textContent), '');
+  t('md: renders bold', !!(mdView() && mdView().querySelector('strong')) && /bold/.test(mdView().querySelector('strong').textContent), '');
+  t('md: renders lists', !!(mdView() && mdView().querySelector('ul li')), '');
+  t('md: renders blockquotes', !!(mdView() && mdView().querySelector('blockquote')), '');
+  t('md: renders code blocks', !!(mdView() && mdView().querySelector('pre code')), '');
+  t('md: sanitizer strips <script> from the preview', !(mdView() && mdView().querySelector('script')) && window.evil === undefined, '');
+  t('md: sanitizer strips event handlers from tags', !(mdView() && mdView().querySelector('[onerror]')), '');
+  t('md: copy button present in preview', !!(mdView() && mdView().querySelector('.code-copy')), '');
+  toggle().click();
+  await sleep(30);
+  const rawPre = $('#fsList pre.fe-fileview');
+  const staleMd = mdView();
+  const toggleLabel = toggle() ? toggle().textContent : '(none)';
+  t('md: toggle switches to raw source', !!rawPre && !staleMd && /Preview/.test(toggleLabel), `raw=${!!rawPre} md=${!!staleMd} label=${toggleLabel}`);
+  t('md: raw view shows the original markdown text', codeText() === MD_SAMPLE.replace(/\n$/, ''), JSON.stringify(codeText()).slice(0, 300));
+  t('ln: gutter count matches the markdown raw view', [...window.document.querySelectorAll('#fsList .fe-line')].length === MD_SAMPLE.split('\n').length - 1, `rows=${[...window.document.querySelectorAll('#fsList .fe-line')].length} want=${MD_SAMPLE.split('\n').length - 1}`);
+  toggle().click();
+  await sleep(30);
+  t('md: toggle switches back to rendered preview', !!mdView() && !!mdView().querySelector('h1'), '');
+  [...window.document.querySelectorAll('#fsList .fe-btn-back')].find((b) => (b.textContent || '').includes('edit')).click();
+  await sleep(80);
+  const mdTa = $('textarea[data-hook=fe-editor]');
+  t('md: edit opens the raw source in the textarea', !!mdTa && mdTa.value.includes('# Deep Research Title'), '');
+  mdTa.value = '# Edited Title\n\n**fresh** content';
+  $('button[data-hook=fe-save]').click();
+  await sleep(1000);
+  t('md: after save returns to the rendered preview', !!mdView() && /Edited Title/.test(mdView().textContent), '');
+  t('md: saved content is re-rendered (heading updated)', !!(mdView() && mdView().querySelector('h1')) && /Edited Title/.test(mdView().querySelector('h1').textContent), '');
+  t('md: toggle state resets to preview after editing', !(mdView() && mdView().querySelector('script')) && window.evil === undefined, '');
 
   const fails = results.filter((r) => r.startsWith('FAIL'));
   console.log(results.join('\n'));
