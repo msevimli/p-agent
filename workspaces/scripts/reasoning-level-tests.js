@@ -9,7 +9,7 @@
  */
 'use strict';
 const path = require('path');
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 const { buildChatPayload } = require(path.join(ROOT, 'services', 'llamaClient.js'));
 
 const results = [];

@@ -123,10 +123,12 @@ p-agent/
 │   ├── pagent.log            #   daemon boot/run logs (written by pagent.sh)
 │   └── library/              #   library blobs (uuid files)
 │
-├── skills/                   # workspace skills (user-authored, agent-runnable)
-│   └── <name>/SKILL.md       #   YAML frontmatter + Markdown instructions
+├── workspaces/                   # agent workspace: scripts/ (harnesses + user runtime
+│   │                             #   scripts), skills/ (user-authored, agent-runnable),
+│   │                             #   MEMORY.md (workspace memory), agent outputs
+│   └── skills/<name>/SKILL.md    #   YAML frontmatter + Markdown instructions
 │
-└── scripts/                  # dev utilities / test harnesses
+└── scripts/                      # (removed 2026-10-28 — all content moved to workspaces/scripts/)
 ```
 
 ## 3. High-Level Component Flow

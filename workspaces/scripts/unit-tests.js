@@ -11,9 +11,9 @@
 // watermark math changes). MUST be set before config is required below.
 process.env.TOOL_OUTPUT_MAX_CHARS = process.env.TOOL_OUTPUT_MAX_CHARS || '20000';
 
-const config = require('../config');
-const historyManager = require('../services/historyManager');
-const toolLoop = require('../services/toolLoop');
+const config = require('../../config');
+const historyManager = require('../../services/historyManager');
+const toolLoop = require('../../services/toolLoop');
 
 (async () => {
 let failures = 0;
@@ -319,7 +319,7 @@ console.log('--- 7. prefix hash ------------------------------------------------
 console.log('--- 6. reasoning-trace parsing -----------------------------------');
 {
   const http = require('http');
-  const llamaClient = require('../services/llamaClient');
+  const llamaClient = require('../../services/llamaClient');
 
   const srv = http.createServer((req, res) => {
     if (req.url.includes('/slots')) {

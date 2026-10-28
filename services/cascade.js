@@ -60,7 +60,7 @@ const ROUTER_ADDENDUM =
   'FILES vs SKILLS: a workspace name with a file extension (.txt, .py, .js, .json, .md, .sh) or ' +
   'any path (./, workspace-relative or absolute) is a FILE — never a skill. Deleting, removing, ' +
   'editing or creating files is rule-1 core work (run_shell, write_file and the other file ' +
-  'tools). Skills live only inside the skills/ directory and are managed exclusively by the ' +
+  'tools). Skills live only inside the workspaces/skills/ directory and are managed exclusively by the ' +
   'primary model — a word without a file extension is NOT automatically a skill. When unsure ' +
   'whether something is a skill or a file, treat it as a file action (rule 1).\n' +
   'You NEVER confirm actions: after you emit a tool call, the primary model takes over and you ' +

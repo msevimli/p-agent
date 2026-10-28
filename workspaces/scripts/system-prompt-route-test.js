@@ -14,7 +14,7 @@ const path = require('path');
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sysprompt-r-'));
 process.env.SYSTEM_PROMPT_FILE = path.join(tmpDir, 'override.txt');
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join(__dirname, '..', '..');
 const results = [];
 const t = (name, cond, detail) => results.push(`${cond ? 'PASS' : 'FAIL'} ${name}${detail ? ' | ' + detail : ''}`);
 

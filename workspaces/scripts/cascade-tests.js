@@ -10,7 +10,7 @@
  */
 const assert = require('assert');
 const path = require('path');
-const cascade = require('../services/cascade');
+const cascade = require('../../services/cascade');
 
 let passed = 0;
 let failed = 0;
@@ -183,7 +183,7 @@ t('router tool set contains ONLY core tools (no skills/automations)', () => {
   assert.deepStrictEqual(forbidden, [], 'no skills/automations/library tools may reach the router');
 });
 t('live registry: selection outside the pair bypasses the cascade', () => {
-  const live = require('../data/models-state.json');
+  const live = require('../../data/models-state.json');
   const r = cascade.resolveFrom(live, { enabled: true });
   // The user currently has Gemma4-4B selected (activeId) — the cascade must
   // be OFF and the primary target must be the SELECTED model, not the
@@ -193,7 +193,7 @@ t('live registry: selection outside the pair bypasses the cascade', () => {
   assert.strictEqual(r.primary.id, live.activeId, 'the selected model must be the stage-2 target');
 });
 t('live registry: activating the configured primary re-enables the cascade', () => {
-  const live = JSON.parse(JSON.stringify(require('../data/models-state.json')));
+  const live = JSON.parse(JSON.stringify(require('../../data/models-state.json')));
   const primary = live.models.find((m) => m && m.role === 'primary');
   assert.ok(primary, 'a primary role must exist');
   live.activeId = primary.id;

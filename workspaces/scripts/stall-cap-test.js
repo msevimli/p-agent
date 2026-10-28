@@ -17,7 +17,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join(__dirname, '..', '..');
 const config = require(path.join(ROOT, 'config'));
 const { complete, buildChatPayload } = require(path.join(ROOT, 'services', 'llamaClient'));
 

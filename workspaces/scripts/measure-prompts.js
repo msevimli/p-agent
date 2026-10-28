@@ -11,8 +11,8 @@
  */
 const fs = require('fs');
 const crypto = require('crypto');
-const toolLoop = require('../services/toolLoop');
-const config = require('../config');
+const toolLoop = require('../../services/toolLoop');
+const config = require('../../config');
 
 const outPath = process.argv[2] || '/tmp/new-prompt.json';
 

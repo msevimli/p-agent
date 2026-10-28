@@ -9,7 +9,7 @@
  */
 'use strict';
 
-const { parseJsonRepaired } = require('../services/jsonRepair');
+const { parseJsonRepaired } = require('../../services/jsonRepair');
 
 const results = [];
 let n = 0;
@@ -189,13 +189,13 @@ function ok(name, got, want) {
 // ----------------------------------------------------------------------
 {
   // toolLoop.safeParseArgs + extractToolCalls through the real module.
-  const tl = require('../services/toolLoop');
+  const tl = require('../../services/toolLoop');
   const args = tl.safeParseArgs('{"cmd": "node -e "console.log(1)""}');
   t('safeParseArgs repairs the node -e case', args.cmd === 'node -e "console.log(1)"', JSON.stringify(args));
   const calls = tl.extractToolCalls('```json\n{"tool":"run_shell","args":{"command":"df -h",}}\n```');
   t('extractToolCalls repairs fenced trailing comma', calls.length === 1 && calls[0].args.command === 'df -h', JSON.stringify(calls));
   // toolCallParser fallback path.
-  const tcp = require('../services/toolCallParser');
+  const tcp = require('../../services/toolCallParser');
   const fb = tcp.parseFallbackToolCall(
     '<tools>{"name":"run_shell","arguments":"{\\"command\\": \\"node -e \\\\\\"console.log(1)\\\\\\"\\"}"}</tools>',
     ['run_shell']

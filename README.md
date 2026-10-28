@@ -120,7 +120,7 @@ re-rendered on the next Load when the template changed; hand-crafted units
   50% — oldest tool results stubbed, then oldest complete turns dropped,
   always keeping the last 3 user turns. The cut is sticky, so between
   events every request reproduces the byte-identical compacted prefix and
-  only the new messages re-evaluate; `scripts/compaction-stability-sim.js`
+  only the new messages re-evaluate; `workspaces/scripts/compaction-stability-sim.js`
   proves this (prompt tokens, common prefix, re-evaluated tokens per turn,
   ±10% calibration-invariance). Compaction events and estimated re-prefill
   time (tokens after the first changed position ÷ measured prompt speed)
@@ -146,7 +146,7 @@ re-rendered on the next Load when the template changed; hand-crafted units
   logs one line with real exit code, duration and the first 200 chars of
   command / stdout / stderr, JSON-escaped
   (`[tool] name=run_shell exit=0 dur=1.2s cmd="…" out="…" err="…"`). Tests:
-  `scripts/tool-call-fallback-tests.js` (mocked, no server).
+  `workspaces/scripts/tool-call-fallback-tests.js` (mocked, no server).
 - **Eject** (`POST /api/models/:id/eject` or the header dropdown) is
   capability-tiered: native weight unload via llama.cpp's model-router API
   (`POST /models/unload`) when the build supports it → an active-model busy
@@ -512,7 +512,7 @@ p-agent/
 ├── tools/                 # 18 agent tools (uniform {name,desc,parameters,execute})
 ├── public/                # vanilla-JS dashboard (no build step)
 ├── data/                  # gitignored runtime state (JSON files + library blobs)
-└── skills/                # user-authored skills (SKILL.md)
+└── skills/                # user-authored skills (SKILL.md) — physically at workspaces/skills/
 ```
 
 ## API (main endpoints)
@@ -560,7 +560,9 @@ Agent file tools (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_f
 - `..` / `../x` → the **project root** (e.g. `../routes/fs.js`) — one level up from the workspace
 - `../../x` or absolute paths → rejected (the hard sandbox is still `workRoot` via `resolveWithin`; zoning only picks where inside the project a bare path lands)
 - `list_files` with no path lists the workspace; `list_files ..` lists the project root; `run_shell` starts in the workspace (`cd ..` reaches the root)
-Automation scripts keep the project root as cwd (user scripts reference e.g. `scripts/date_time_script.py`); agent-written scripts referenced by automations use `workspaces/...` paths. The File Explorer browses the whole project root (breadcrumb `Root` / `Root > workspace`) with Root/Workspace quick-toggle buttons.
+Automation scripts keep the project root as cwd (user scripts reference e.g. `workspaces/scripts/date_time_script.py`); agent-written scripts referenced by automations use `workspaces/...` paths. The File Explorer browses the whole project root (breadcrumb `Root` / `Root > workspace`) with Root/Workspace quick-toggle buttons.
+
+Since 2026-10-28 the workspace is the **physical home** of the former root `scripts/` (repo test harnesses + user runtime scripts, `git mv`-tracked) and `skills/` (agent-managed skills + the trading-dashboard app — run `node dashboard-server.js` from `workspaces/skills/trading-dashboard/`). Test suites are invoked as `node workspaces/scripts/<suite>.js`; the one-off migration script is `workspaces/scripts/migrate-workspace.js`. The skills store root is `config.skillsRoot` (`workspaces/skills/`).
 
 ## Semantic memory (two tiers)
 

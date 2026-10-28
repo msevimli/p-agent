@@ -24,10 +24,10 @@ const path = require('path');
 // Mocks — MUST be installed before routes/chat.js is required (the route
 // destructures complete() at module load).
 // ---------------------------------------------------------------------------
-const llamaClient = require('../services/llamaClient');
-const toolLoop = require('../services/toolLoop');
-const historyManager = require('../services/historyManager');
-const toolCallParser = require('../services/toolCallParser');
+const llamaClient = require('../../services/llamaClient');
+const toolLoop = require('../../services/toolLoop');
+const historyManager = require('../../services/historyManager');
+const toolCallParser = require('../../services/toolCallParser');
 
 let executed = [];        // executeTool records { name, args }
 let queue = [];           // scripted acc objects handed to complete()
@@ -46,7 +46,7 @@ console.log = (...a) => { logLines.push(a.join(' ')); };
 // (T6/T7). The original file is restored in the runner's finally below; a
 // live server re-reads it after that and the cascade re-enables. If stripping
 // fails (missing/invalid file) the harness still runs.
-const MODELS_STATE_FILE = path.join(__dirname, '..', 'data', 'models-state.json');
+const MODELS_STATE_FILE = path.join(__dirname, '..', '..', 'data', 'models-state.json');
 const modelsStateBackup = fs.readFileSync(MODELS_STATE_FILE, 'utf8');
 try {
   const ms = JSON.parse(modelsStateBackup);
@@ -77,7 +77,7 @@ toolLoop.executeTool = defaultExecute;
 // leaves this process.
 historyManager.contextTokens = async () => 16384;
 
-const routes = require('../routes/chat');
+const routes = require('../../routes/chat');
 
 // ---------------------------------------------------------------------------
 // SSE response double
@@ -442,7 +442,7 @@ test('T22 extractor: bare flattened OpenAI {"function":...} object fires only wi
 });
 
 test('T23 delete_skill is registered, schema-gated, and executes through the loop', async () => {
-  const tools = require('../tools');
+  const tools = require('../../tools');
   const t = tools.find((x) => x.name === 'delete_skill');
   assert.ok(t, 'delete_skill must be in the registry');
   assert.ok(t.parameters && t.parameters.required && t.parameters.required.includes('name'), 'name argument required');

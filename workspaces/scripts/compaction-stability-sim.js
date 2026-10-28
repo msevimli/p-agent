@@ -29,9 +29,9 @@
  *
  * Usage: node scripts/compaction-stability-sim.js [--legacy] [--summary]
  */
-const config = require('../config');
-const historyManager = require('../services/historyManager');
-const toolLoop = require('../services/toolLoop');
+const config = require('../../config');
+const historyManager = require('../../services/historyManager');
+const toolLoop = require('../../services/toolLoop');
 
 process.env.TOOL_OUTPUT_MAX_CHARS = process.env.TOOL_OUTPUT_MAX_CHARS || '4000';
 

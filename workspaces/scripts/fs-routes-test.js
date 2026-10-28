@@ -19,7 +19,7 @@ process.env.FS_WRITE_MAX_CHARS = '1024';
 process.env.FS_READ_FULL_MAX_CHARS = '512';
 process.env.READ_FILE_MAX_CHARS = '50'; // shrink the preview cap to test ?full=1
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 const express = require(path.join(ROOT, 'node_modules', 'express'));
 const routes = require(path.join(ROOT, 'routes', 'fs.js'));
 

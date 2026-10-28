@@ -24,7 +24,7 @@ process.env.VECTOR_MEMORY_DB = DB;
 process.env.VECTOR_MEMORY_EMBEDDER = 'hash';
 process.env.MEMORY_FILE_MAX_CHARS = '2000'; // cheap cap boundaries
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 const express = require(path.join(ROOT, 'node_modules', 'express'));
 
 const results = [];

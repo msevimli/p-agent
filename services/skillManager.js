@@ -25,7 +25,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const config = require('../config');
 
-const SKILLS_ROOT = path.resolve(config.workRoot, 'skills');
+const SKILLS_ROOT = path.resolve(config.skillsRoot || path.join(config.workRoot, 'skills'));
 const STATE_FILE = path.join(config.dataDir, 'skills-state.json');
 const META_FILE = 'SKILL.md';
 const LEGACY_FILE = 'skill.json';

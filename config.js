@@ -240,4 +240,9 @@ module.exports = {
   // relative). The hard sandbox stays workRoot — zoning only picks where
   // inside the project a bare path lands.
   workspaceDir: path.resolve(process.env.WORKSPACE_DIR || path.join(path.resolve(process.env.PLIFE_WORK_ROOT || ROOT_DIR), 'workspaces')),
+  // Skills store: agent-managed skills live inside the agent workspace.
+  skillsRoot: path.join(
+    path.resolve(process.env.WORKSPACE_DIR || path.join(path.resolve(process.env.PLIFE_WORK_ROOT || ROOT_DIR), 'workspaces')),
+    'skills'
+  ),
 };

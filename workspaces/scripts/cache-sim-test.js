@@ -18,10 +18,10 @@
  *
  * Usage: node scripts/cache-sim-test.js
  */
-const config = require('../config');
-const modelManager = require('../services/modelManager');
-const toolLoop = require('../services/toolLoop');
-const llamaClient = require('../services/llamaClient');
+const config = require('../../config');
+const modelManager = require('../../services/modelManager');
+const toolLoop = require('../../services/toolLoop');
+const llamaClient = require('../../services/llamaClient');
 
 // Measured with the real Qwen2.5 tokenizer (see tokenize-prompt.py): prompt
 // token counts of the CURRENT system prompt + FULL 16-tool array (raw text).

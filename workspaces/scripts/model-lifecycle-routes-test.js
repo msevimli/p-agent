@@ -9,7 +9,7 @@
  * and reject unknown ids. Mounts the REAL router on an ephemeral port.
  */
 const path = require('path');
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 const express = require(path.join(ROOT, 'node_modules', 'express'));
 
 const called = [];

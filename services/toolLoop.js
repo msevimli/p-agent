@@ -654,7 +654,7 @@ function buildSystemPrompt(base) {
         'durable user preferences/coding-style facts with manage_global_memory when they surface ' +
         'during a task, delete only what the user explicitly wants forgotten, and never claim you ' +
         '"remember" something that is not in these blocks — absent blocks mean empty memory.\n' +
-    'Skills: skills are plain user-managed folders in the workspace skills/ directory — they are ' +
+    'Skills: skills are plain user-managed folders in the workspace workspaces/skills/ directory — they are ' +
     'NOT built-in tools or core functionality. List them with list_skills, create or update them ' +
     'with write_skill, run them with run_skill, and permanently DELETE any user skill with ' +
     'delete_skill when the user asks. A delete request never needs an exemption — just call the ' +

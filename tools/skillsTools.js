@@ -4,7 +4,7 @@
  * Wrapping them as plain tools means the existing agentic loop and system prompt
  * automatically advertise them and can call them — no special-casing in
  * routes/chat.js. This is how the model becomes skill-aware: it can discover,
- * execute, and author skills in the workspace skills/ directory.
+ * execute, and author skills in the workspace workspaces/skills/ directory.
  */
 const skillManager = require('../services/skillManager');
 
@@ -30,7 +30,7 @@ const listSkillsTool = {
 const runSkillTool = {
   name: 'run_skill',
   description:
-    'Run an installed skill by name with optional string args (Node.js script in workspace skills/). Returns stdout/stderr and exit code.',
+    'Run an installed skill by name with optional string args (Node.js script in workspace workspaces/skills/). Returns stdout/stderr and exit code.',
   parameters: {
     type: 'object',
     properties: {
@@ -75,7 +75,7 @@ const writeSkillTool = {
 const deleteSkillTool = {
   name: 'delete_skill',
   description:
-    'Permanently delete an installed user skill by name (removes its folder from the workspace skills/ directory). ' +
+    'Permanently delete an installed user skill by name (removes its folder from the workspace workspaces/skills/ directory). ' +
     'User skills are not built-in tools and may be deleted on request; fails cleanly for invalid or missing skills.',
   parameters: {
     type: 'object',

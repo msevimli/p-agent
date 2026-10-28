@@ -26,7 +26,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join(__dirname, '..', '..');
 const TPL_FILE = path.join(ROOT, 'data', 'templates-state.json');
 const MOD_FILE = path.join(ROOT, 'data', 'models-state.json');
 const tplBackup = (() => { try { return fs.readFileSync(TPL_FILE, 'utf8'); } catch { return null; } })();
@@ -36,9 +36,9 @@ const results = [];
 const t = (name, cond, detail) =>
   results.push(`${cond ? 'PASS' : 'FAIL'} ${name}${detail ? ' | ' + detail : ''}`);
 
-const templateStore = require('../services/templateStore');
-const modelLifecycle = require('../services/modelLifecycle');
-const modelManager = require('../services/modelManager');
+const templateStore = require('../../services/templateStore');
+const modelLifecycle = require('../../services/modelLifecycle');
+const modelManager = require('../../services/modelManager');
 
 try {
   // ---------------------------------------------------------------- 1. seed

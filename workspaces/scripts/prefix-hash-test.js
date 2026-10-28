@@ -16,9 +16,9 @@
  *
  * Usage: node scripts/prefix-hash-test.js
  */
-const config = require('../config');
-const toolLoop = require('../services/toolLoop');
-const historyManager = require('../services/historyManager');
+const config = require('../../config');
+const toolLoop = require('../../services/toolLoop');
+const historyManager = require('../../services/historyManager');
 
 let failures = 0;
 const check = (name, ok, extra) => {

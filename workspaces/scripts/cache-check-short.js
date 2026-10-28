@@ -13,11 +13,11 @@
  *   env: SIM_PROMPT_TOK_S / SIM_GEN_TOK_S used only for the simulated
  *        fallback when the server is unreachable.
  */
-const config = require('../config');
-const historyManager = require('../services/historyManager');
-const toolLoop = require('../services/toolLoop');
-const llamaClient = require('../services/llamaClient');
-const modelManager = require('../services/modelManager');
+const config = require('../../config');
+const historyManager = require('../../services/historyManager');
+const toolLoop = require('../../services/toolLoop');
+const llamaClient = require('../../services/llamaClient');
+const modelManager = require('../../services/modelManager');
 
 const SIM_PP = Number(process.env.SIM_PROMPT_TOK_S || 10);
 const SIM_GEN = Number(process.env.SIM_GEN_TOK_S || 2.5);

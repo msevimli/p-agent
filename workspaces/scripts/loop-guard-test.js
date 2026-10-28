@@ -42,7 +42,7 @@ process.env.SYSTEM_PROMPT_FILE = path.join(os.tmpdir(), 'plife-sysprompt-' + pro
 process.env.VECTOR_MEMORY_DB = path.join(os.tmpdir(), 'plife-vecmem-' + process.pid + '.db');
 process.env.VECTOR_MEMORY_EMBEDDER = 'hash';
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join(__dirname, '..', '..');
 const results = [];
 const t = (name, cond, detail) =>
   results.push(`${cond ? 'PASS' : 'FAIL'} ${name}${detail ? ' | ' + detail : ''}`);

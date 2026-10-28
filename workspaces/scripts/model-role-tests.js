@@ -22,7 +22,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join(__dirname, '..', '..');
 const STATE_FILE = path.join(ROOT, 'data', 'models-state.json');
 const backup = fs.readFileSync(STATE_FILE, 'utf8');
 
@@ -30,8 +30,8 @@ const results = [];
 const t = (name, cond, detail) =>
   results.push(`${cond ? 'PASS' : 'FAIL'} ${name}${detail ? ' | ' + detail : ''}`);
 
-const modelManager = require('../services/modelManager');
-const cascade = require('../services/cascade');
+const modelManager = require('../../services/modelManager');
+const cascade = require('../../services/cascade');
 
 const readRoles = () => {
   const st = modelManager.getState();
