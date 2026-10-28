@@ -299,8 +299,17 @@ function validate(body) {
 /** Resolve a workspace-relative script path, refusing traversal/absolute escapes. */
 function resolveScript(rel) {
   const root = path.resolve(config.workRoot);
-  const abs = path.resolve(root, rel);
+  let abs = path.resolve(root, rel);
   if (abs !== root && !abs.startsWith(root + path.sep)) return null;
+  // Legacy migration shim (2026-10-28): automations created before the
+  // workspace migration referenced the root-level scripts/ and skills/
+  // directories, which now live under workspaces/. Resolve those refs to
+  // their new home only when the old location no longer exists — a dev
+  // checkout with a real root scripts/ keeps its old behavior.
+  if (!fs.existsSync(abs) && /^(scripts|skills)\//.test(rel)) {
+    const legacy = path.resolve(root, 'workspaces', rel);
+    if (legacy !== root && legacy.startsWith(root + path.sep) && fs.existsSync(legacy)) abs = legacy;
+  }
   return abs;
 }
 
