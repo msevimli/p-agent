@@ -435,7 +435,7 @@ short refusal and never trigger the agent.
   tool schema, `write_file`'s schema and the system guidance (template +
   active override) tell the model to keep commands short and single-line,
   and to write multi-line or quote-heavy logic to a script file
-  (write_file → `node scripts/x.js` / `bash scripts/x.sh`) instead of
+  (write_file → `workspaces/scripts/x.js`, then `node scripts/x.js` from the workspace shell / `bash scripts/x.sh`) instead of
   fragile nested-quote inline `node -e`/`python3 -c` one-liners whose JSON
   escapes get corrupted mid-task. This prevents the corruption class at
   the source, the repair module catches what still slips through.
@@ -494,6 +494,7 @@ p-agent/
 │   ├── llamaClient.js     #   upstream client: payload, SSE parse, probes
 │   ├── requestQueue.js    #   strict FIFO + transient retries/backoff
 │   ├── toolLoop.js        #   tool registry dispatch, extractor, args guards
+│   ├── agentPaths.js      #   two-zone path resolver (workspace default, ../ = project root)
 │   ├── chatLoopback.js    #   HTTP loopback into /api/chat (channel bridge)
 │   ├── telegramBot.js     #   Telegram long-polling channel (no deps)
 │   ├── libraryManager.js  #   persistent file library
@@ -512,7 +513,9 @@ p-agent/
 ├── tools/                 # 18 agent tools (uniform {name,desc,parameters,execute})
 ├── public/                # vanilla-JS dashboard (no build step)
 ├── data/                  # gitignored runtime state (JSON files + library blobs)
-└── skills/                # user-authored skills (SKILL.md) — physically at workspaces/skills/
+└── workspaces/            # agent workspace — scripts/ (test harnesses + user
+                           #   runtime scripts), skills/ (user-authored), MEMORY.md,
+                           #   agent outputs (root scripts/ + skills/ moved here 2026-10-28)
 ```
 
 ## API (main endpoints)
@@ -550,6 +553,7 @@ p-agent/
 `LLAMA_MODEL`, `LLAMA_MAX_TOKENS`, `LLAMA_SYSTEM_PROMPT`, `TOOL_CALLING`
 (`false` disables tools), `QUEUE_LIMIT`,
 `QUEUE_RETRIES`, `PLIFE_WORK_ROOT` (sandbox),
+`WORKSPACE_DIR` (agent workspace — defaults to `<PLIFE_WORK_ROOT>/workspaces/`),
 `LIBRARY_MAX_UPLOAD_MB`,
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `PAGENT_BASE_URL` (CLI),
 `PLIFE_DOTENV_FILE` (alternate .env path). See `.env-example` for the full list.
@@ -562,7 +566,7 @@ Agent file tools (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_f
 - `list_files` with no path lists the workspace; `list_files ..` lists the project root; `run_shell` starts in the workspace (`cd ..` reaches the root)
 Automation scripts keep the project root as cwd (user scripts reference e.g. `workspaces/scripts/date_time_script.py`); agent-written scripts referenced by automations use `workspaces/...` paths. The File Explorer browses the whole project root (breadcrumb `Root` / `Root > workspace`) with Root/Workspace quick-toggle buttons.
 
-Since 2026-10-28 the workspace is the **physical home** of the former root `scripts/` (repo test harnesses + user runtime scripts, `git mv`-tracked) and `skills/` (agent-managed skills + the trading-dashboard app — run `node dashboard-server.js` from `workspaces/skills/trading-dashboard/`). Test suites are invoked as `node workspaces/scripts/<suite>.js`; the one-off migration script is `workspaces/scripts/migrate-workspace.js`. The skills store root is `config.skillsRoot` (`workspaces/skills/`).
+Since 2026-10-28 the workspace is the **physical home** of the former root `scripts/` (repo test harnesses + user runtime scripts, `git mv`-tracked) and `skills/` (agent-managed skills + the trading-dashboard app). Test suites are invoked as `node workspaces/scripts/<suite>.js`; the one-off migration script is `workspaces/scripts/migrate-workspace.js`. `config.workspaceDir` (env `WORKSPACE_DIR`) defaults to `<workRoot>/workspaces/` and `config.skillsRoot` points the skills store at `<workspaceDir>/skills`. The trading dashboard runs as a systemd USER unit (`trading-dashboard.service`, workdir `workspaces/skills/trading-dashboard/`, port 3005) — `systemctl --user status|restart trading-dashboard`.
 
 ## Semantic memory (two tiers)
 

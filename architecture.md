@@ -76,6 +76,8 @@ p-agent/
 │   ├── toolLoop.js           # tool registry dispatch, system-prompt builder,
 │   │                         #   JSON tool-call extractor, dedup guards,
 │   │                         #   automation enforcement
+│   ├── agentPaths.js        #   two-zone path resolver: agent tool paths
+│   │                         #   default to workspaces/, "../" = project root
 │   ├── chatLoopback.js       # HTTP loopback into /api/chat (channel bridge)
 │   ├── telegramBot.js        # Telegram channel: long-poll, auth, replies
 │   ├── libraryManager.js     # persistent file library (index + blobs)
@@ -130,6 +132,20 @@ p-agent/
 │
 └── scripts/                      # (removed 2026-10-28 — all content moved to workspaces/scripts/)
 ```
+
+### 2.1 Agent workspace + two-zone path resolution
+
+Since 2026-10-28 the former root `scripts/` and `skills/` directories live inside `workspaces/` (test harnesses + user runtime scripts, agent-managed skills, `MEMORY.md`, agent outputs). `config.workspaceDir` (env `WORKSPACE_DIR`) defaults to `<workRoot>/workspaces/`; `config.skillsRoot` points the skills store at `<workspaceDir>/skills` (skillManager binds at require).
+
+`services/agentPaths.js` implements the zone rule applied to AGENT tool paths (chat loop + executeTool; the File Explorer/fs routes bypass it and browse the project root directly):
+
+- BARE relative paths (`scripts/foo.py`) → `workspaces/scripts/foo.py` — the workspace is the agent's default working directory
+- `..` / `../x` → the **project root** (one level up from the workspace: `..` maps to `.`, `../routes/fs.js` maps to `routes/fs.js`)
+- `../../x` and absolute paths → rejected; `workspaces/x` passes through; placeholder-shaped paths bypass zoning so the validation gates see the raw value
+- `list_files` with no path lists the workspace; `run_shell`'s cwd IS the workspace (`cd ..` reaches the root). Automation scripts keep cwd = project root (agent-written scripts referenced by automations use `workspaces/scripts/…`); automation logs land in the root `logs/`.
+- The hard sandbox is still `workRoot` (`resolveWithin`) — zoning only picks WHERE inside the project a bare path lands; nothing can escape.
+
+The trading dashboard runs as a systemd USER unit (`trading-dashboard.service`, workdir `workspaces/skills/trading-dashboard/`, port 3005) like the llama servers.
 
 ## 3. High-Level Component Flow
 
