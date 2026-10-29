@@ -509,10 +509,12 @@ router.post('/', async (req, res) => {
   }
 
   const toolsEnabled = config.toolCallingEnabled && toolLoop.listTools().length > 0;
-  // A persisted system-prompt override (System view) replaces the generated
-  // template byte-for-byte, on both the tool path and the tool-less path.
+  // A persisted system-prompt override (System view) replaces the built-in
+  // default byte-for-byte, on both the tool path and the tool-less path.
+  // The built-in default is the committed services/system-prompt.default.txt
+  // (the current prompt was promoted to the default on 2026-10-29).
   const generatedPrompt = toolsEnabled
-    ? toolLoop.buildSystemPrompt(config.llamaSystemPrompt)
+    ? systemPromptSvc.getDefault()
     : `${config.llamaSystemPrompt}\n\n${toolLoop.AUTOMATIONS_GUIDANCE}`;
   const systemPromptText = systemPromptSvc.getOverride() || generatedPrompt;
   const systemPrompt = systemPromptText;

@@ -24,8 +24,10 @@ function activePrompt() {
   const override = systemPrompt.getOverride();
   if (override) return { prompt: override, source: 'override', overridden: true };
   const toolsEnabled = config.toolCallingEnabled && toolLoop.listTools().length > 0;
+  // No override: serve the BUILT-IN default (services/system-prompt.default.txt — the
+  // current prompt was promoted to the default), not the legacy generated template.
   const built = toolsEnabled
-    ? toolLoop.buildSystemPrompt(config.llamaSystemPrompt)
+    ? systemPrompt.getDefault()
     : `${config.llamaSystemPrompt}\n\n${toolLoop.AUTOMATIONS_GUIDANCE}`;
   return { prompt: built, source: 'template', overridden: false };
 }

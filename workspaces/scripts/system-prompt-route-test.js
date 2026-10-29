@@ -37,7 +37,8 @@ const router = require(path.join(ROOT, 'routes', 'systemPrompt'));
   let res = await fetch(base);
   let d = await res.json();
   t('GET: template when no override', res.status === 200 && d.ok && d.overridden === false && d.source === 'template', `source=${d.source}`);
-  t('GET: full template includes the tool payloads section', /FILE TOOL PAYLOADS/.test(String(d.prompt || '')), `len=${String(d.prompt).length}`);
+  t('GET: default template is the built-in default prompt', d.prompt === systemPrompt.getDefault(), `len=${String(d.prompt).length}`);
+  t('GET: built-in default is the plife persona prompt', /^You are plife/.test(String(d.prompt || '')), '');
   const templatePrompt = d.prompt;
 
   // 2. POST a custom prompt -> overridden, applies byte-for-byte

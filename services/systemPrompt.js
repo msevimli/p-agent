@@ -20,7 +20,19 @@ const path = require('path');
 const config = require('../config');
 
 const FILE = process.env.SYSTEM_PROMPT_FILE || path.join(config.dataDir, 'system-prompt.txt');
+const DEFAULT_FILE = process.env.SYSTEM_PROMPT_DEFAULT_FILE || path.join(__dirname, 'system-prompt.default.txt');
 const MAX_LEN = 64 * 1024; // 64 KiB — express.json limit is 2 MB, this is the app cap
+
+/** Built-in default prompt (the committed system-prompt.default.txt — the
+ *  prompt that ships with the app; an override replaces it wholesale). */
+function getDefault() {
+  try {
+    const s = fs.readFileSync(DEFAULT_FILE, 'utf8').trim();
+    return s ? s : null;
+  } catch {
+    return null; // missing/unreadable file === no built-in default
+  }
+}
 
 /** Persisted override, or null when not set. Whitespace-only counts as unset. */
 function getOverride() {
@@ -56,4 +68,4 @@ function resetOverride() {
   return { ok: true };
 }
 
-module.exports = { getOverride, setOverride, resetOverride, FILE, MAX_LEN };
+module.exports = { getOverride, setOverride, resetOverride, getDefault, FILE, DEFAULT_FILE, MAX_LEN };
