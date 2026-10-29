@@ -17,7 +17,7 @@ const OUTSIDE = path.join(path.dirname(WORK), path.basename(WORK) + '-outside');
 process.env.PLIFE_WORK_ROOT = WORK;
 process.env.FS_WRITE_MAX_CHARS = '1024';
 process.env.FS_READ_FULL_MAX_CHARS = '512';
-process.env.READ_FILE_MAX_CHARS = '50'; // shrink the preview cap to test ?full=1
+process.env.READ_FILE_MAX_CHARS = '50'; // agentic tool cap — the fs route must NOT use it anymore
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const express = require(path.join(ROOT, 'node_modules', 'express'));
@@ -70,7 +70,7 @@ const t = (name, pass, info) => {
     t('read: missing path param -> 400', res.status === 400 && data.ok === false, `${res.status}`);
     res = await fetch(`${base}/read?path=${encodeURIComponent('big.txt')}`);
     data = await res.json();
-    t('read: preview truncates at the read_file cap', res.status === 200 && data.ok === true && data.truncated === true && data.content.startsWith('x') && data.content.length > 50 && data.content.length < 200, `len=${data.content && data.content.length}`);
+    t('read: preview returns the WHOLE file (no preview truncation)', res.status === 200 && data.ok === true && data.content === 'x'.repeat(300), `len=${data.content && data.content.length}`);
 
     // ---- read ?full=1 (editor) ----
     res = await fetch(`${base}/read?path=${encodeURIComponent('big.txt')}&full=1`);

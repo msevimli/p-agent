@@ -78,7 +78,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const isMd = u.includes('readme.md');
       const contentSrc = isMd ? mdSavedContent : savedContent;
       if (full && readMode === 'toobig') {
-        return json({ ok: false, error: 'file is 5000000 bytes — too large to open in the browser editor (limit 1048576 bytes)' }, 413);
+        return json({ ok: false, error: 'file is 40000000 bytes — too large to open in the browser editor (limit 33554432 bytes)' }, 413);
       }
       if (full) return json({ ok: true, path: isMd ? 'readme.md' : 'hello.txt', bytes: Buffer.byteLength(contentSrc), full: true, content: contentSrc });
       return json({ ok: true, path: isMd ? 'readme.md' : 'hello.txt', bytes: Buffer.byteLength(contentSrc), content: contentSrc });

@@ -18,7 +18,7 @@ const embedder = require('./services/embedder');
 const app = express();
 
 // --- middleware -----------------------------------------------------------------
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '64mb' }));
 app.use(express.static(config.publicDir));
 
 // --- API routes -------------------------------------------------------------------

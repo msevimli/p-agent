@@ -8,8 +8,8 @@
  *
  * Endpoints:
  *   GET  /api/fs/list               ->  { ok, path, count, entries, root }
- *   GET  /api/fs/read?path=<rel>    ->  { ok, path, bytes, content } (capped preview)
- *   GET  /api/fs/read?path=<rel>&full=1 -> uncapped content for the editor
+ *   GET  /api/fs/read?path=<rel>    ->  { ok, path, bytes, content } (WHOLE file)
+ *   GET  /api/fs/read?path=<rel>&full=1 -> same whole-file read (compat no-op)
  *   POST /api/fs/write              ->  { path, content } -> { ok, path, bytes, saved }
  *   POST /api/fs/patch              ->  { path, old_text, new_text, replace_all? }
  */
@@ -21,7 +21,6 @@ const { tools, ROOT, resolveWithin } = require('../tools/fileTools');
 
 const byName = (n) => tools.find((t) => t.name === n);
 const listFilesTool = byName('list_files');
-const readFileTool = byName('read_file');
 const writeFileTool = byName('write_file');
 const editFileTool = byName('edit_file');
 
@@ -37,35 +36,32 @@ router.get('/list', (req, res) => {
 });
 
 // GET /api/fs/read?path=<rel-file>[&full=1]  ->  { ok, path, bytes, content }
+// Since 2026-10-29 the plain view and the editor BOTH return the whole file
+// (no preview truncation marker — the agentic read_file cap + offset/limit
+// still protect the chat context, but the dashboard reads directly from
+// disk). The only bound is config.fsReadFullMaxChars so absurdly large
+// files refuse loudly (413) instead of choking the tab. `full=1` is kept as
+// a compatibility no-op for the editor's existing fetch.
 router.get('/read', (req, res) => {
   if (typeof req.query.path !== 'string' || req.query.path === '') {
     return res.status(400).json({ ok: false, error: 'path query param is required' });
   }
-  // full=1 bypasses the read_file truncation cap so the browser editor gets
-  // the WHOLE file (a truncated preview must never be saved back). Still
-  // bounded by config.fsReadFullMaxChars so huge files refuse loudly instead
-  // of choking the tab.
-  if (req.query.full === '1') {
-    const abs = resolveWithin(req.query.path);
-    if (!abs) return res.status(400).json({ ok: false, error: 'path escapes the allowed workspace' });
-    let raw;
-    try {
-      raw = fs.readFileSync(abs, 'utf8');
-    } catch (e) {
-      return res.status(400).json({ ok: false, error: e && e.message ? e.message : String(e) });
-    }
-    const bytes = Buffer.byteLength(raw);
-    if (bytes > config.fsReadFullMaxChars) {
-      return res.status(413).json({
-        ok: false,
-        error: `file is ${bytes} bytes — too large to open in the browser editor (limit ${config.fsReadFullMaxChars} bytes)`,
-      });
-    }
-    return res.json({ ok: true, path: req.query.path, bytes, full: true, content: raw });
+  const abs = resolveWithin(req.query.path);
+  if (!abs) return res.status(400).json({ ok: false, error: 'path escapes the allowed workspace' });
+  let raw;
+  try {
+    raw = fs.readFileSync(abs, 'utf8');
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: e && e.message ? e.message : String(e) });
   }
-  const result = readFileTool.execute({ path: req.query.path });
-  if (!result.ok) return res.status(400).json(result);
-  res.json(result);
+  const bytes = Buffer.byteLength(raw);
+  if (bytes > config.fsReadFullMaxChars) {
+    return res.status(413).json({
+      ok: false,
+      error: `file is ${bytes} bytes — too large to open in the browser editor (limit ${config.fsReadFullMaxChars} bytes)`,
+    });
+  }
+  return res.json({ ok: true, path: req.query.path, bytes, full: true, content: raw });
 });
 
 // POST /api/fs/write  { path, content }  ->  { ok, path, bytes, saved }

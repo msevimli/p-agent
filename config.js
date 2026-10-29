@@ -117,11 +117,15 @@ module.exports = {
   listFilesMaxEntries: Number(process.env.LIST_FILES_MAX_ENTRIES || 200),
   // File explorer (dashboard) write cap: the editor refuses to save larger
   // payloads than this (bytes). The agentic write_file tool is unaffected.
-  fsWriteMaxChars: Number(process.env.FS_WRITE_MAX_CHARS || 2097152),
-  // File explorer editor full-read cap: ?full=1 refuses files larger than
-  // this (bytes) so the browser editor can never silently truncate a big
-  // file (the preview read_file cap still applies to the plain view).
-  fsReadFullMaxChars: Number(process.env.FS_READ_FULL_MAX_CHARS || 1048576),
+  // 32 MiB — matches the read caps so anything viewable is editable, and
+  // server.js's express.json({limit:'64mb'}) stays well above the worst-case
+  // JSON escaping of a payload this size.
+  fsWriteMaxChars: Number(process.env.FS_WRITE_MAX_CHARS || 33554432),
+  // File explorer read cap (bytes): both the plain view and the editor load
+  // the WHOLE file (no preview truncation since 2026-10-29; the agentic
+  // read_file tool keeps its own smaller cap + offset/limit for context
+  // protection). Only files larger than this refuse loudly (413).
+  fsReadFullMaxChars: Number(process.env.FS_READ_FULL_MAX_CHARS || 33554432),
   // How often the slot-liveness supervisor polls GET /slots during stream
   // silence (ms).
   llamaSlotPollMs: Number(process.env.LLAMA_SLOT_POLL_MS || 4000),
