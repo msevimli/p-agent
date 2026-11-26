@@ -35,12 +35,27 @@ const DRAWINGS_PAYLOAD = {
 };
 
 const INDEX = `<!doctype html><html><head><title>QT Stub</title></head><body>
-  <button id="b" onclick="window.__clicked=1">hit</button>
+  <button id="b" onclick="window.__clicked=(window.__clicked||0)+1">hit</button>
+  <input id="inp" autocomplete="off" />
   <img src="/missing.png" />
-  <script>console.log('hello-console');</script>
+  <script>
+    console.log('hello-console');
+    window.__moves = 0; window.__wheel = 0; window.__dbl = 0;
+    window.__enter = 0; window.__esc = 0; window.__shortcut = 0; window.__keyLog = [];
+    document.addEventListener('mousemove', function () { window.__moves++; });
+    document.addEventListener('wheel', function () { window.__wheel++; });
+    document.addEventListener('dblclick', function () { window.__dbl++; });
+    document.getElementById('inp').addEventListener('keydown', function (e) {
+      window.__keyLog.push(e.key + ':' + (e.ctrlKey ? 'C' : '') + (e.shiftKey ? 'S' : '') + (e.altKey ? 'A' : '') + (e.metaKey ? 'M' : ''));
+      if (e.key === 'Enter') window.__enter++;
+      if (e.key === 'Escape') { window.__esc++; this.value = ''; }
+      if (e.key === 'a' && e.ctrlKey) window.__shortcut++;
+    });
+  </script>
 </body></html>`;
 
 const PAGE2 = `<!doctype html><html><head><title>Page Two</title></head><body>
+  <div style="height:4000px"></div>
   <script>
     window.__dragPoints = 0;
     ['pointerdown','pointerup'].forEach(function (ev) {
@@ -104,7 +119,69 @@ const PAGE2 = `<!doctype html><html><head><title>Page Two</title></head><body>
     const dgEv = await bs.evaluate(s, 'window.__dragPoints');
     t('drag: pointer down+up observed on canvas', dg.ok === true && dgEv.ok === true && dgEv.value === 2, JSON.stringify(dgEv));
 
-    // 8. close + cleanup
+    // 8. viewport sync (the pane's size drives the headless viewport)
+    const vp = await bs.viewport(s, { width: 900, height: 600 });
+    t('viewport: applied + returned', vp.ok === true && vp.width === 900 && vp.height === 600, JSON.stringify(vp));
+    const dim = await bs.evaluate(s, '[window.innerWidth, window.innerHeight]');
+    t('viewport: page inner size tracks the resize', JSON.stringify(dim.value) === '[900,600]', JSON.stringify(dim.value));
+    t('viewport: sessionJSON carries viewport', bs.sessionJSON(bs.get(sid)).viewport.width === 900);
+
+    // 9. wheel scroll via live input dispatch
+    const wh = await bs.input(s, { type: 'wheel', deltaY: 600 });
+    await new Promise((r) => setTimeout(r, 200));
+    const sc = await bs.evaluate(s, 'window.scrollY');
+    t('input: wheel scrolls the page', wh.ok === true && sc.ok === true && sc.value > 0, JSON.stringify(sc));
+
+    // 10. input-based drag (down/move/up) — same events a user's pointer makes
+    await bs.input(s, { type: 'down', x: 30, y: 30 });
+    await bs.input(s, { type: 'move', x: 130, y: 100 });
+    await bs.input(s, { type: 'up', x: 130, y: 100 });
+    const dg2 = await bs.evaluate(s, 'window.__dragPoints');
+    t('input: down/move/up counts as a drag', dg2.ok && dg2.value === 4, JSON.stringify(dg2));
+
+    // 11. keyboard + pointer input against a fresh INDEX page
+    await bs.navigate(s, base + '/');
+    const r0 = await bs.evaluate(s, 'document.getElementById("inp").getBoundingClientRect()');
+    const cx = r0.value.x + r0.value.width / 2;
+    const cy = r0.value.y + r0.value.height / 2;
+    await bs.input(s, { type: 'click', x: cx, y: cy });
+    const af = await bs.evaluate(s, '(document.activeElement||{}).id');
+    t('input: coordinate click focuses the input', af.ok === true && af.value === 'inp', JSON.stringify(af));
+
+    await bs.input(s, { type: 'type', text: 'hi' });
+    const val = await bs.evaluate(s, 'document.getElementById("inp").value');
+    t('input: typed text reaches the field', val.ok === true && val.value === 'hi', JSON.stringify(val));
+
+    await bs.input(s, { type: 'keydown', key: 'Enter', modifiers: [] });
+    await bs.input(s, { type: 'keyup', key: 'Enter', modifiers: [] });
+    const ent = await bs.evaluate(s, 'window.__enter');
+    t('input: Enter keydown observed', ent.ok === true && ent.value === 1, JSON.stringify(ent));
+
+    await bs.evaluate(s, '(document.getElementById("inp").value = "abc")');
+    await bs.input(s, { type: 'keydown', key: 'Escape', modifiers: [] });
+    await bs.input(s, { type: 'keyup', key: 'Escape', modifiers: [] });
+    const esc = await bs.evaluate(s, '[window.__esc, document.getElementById("inp").value]');
+    t('input: Escape observed + clears the field', esc.ok && esc.value[0] === 1 && esc.value[1] === '', JSON.stringify(esc.value));
+
+    await bs.input(s, { type: 'keydown', key: 'a', modifiers: ['Control'] });
+    await bs.input(s, { type: 'keyup', key: 'a', modifiers: ['Control'] });
+    const sc2 = await bs.evaluate(s, 'window.__shortcut');
+    t('input: Ctrl+A shortcut observed (modifiers held)', sc2.ok === true && sc2.value === 1, JSON.stringify(sc2));
+    await bs.input(s, { type: 'keyup', key: 'Control', modifiers: [] });
+    await bs.input(s, { type: 'keydown', key: 'a', modifiers: [] });
+    await bs.input(s, { type: 'keyup', key: 'a', modifiers: [] });
+    const kl = await bs.evaluate(s, 'window.__keyLog.slice(-1)');
+    t('input: modifier released after keyup', kl.ok && kl.value[0] === 'a:', JSON.stringify(kl.value));
+
+    await bs.input(s, { type: 'move', x: 50, y: 50 });
+    const mv = await bs.evaluate(s, 'window.__moves');
+    t('input: mouse move reaches the page', mv.ok === true && mv.value > 0, JSON.stringify(mv));
+
+    await bs.input(s, { type: 'click', x: 10, y: 10, clickCount: 2 });
+    const dbl = await bs.evaluate(s, 'window.__dbl');
+    t('input: dblclick (clickCount 2) reaches the page', dbl.ok === true && dbl.value === 1, JSON.stringify(dbl));
+
+    // 12. close + cleanup
     const cl = await bs.closeSession(sid);
     t('close: session removed', cl.ok === true && bs.list().length === 0);
 

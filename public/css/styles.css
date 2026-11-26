@@ -535,11 +535,29 @@ html.dark .fe-file-meta { color: #6b7280; }
   border-bottom: 1px solid rgba(255,255,255,0.06);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.br-body { display: flex; }
-.br-frame {
-  width: 100%; height: 100%; object-fit: contain;
-  background: #0d1117; border-radius: 0.5rem;
+/* The body fills the pane; the frame absolutely fills the body edge to
+   edge (viewport is synced to this size, so no letterboxing and input
+   coordinates map 1:1). */
+.br-body {
+  position: relative; flex: 1 1 auto; min-height: 0;
+  overflow: hidden; background: #0b0f14;
 }
+.br-frame {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%; object-fit: fill;
+  display: block; cursor: crosshair;
+  user-select: none; -webkit-user-select: none;
+  background: #0b0f14;
+}
+.br-hint {
+  position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%);
+  z-index: 2; max-width: 88%; text-align: center;
+  font-size: 0.72rem; color: #9ca3af;
+  background: rgba(13, 17, 23, 0.92); border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 0.5rem; padding: 0.4rem 0.7rem;
+  pointer-events: none;
+}
+.br-hint.hidden { display: none; }
 #browserBtn.active { color: #60a5fa; border-color: rgba(59,130,246,0.45); }
 
 /* File editor (edit mode: textarea + save/cancel bar) */

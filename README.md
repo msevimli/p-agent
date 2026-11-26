@@ -244,9 +244,17 @@ Terminal** at `http://127.0.0.1:3777` (any local URL works; override with
 - **Split view**: the sidebar **Browser** button splits the chat into two
   panes — chat left, live browser right. The pane shows the target URL,
   Go / Reload / Screenshot / Close controls, a status line (page title +
-  error tally) and a **polled screenshot** of the headless page. Opening
-  attaches to an existing session (e.g. one the agent created); closing
-  tears the session down and restores the single-pane chat.
+  error tally) and a **live polled view** of the headless page. The pane is
+  **fully interactive** — click, drag, wheel-scroll and type directly into
+  it (pointer + keyboard events are dispatched into the page over CDP, so
+  chart drawing tools and UI controls work for the user the same way they
+  do for the agent) and the view refreshes immediately after each action.
+  The headless viewport auto-syncs to the pane's size (no letterboxing,
+  coordinates map 1:1). Opening attaches to an existing session (e.g. one
+  the agent created); closing tears the session down and restores the
+  single-pane chat. When the **agent** calls a `browser_*` tool, the split
+  pane **auto-opens**, attaches to that session and syncs the URL — no
+  manual button click needed.
 - **REST API** (`routes/browser.js` → `services/browserService.js`):
   `POST /api/browser/session {url?}` (default `http://127.0.0.1:3777`),
   `GET /api/browser/sessions`, `GET /api/browser/session/:id`,
@@ -600,7 +608,10 @@ p-agent/
 | POST | `/api/browser/session` | Open a headless-Chrome session (default `http://127.0.0.1:3777`) |
 | GET | `/api/browser/sessions` | List open browser sessions |
 | GET | `/api/browser/session/:id` | Session state: URL, title, console/network/error rings |
-| POST | `/api/browser/session/:id/navigate` | Navigate `{url}` (also `reload`, `click`, `drag`, `evaluate`) |
+| POST | `/api/browser/session/:id/navigate` | Navigate `{url}` (also `reload`, `click`, `drag`) |
+| POST | `/api/browser/session/:id/input` | Live input dispatch (CDP): `click`, `down/up/move`, `wheel {deltaX,deltaY}`, `keydown/keyup {key, modifiers}` (Enter/Escape/arrows/shortcuts), `type {text}` |
+| POST | `/api/browser/session/:id/viewport` | Resize the headless viewport `{width, height}` (pane size → 1:1 screenshot) |
+| POST | `/api/browser/session/:id/evaluate` | Run a JS expression in the page |
 | GET | `/api/browser/session/:id/screenshot.png` | Fresh viewport PNG (+ saved under `data/browser-shots/`) |
 | GET | `/api/browser/session/:id/drawings` | Target's `/api/drawings`, normalized |
 | DELETE | `/api/browser/session/:id` | Close a session |
