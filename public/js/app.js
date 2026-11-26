@@ -1551,11 +1551,8 @@
   // the session is created on first open and attached to an existing one
   // when present (agent-created sessions appear here too).
   const QT_DEFAULT_URL = 'http://127.0.0.1:3777';
-  const browserState = { sessionId: null, url: QT_DEFAULT_URL, pollTimer: null, urlDirty: false };
-  const inputState = { dragging: false, lastMove: 0, lastRefresh: 0, lastViewportSync: 0, viewportTail: null };
+  const browserState = { sessionId: null, url: QT_DEFAULT_URL, pollTimer: null };
   const browserPaneEl = () => $('#browserPane');
-  const MOD_KEY = { Control: 'ctrlKey', Shift: 'shiftKey', Alt: 'altKey', Meta: 'metaKey' };
-  const isFormField = (el) => !!el && !!el.closest && !!el.closest('input, textarea, select, button, [contenteditable]');
 
   function setBrowserStatus(text) {
     const el = $('#browserStatus');
@@ -1566,12 +1563,6 @@
     if (img && browserState.sessionId) {
       img.src = `/api/browser/session/${browserState.sessionId}/screenshot.png?ts=${Date.now()}`;
     }
-  }
-  function refreshBrowserShotSoon() {
-    const now = Date.now();
-    if (now - inputState.lastRefresh < 200) return;
-    inputState.lastRefresh = now;
-    refreshBrowserShot();
   }
   function stopBrowserPolling() {
     if (browserState.pollTimer) { clearInterval(browserState.pollTimer); browserState.pollTimer = null; }
@@ -1587,10 +1578,6 @@
         (s.requestFailures || []).filter((r) => /HTTP [45]/.test(r)).length +
         (s.console || []).filter((c) => /error/i.test(c)).length;
       setBrowserStatus(`${s.title || s.url || 'browser'}${errs ? ` · ⚠ ${errs} errors` : ''}`);
-      // live URL sync unless the user is typing in the field
-      if (!browserState.urlDirty && s.url && $('#browserUrl') && $('#browserUrl').value !== s.url) {
-        $('#browserUrl').value = s.url;
-      }
       refreshBrowserShot();
     } catch (err) {
       setBrowserStatus(`⚠ ${err.message}`);
@@ -1601,149 +1588,10 @@
     browserState.pollTimer = setInterval(pollBrowser, 2500);
     pollBrowser();
   }
-
-  // --- live interaction: pointer + keyboard dispatch over CDP -------------
-  // The pane forwards real mouse/keyboard events to the session's page
-  // (services/browserService.input -> page.mouse/page.keyboard), so the
-  // user can click, drag, scroll and type INSIDE the headless view — chart
-  // drawing tools included. Coordinates map the displayed image back to
-  // viewport pixels (1:1 when the viewport is synced to the pane size).
-  function panePoint(e) {
-    const img = $('#browserFrame');
-    const rect = img ? img.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
-    const fw = rect.width > 0 && img.naturalWidth > 0 ? img.naturalWidth / rect.width : 1;
-    const fh = rect.height > 0 && img.naturalHeight > 0 ? img.naturalHeight / rect.height : 1;
-    const bw = (img && img.naturalWidth) || 4096;
-    const bh = (img && img.naturalHeight) || 4096;
-    return {
-      x: Math.max(0, Math.min(bw, (e.clientX - rect.left) * fw)),
-      y: Math.max(0, Math.min(bh, (e.clientY - rect.top) * fh)),
-    };
-  }
-  async function dispatchInput(payload, opts) {
-    const { refresh = true } = opts || {};
-    if (!browserState.sessionId) return;
-    try {
-      const res = await fetch(`/api/browser/session/${browserState.sessionId}/input`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
-      });
-      const d = await res.json();
-      if (!res.ok || !d.ok) throw new Error((d && d.error) || 'input failed');
-      if (refresh) refreshBrowserShotSoon();
-    } catch (err) {
-      setBrowserStatus(`⚠ ${err.message}`);
-    }
-  }
-  function keyMods(e) {
-    return ['Control', 'Shift', 'Alt', 'Meta'].filter((m) => e[MOD_KEY[m]]);
-  }
-  function remoteKeyName(k) {
-    if (k === ' ') return 'Space';
-    if (typeof k === 'string' && (k.length === 1 ||
-        /^(Enter|Tab|Backspace|Delete|Escape|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End|PageUp|PageDown|Insert|CapsLock|Shift|Control|Alt|Meta|Space|F[1-9]|F1[0-2])$/.test(k))) return k;
-    return null;
-  }
-  function setupBrowserInteraction() {
-    const img = $('#browserFrame');
-    const pane = browserPaneEl();
-    if (!img || !pane) return;
-    img.setAttribute('draggable', 'false');
-    img.addEventListener('mousedown', (e) => {
-      if (!browserState.sessionId) return;
-      e.preventDefault();
-      const { x, y } = panePoint(e);
-      pane.focus({ preventScroll: true });
-      inputState.dragging = true;
-      dispatchInput({ type: 'down', x, y, button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left' });
-    });
-    img.addEventListener('mousemove', (e) => {
-      if (!browserState.sessionId || !inputState.dragging) return;
-      const now = Date.now();
-      if (now - inputState.lastMove < 30) return;
-      inputState.lastMove = now;
-      const { x, y } = panePoint(e);
-      dispatchInput({ type: 'move', x, y }, { refresh: false });
-    });
-    img.addEventListener('mouseup', (e) => {
-      if (!browserState.sessionId) return;
-      inputState.dragging = false;
-      const { x, y } = panePoint(e);
-      dispatchInput({ type: 'up', x, y, button: e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left' });
-    });
-    img.addEventListener('wheel', (e) => {
-      if (!browserState.sessionId) return;
-      e.preventDefault();
-      dispatchInput({ type: 'wheel', deltaX: e.deltaX || 0, deltaY: e.deltaY || 0 });
-    }, { passive: false });
-    img.addEventListener('contextmenu', (e) => { if (browserState.sessionId) e.preventDefault(); });
-    img.addEventListener('load', () => {
-      const hint = $('#browserHint');
-      if (hint) hint.classList.add('hidden');
-    });
-    pane.addEventListener('keydown', (e) => {
-      if (e.target === $('#browserUrl')) {
-        if (e.key === 'Enter') $('#browserGo').click();
-        return;
-      }
-      if (!browserState.sessionId || e.isComposing) return;
-      if (isFormField(e.target)) return;
-      const key = remoteKeyName(e.key);
-      if (!key) return;
-      e.preventDefault(); // keep the dashboard's own shortcuts/scroll quiet while driving the page
-      if (e.repeat && ['Control', 'Shift', 'Alt', 'Meta'].includes(key)) return;
-      dispatchInput({ type: 'keydown', key, modifiers: keyMods(e) });
-    });
-    pane.addEventListener('keyup', (e) => {
-      if (e.target === $('#browserUrl')) return;
-      if (!browserState.sessionId || e.isComposing) return;
-      if (isFormField(e.target)) return;
-      const key = remoteKeyName(e.key);
-      if (!key) return;
-      e.preventDefault();
-      dispatchInput({ type: 'keyup', key, modifiers: keyMods(e) });
-    });
-  }
-
-  // --- viewport sync: the headless viewport tracks the pane's size, so the
-  // screenshot fills the pane 1:1 (no letterboxing) and coordinates map 1:1.
-  function syncBrowserViewport() {
-    const pane = browserPaneEl();
-    const body = pane && pane.querySelector('.br-body');
-    if (!pane || !body || !browserState.sessionId) return;
-    const w = Math.floor(body.clientWidth || 0);
-    const h = Math.floor(body.clientHeight || 0);
-    if (!(w > 40 && h > 40)) return;
-    const now = Date.now();
-    if (now - inputState.lastViewportSync < 250) {
-      clearTimeout(inputState.viewportTail);
-      inputState.viewportTail = setTimeout(syncBrowserViewport, 280);
-      return;
-    }
-    inputState.lastViewportSync = now;
-    fetch(`/api/browser/session/${browserState.sessionId}/viewport`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ width: w, height: h }),
-    }).then((r) => r.json()).then((d) => { if (d && d.ok) refreshBrowserShot(); })
-      .catch(() => {});
-  }
-  let paneSizeObserver = null;
-  function watchBrowserPaneSize() {
-    const body = browserPaneEl() && browserPaneEl().querySelector('.br-body');
-    if (!body || paneSizeObserver) return;
-    if (typeof ResizeObserver !== 'undefined') {
-      paneSizeObserver = new ResizeObserver(() => syncBrowserViewport());
-      paneSizeObserver.observe(body);
-    } else {
-      window.addEventListener('resize', syncBrowserViewport);
-      paneSizeObserver = true; // marker: listener attached
-    }
-  }
-
-  async function openBrowserSplit(url, sessionId) {
+  async function openBrowserSplit(url) {
     const pane = browserPaneEl();
     if (!pane) return;
     if (url && /^https?:\/\//i.test(String(url))) browserState.url = url;
-    browserState.urlDirty = false;
     $('#browserUrl').value = browserState.url;
     $('#browserBtn').classList.add('active');
     $('#chatView').classList.add('browser-split');
@@ -1751,21 +1599,7 @@
     pane.classList.add('flex');
     setBrowserStatus('connecting…');
     try {
-      // 1) explicit session id from the agent step (verify it is still open)
-      if (sessionId) {
-        const chk = await fetch(`/api/browser/session/${sessionId}`);
-        const chkD = await chk.json();
-        if (chk.ok && chkD.ok && chkD.session) {
-          browserState.sessionId = sessionId;
-          const su = chkD.session.url;
-          if (!browserState.urlDirty && su) { browserState.url = su; $('#browserUrl').value = su; }
-          startBrowserPolling();
-          syncBrowserViewport();
-          return;
-        }
-        // fall through to reuse/create when the session is already closed
-      }
-      // 2) reuse an existing session (e.g. created by the agent) if any
+      // reuse an existing session (e.g. created by the agent) if any
       const listRes = await fetch('/api/browser/sessions');
       const list = await listRes.json();
       browserState.sessionId =
@@ -1783,14 +1617,12 @@
         browserState.sessionId = d.session.id;
       }
       startBrowserPolling();
-      syncBrowserViewport();
     } catch (err) {
       setBrowserStatus(`⚠ ${err.message}`);
     }
   }
   async function closeBrowserSplit() {
     stopBrowserPolling();
-    inputState.dragging = false;
     if (browserState.sessionId) {
       const id = browserState.sessionId;
       browserState.sessionId = null;
@@ -1803,25 +1635,6 @@
     setBrowserStatus('idle');
   }
 
-  // Auto-open + URL/session sync when the AGENT drives the browser: the
-  // chat stream calls this for every browser_* tool step (and other UI can
-  // fire the same 'pagent:browser-tool' window event).
-  function maybeAutoOpenBrowser(json) {
-    if (!json || json.type !== 'tool') return;
-    const name = String(json.tool || '');
-    if (!name.startsWith('browser_')) return;
-    const args = json.args && typeof json.args === 'object' ? json.args : {};
-    const url = typeof args.url === 'string' && args.url.trim() ? args.url.trim() : null;
-    const sid = typeof args.sessionId === 'string' && args.sessionId ? args.sessionId : null;
-    const pane = browserPaneEl();
-    if (pane && pane.classList.contains('hidden')) {
-      openBrowserSplit(url, sid);
-    } else if (url && !browserState.urlDirty) {
-      browserState.url = url;
-      if ($('#browserUrl')) $('#browserUrl').value = url;
-    }
-  }
-
   if ($('#browserBtn')) {
     $('#browserBtn').addEventListener('click', () => {
       const pane = browserPaneEl();
@@ -1831,7 +1644,6 @@
     $('#browserGo').addEventListener('click', async () => {
       const url = ($('#browserUrl').value || '').trim() || QT_DEFAULT_URL;
       browserState.url = url;
-      browserState.urlDirty = false;
       if (!browserState.sessionId) return openBrowserSplit(url);
       setBrowserStatus('navigating…');
       try {
@@ -1857,11 +1669,7 @@
       if (browserState.sessionId) refreshBrowserShot();
     });
     $('#browserClose').addEventListener('click', closeBrowserSplit);
-    $('#browserUrl').addEventListener('input', () => { browserState.urlDirty = true; });
   }
-  setupBrowserInteraction();
-  watchBrowserPaneSize();
-  window.addEventListener('pagent:browser-tool', (e) => maybeAutoOpenBrowser(e && e.detail));
 
   // --- markdown preview (File Explorer) ----------------------------------
   // marked.parse output is sanitized: only a small tag/attr allowlist
@@ -3270,8 +3078,6 @@
         // into it) so tool rounds survive session switches/refreshes;
         // renderMessages replays them as collapsible cards. Live activity
         // stays in the transient ⚙ status feed — no DOM duplication.
-        // Browser tools also auto-open the split pane + sync URL/session.
-        maybeAutoOpenBrowser(json);
         sessionMessages.push({
           role: 'tool',
           tool: json.tool,

@@ -14,9 +14,6 @@
  *   GET    /api/browser/session/:id/screenshot.png   -> fresh PNG (also saved to data/browser-shots/)
  *   POST   /api/browser/session/:id/click {selector} | {x, y}
  *   POST   /api/browser/session/:id/drag {x1, y1, x2, y2}
- *   POST   /api/browser/session/:id/input {type, x, y, button, deltaX, deltaY,
- *          key, modifiers, text}      -> live user-input dispatch (CDP)
- *   POST   /api/browser/session/:id/viewport {width, height} -> resize viewport
  *   POST   /api/browser/session/:id/evaluate {expression}
  *   GET    /api/browser/session/:id/drawings   -> target's /api/drawings, normalized
  *   DELETE /api/browser/session/:id
@@ -96,22 +93,6 @@ router.post('/session/:id/drag', async (req, res) => {
   const r = await bs.drag(s, req.body || {});
   if (!r.ok) return fail(res, 400, r.error);
   return ok(res, { dragged: true });
-});
-
-router.post('/session/:id/input', async (req, res) => {
-  const s = bs.get(req.params.id);
-  if (!s) return fail(res, 404, 'no such browser session');
-  const r = await bs.input(s, req.body || {});
-  if (!r.ok) return fail(res, 400, r.error);
-  return ok(res, { dispatched: (req.body || {}).type, viewport: s.viewport });
-});
-
-router.post('/session/:id/viewport', async (req, res) => {
-  const s = bs.get(req.params.id);
-  if (!s) return fail(res, 404, 'no such browser session');
-  const r = await bs.viewport(s, req.body || {});
-  if (!r.ok) return fail(res, 400, r.error);
-  return ok(res, { viewport: { width: r.width, height: r.height } });
 });
 
 router.post('/session/:id/evaluate', async (req, res) => {

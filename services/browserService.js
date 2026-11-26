@@ -84,7 +84,6 @@ function sessionJSON(s) {
     state: s.closed ? 'closed' : 'open',
     createdAt: s.createdAt,
     lastActive: s.sourceLastActive,
-    viewport: s.viewport || null,
     console: s.console.slice(-50),
     pageErrors: [...s.pageErrors],
     requestFailures: s.requestFailures.slice(-50),
@@ -103,7 +102,6 @@ async function openSession(url) {
       id, page, url: target, title: '', closed: false,
       createdAt: Date.now(), sourceLastActive: Date.now(),
       console: [], pageErrors: [], requestFailures: [], drawings: null, drawingsError: null,
-      pressedKeys: new Set(), viewport: null,
     };
     page.on('console', (msg) => {
       s.sourceLastActive = Date.now();
@@ -126,7 +124,6 @@ async function openSession(url) {
     });
     sessions.set(id, s);
     await navigate(s, target);
-    s.viewport = s.page.viewportSize();
     return { ok: true, session: sessionJSON(s) };
   } catch (e) {
     return { ok: false, error: e && e.message ? e.message : String(e) };
@@ -135,7 +132,6 @@ async function openSession(url) {
 
 async function navigate(s, url) {
   s.url = url;
-  s.pressedKeys.clear(); // a fresh page starts with no held keys
   try {
     await s.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
     s.title = await s.page.title().catch(() => '');
@@ -148,7 +144,6 @@ async function navigate(s, url) {
 }
 
 async function reload(s) {
-  s.pressedKeys.clear();
   await s.page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch((e) => {
     s.pageErrors.push(`reload: ${(e && e.message || String(e)).slice(0, 400)}`);
   });
@@ -187,118 +182,6 @@ async function drag(s, args) {
   await s.page.mouse.down();
   await s.page.mouse.move(x2, y2, { steps: 12 });
   await s.page.mouse.up();
-  s.sourceLastActive = Date.now();
-  return { ok: true };
-}
-
-async function errorString(e) {
-  return (e && e.message) || String(e);
-}
-
-/**
- * Resize the session's viewport (the pane sends its CSS-pixel size so the
- * screenshot fills the pane 1:1 — no letterboxing). Clamped to sane bounds.
- */
-async function viewport(s, { width, height } = {}) {
-  const w = Math.max(64, Math.min(4096, Math.round(Number(width))));
-  const h = Math.max(64, Math.min(4096, Math.round(Number(height))));
-  if (!Number.isFinite(w) || !Number.isFinite(h)) return { ok: false, error: 'width and height (numbers) are required' };
-  await s.page.setViewportSize({ width: w, height: h });
-  s.viewport = { width: w, height: h };
-  s.sourceLastActive = Date.now();
-  return { ok: true, ...s.viewport };
-}
-
-const INPUT_MODS = ['Control', 'Shift', 'Alt', 'Meta'];
-const INPUT_BUTTONS = { left: 'left', middle: 'middle', right: 'right' };
-
-/**
- * Live input dispatch — real pointer + keyboard events into the page via
- * CDP (page.mouse / page.keyboard), so the dashboard pane behaves like an
- * interactive view: clicks, drags, wheel scrolls, typing, Enter/Escape and
- * modifier shortcuts all hit the target page as if the user were there.
- *
- * payload: { type: 'click'|'dblclick'|'down'|'up'|'move'|'wheel'|
- *            'keydown'|'keyup'|'type', ... }
- *  - pointer: x, y (viewport CSS px), button ('left'|'middle'|'right')
- *  - wheel:   deltaX, deltaY
- *  - key:     key (playwright name: 'a', 'Enter', 'Escape', 'ArrowUp'…),
- *             modifiers: ['Control','Shift','Alt','Meta'] — held WINDOW state;
- *             keydown ensures them (idempotent), keyup releases keys that
- *             are no longer in the modifiers list.
- *  - type:    text — inserts text with full key events.
- */
-async function input(s, payload) {
-  const p = payload || {};
-  const type = String(p.type || '');
-  const num = (v) => (Number.isFinite(v) ? v : null);
-  const btn = INPUT_BUTTONS[p.button] || 'left';
-  try {
-    switch (type) {
-      case 'click': {
-        const x = num(p.x); const y = num(p.y);
-        if (x === null || y === null) return { ok: false, error: 'click needs viewport {x, y}' };
-        await s.page.mouse.click(x, y, { button: btn, clickCount: p.clickCount === 2 ? 2 : 1 });
-        break;
-      }
-      case 'down': await s.page.mouse.down({ button: btn }); break;
-      case 'up': await s.page.mouse.up({ button: btn }); break;
-      case 'move': {
-        const x = num(p.x); const y = num(p.y);
-        if (x === null || y === null) return { ok: false, error: 'move needs viewport {x, y}' };
-        await s.page.mouse.move(x, y);
-        break;
-      }
-      case 'wheel':
-        await s.page.mouse.wheel(Number(p.deltaX) || 0, Number(p.deltaY) || 0);
-        break;
-      case 'keydown': return keyEvent(s, 'down', p);
-      case 'keyup': return keyEvent(s, 'up', p);
-      case 'type':
-        await s.page.keyboard.type(String(p.text == null ? '' : p.text));
-        break;
-      default:
-        return { ok: false, error: `unknown input type '${type}' (click|down|up|move|wheel|keydown|keyup|type)` };
-    }
-  } catch (e) {
-    return { ok: false, error: await errorString(e) };
-  }
-  s.sourceLastActive = Date.now();
-  return { ok: true };
-}
-
-async function keyEvent(s, dir, p) {
-  const key = String(p.key == null ? '' : p.key).trim();
-  if (!key) return { ok: false, error: 'key is required' };
-  const mods = Array.isArray(p.modifiers) ? p.modifiers.filter((m) => INPUT_MODS.includes(m)) : [];
-  const kb = s.page.keyboard;
-  try {
-    if (dir === 'down') {
-      for (const m of mods) {
-        if (!s.pressedKeys.has(m)) { await kb.down(m); s.pressedKeys.add(m); }
-      }
-      if (INPUT_MODS.includes(key)) {
-        if (!s.pressedKeys.has(key)) { await kb.down(key); s.pressedKeys.add(key); }
-        return { ok: true };
-      }
-      await kb.down(key);
-      s.pressedKeys.add(key);
-    } else {
-      if (INPUT_MODS.includes(key)) {
-        await kb.up(key);
-        s.pressedKeys.delete(key);
-        return { ok: true };
-      }
-      if (s.pressedKeys.has(key)) { await kb.up(key); s.pressedKeys.delete(key); }
-      else await kb.up(key); // tolerant of already-released keys
-      // release modifiers the window no longer holds
-      for (const m of INPUT_MODS) {
-        if (!mods.includes(m) && s.pressedKeys.has(m)) { await kb.up(m); s.pressedKeys.delete(m); }
-      }
-    }
-  } catch (e) {
-    return { ok: false, error: await errorString(e) };
-  }
   s.sourceLastActive = Date.now();
   return { ok: true };
 }
@@ -411,6 +294,6 @@ function get(id) {
 
 module.exports = {
   DEFAULT_CHROME, DEFAULT_URL, chromeExists,
-  openSession, navigate, reload, screenshot, click, drag, input, viewport, evaluate,
+  openSession, navigate, reload, screenshot, click, drag, evaluate,
   fetchDrawings, normalizeDrawings, closeSession, closeAll, list, get, sessionJSON,
 };

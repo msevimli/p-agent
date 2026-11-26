@@ -512,7 +512,7 @@
         </div>
       </div><!-- /chatCol -->
         <!-- Browser split pane (headless Chrome; Quant Terminal target) -->
-        <aside id="browserPane" tabindex="-1" class="hidden flex-col min-h-0 overflow-hidden">
+        <aside id="browserPane" class="hidden flex-col min-h-0 overflow-hidden">
           <div class="br-head shrink-0">
             <span class="br-title">Browser</span>
             <input id="browserUrl" class="br-url" spellcheck="false" placeholder="http://127.0.0.1:3777" />
@@ -522,8 +522,7 @@
             <button id="browserClose" class="fe-btn-back" title="Close the browser split view">✕</button>
           </div>
           <div id="browserStatus" class="br-status shrink-0">idle</div>
-          <div class="br-body flex-1 min-h-0">
-            <div id="browserHint" class="br-hint">Click / drag / scroll here to interact with the page — keyboard goes to the page while this pane is focused</div>
+          <div class="flex-1 min-h-0 overflow-auto br-body">
             <img id="browserFrame" class="br-frame" alt="headless browser view" />
           </div>
         </aside>
