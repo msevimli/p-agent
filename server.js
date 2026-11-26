@@ -36,7 +36,6 @@ app.use('/api/queue', require('./routes/queue'));
 app.use('/api/channels', require('./routes/channels'));
 app.use('/api/system', require('./routes/system'));
 app.use('/api/system/prompt', require('./routes/systemPrompt'));
-app.use('/api/browser', require('./routes/browser'));
 
 // Optional introspection endpoint so the tool registry is inspectable at runtime.
 app.get('/api/tools', (_req, res) => {

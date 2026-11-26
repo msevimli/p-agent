@@ -508,40 +508,6 @@ html.dark .fe-file-meta { color: #6b7280; }
 .fe-mdview img { max-width: 100%; border-radius: 6px; }
 .fe-btn-back.md-on { border-color: rgba(59,130,246,0.45); color: #60a5fa; }
 
-/* Browser split view (headless Chrome pane beside the chat) */
-#chatView.browser-split { flex-direction: row; }
-#chatView.browser-split #chatCol { min-width: 0; }
-#browserPane {
-  width: min(46%, 780px); flex: none;
-  border-left: 1px solid rgba(255,255,255,0.08);
-  background: #10151c;
-}
-#browserPane .br-head {
-  display: flex; align-items: center; gap: 0.4rem;
-  padding: 0.5rem 0.6rem; border-bottom: 1px solid rgba(255,255,255,0.07);
-}
-.br-title {
-  font-size: 0.78rem; font-weight: 600; color: #9ca3af;
-  white-space: nowrap; margin-right: 0.2rem;
-}
-.br-url {
-  flex: 1; min-width: 0;
-  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
-  color: #e5e7eb; border-radius: 0.45rem; padding: 0.28rem 0.5rem;
-  font-size: 0.76rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.br-status {
-  padding: 0.3rem 0.6rem; font-size: 0.72rem; color: #9ca3af;
-  border-bottom: 1px solid rgba(255,255,255,0.06);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.br-body { display: flex; }
-.br-frame {
-  width: 100%; height: 100%; object-fit: contain;
-  background: #0d1117; border-radius: 0.5rem;
-}
-#browserBtn.active { color: #60a5fa; border-color: rgba(59,130,246,0.45); }
-
 /* File editor (edit mode: textarea + save/cancel bar) */
 /* #fsList is a block scroll container; while editing it becomes a flex
    column so .fe-editor-wrap's flex:1 resolves against a real height and

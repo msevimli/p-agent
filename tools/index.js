@@ -13,7 +13,6 @@ const automationsTools = require('./automationsTools');
 const libraryTools = require('./libraryTools');
 const globalMemoryTools = require('./globalMemory');
 const workspaceMemoryTools = require('./workspaceMemory');
-const browserTools = require('./browserTools');
 
 const registry = [
   ...fileTools.tools,
@@ -23,7 +22,6 @@ const registry = [
   ...libraryTools.tools,
   ...globalMemoryTools.tools,
   ...workspaceMemoryTools.tools,
-  ...browserTools.tools,
 ].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
 module.exports = registry;

@@ -229,54 +229,6 @@ a cadence:
   automation/pause/disable keywords, and documented in the system prompt
   (template and any active override).
 
-## Headless browser automation & split view (Browser tool)
-
-The dashboard ships a **headless-Chrome automation service** for building and
-verifying local web UIs end to end — the reference target is **Quant
-Terminal** at `http://127.0.0.1:3777` (any local URL works; override with
-`BROWSER_DEFAULT_URL`).
-
-- **Binary**: the pre-installed system Chrome (`/usr/bin/google-chrome`, no
-  bundled download — set `BROWSER_EXECUTABLE` to override), driven by
-  `playwright-core` with `--headless --no-sandbox --disable-dev-shm-usage`
-  (container/VPS friendly). A shared browser hosts long-lived per-console
-  *sessions*; each session keeps bounded console/page/network error rings.
-- **Split view**: the sidebar **Browser** button splits the chat into two
-  panes — chat left, live browser right. The pane shows the target URL,
-  Go / Reload / Screenshot / Close controls, a status line (page title +
-  error tally) and a **polled screenshot** of the headless page. Opening
-  attaches to an existing session (e.g. one the agent created); closing
-  tears the session down and restores the single-pane chat.
-- **REST API** (`routes/browser.js` → `services/browserService.js`):
-  `POST /api/browser/session {url?}` (default `http://127.0.0.1:3777`),
-  `GET /api/browser/sessions`, `GET /api/browser/session/:id`,
-  `POST …/:id/navigate {url}` | `reload` | `click {selector|{x,y}}` |
-  `drag {x1,y1,x2,y2}` | `evaluate {expression}`,
-  `GET …/:id/screenshot.png` (also saved to `data/browser-shots/`),
-  `GET …/:id/drawings`, `DELETE /api/browser/session/:id`, `DELETE /api/browser/sessions`.
-- **Agent tools**: `browser_open`, `browser_navigate`, `browser_click`,
-  `browser_drag` (pixel drags draw on chart canvases without DOM hooks),
-  `browser_screenshot`, `browser_logs`, `browser_drawings` — registered in
-  the tool registry like every other tool, so the agent can run repeatable
-  e2e checks: navigate → interact → screenshot → read logs/drawings → report.
-
-**Chart drawings & annotations contract** (Quant Terminal side): the target
-exposes its drawing-tool state as `GET /api/drawings`:
-
-```json
-{ "symbol": "SOL/USDT", "timeframe": "30m",
-  "drawings": [ { "id": "d1", "tool": "trendline",
-    "points": [ { "t": 1700000000, "p": 100.5 }, { "t": 1700000600, "p": 101.2 } ],
-    "params": { "color": "#ff0" } } ] }
-```
-
-`points` entries accept `t`/`time` (unix seconds) and `p`/`price` aliases;
-`tool` ∈ `trendline|hline|vline|ray|rect|fib|text|marker|zone|regression`;
-unknown tools/drawings pass through so the agent can still reason over them.
-p-agent normalizes this payload (`browser_drawings`, the split view fetches
-it on demand) and reports a clean error when the target doesn't expose it
-yet — the integration is ready for when Quant Terminal lands.
-
 ## System resource monitor (header)
 
 Two compact circular gauges in the header (left of the model status badge)
@@ -554,14 +506,11 @@ p-agent/
 │   ├── systemPrompt.js    #   system-prompt override persistence
 │   ├── skillManager.js    #   SKILL.md registry
 │   ├── automationManager.js # cron/interval engine
-│   ├── browserService.js   #   headless Chrome sessions (playwright-core,
-│   │                       #   system binary), screenshots, error rings,
-│   │                       #   /api/drawings contract reader
 │   ├── embedder.js        #   memory embeddings (xenova/ollama/hash chain)
 │   ├── vectorMemory.js    #   global memory store (node:sqlite + cosine top-k)
 │   ├── workspaceMemory.js #   workspace MEMORY.md store (capped)
 │   └── memoryContext.js   #   per-turn memory tail builder (cache-safe)
-├── tools/                 # 28 agent tools (uniform {name,desc,parameters,execute})
+├── tools/                 # 18 agent tools (uniform {name,desc,parameters,execute})
 ├── public/                # vanilla-JS dashboard (no build step)
 ├── data/                  # gitignored runtime state (JSON files + library blobs)
 └── workspaces/            # agent workspace — scripts/ (test harnesses + user
@@ -590,20 +539,13 @@ p-agent/
 | POST | `/api/channels/telegram/toggle` | Enable/disable |
 | POST | `/api/channels/telegram/token` | Set/clear token (`.env`) |
 | POST | `/api/channels/telegram/test` | getMe connection test |
-| GET | `/api/fs/list`, `/api/fs/read` | File explorer + whole-file read (preview = full content; editor `?full=1` compat no-op) |
-| POST | `/api/fs/write` | Save file content (editor) — sandboxed, 32 MB cap |
+| GET | `/api/fs/list`, `/api/fs/read` (`?full=1` = uncapped for the editor) | File explorer + editor load |
+| POST | `/api/fs/write` | Save file content (editor) — sandboxed, 2 MB cap |
 | POST | `/api/fs/patch` | Targeted `old_text`→`new_text` in-place edit |
 | GET/POST/DELETE | `/api/memory[/:id]` (`?q=` = semantic search) | Global memory facts |
 | GET/PUT/DELETE | `/api/memory/workspace` | Workspace `MEMORY.md` (editor + clear) |
 | GET | `/api/queue` | Queue stats |
 | GET | `/api/system/metrics` | Host RAM + CPU usage (os module) |
-| POST | `/api/browser/session` | Open a headless-Chrome session (default `http://127.0.0.1:3777`) |
-| GET | `/api/browser/sessions` | List open browser sessions |
-| GET | `/api/browser/session/:id` | Session state: URL, title, console/network/error rings |
-| POST | `/api/browser/session/:id/navigate` | Navigate `{url}` (also `reload`, `click`, `drag`, `evaluate`) |
-| GET | `/api/browser/session/:id/screenshot.png` | Fresh viewport PNG (+ saved under `data/browser-shots/`) |
-| GET | `/api/browser/session/:id/drawings` | Target's `/api/drawings`, normalized |
-| DELETE | `/api/browser/session/:id` | Close a session |
 
 ## Key environment variables
 
@@ -614,8 +556,6 @@ p-agent/
 `WORKSPACE_DIR` (agent workspace — defaults to `<PLIFE_WORK_ROOT>/workspaces/`),
 `LIBRARY_MAX_UPLOAD_MB`,
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_CHAT_ID`, `PAGENT_BASE_URL` (CLI),
-`BROWSER_EXECUTABLE` (system Chrome path, default `/usr/bin/google-chrome`),
-`BROWSER_DEFAULT_URL` (default `http://127.0.0.1:3777`),
 `PLIFE_DOTENV_FILE` (alternate .env path). See `.env-example` for the full list.
 
 ## Agent workspace isolation (workspaces/)
