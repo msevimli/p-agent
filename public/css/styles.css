@@ -1709,3 +1709,136 @@ html:not(.dark) .memory-fact-row {
   width: 15px;
   height: 15px;
 }
+
+/* ==================================================================
+   Split workspace — chat + tool panes side by side (2026-11-26)
+   ==================================================================
+   #splitRoot is a flex row under the app header. Single-pane mode shows
+   exactly one pane at flex 1 1 100%; split-active mode sizes the chat
+   pane from --split-chat-w (55% default, px while the user drags) and
+   lets the tool pane take the rest (min 300px). .split-swapped flips
+   the row (row-reverse keeps DOM order: chatPane, divider, toolPane;
+   the divider still sits between the two panes). */
+#splitRoot { --split-chat-w: 55%; }
+#splitRoot:not(.split-active) #chatPane { flex: 1 1 100%; }
+#splitRoot:not(.split-active) #toolPane { flex: 1 1 100%; }
+#splitRoot.split-active #chatPane { flex: 0 0 var(--split-chat-w); }
+#splitRoot.split-active #toolPane { flex: 1 1 auto; min-width: 300px; }
+#splitRoot.split-swapped { flex-direction: row-reverse; }
+
+/* Draggable divider. The grip line widens + turns blue on hover/drag;
+   the whole 8px strip is the hit area. touch-action:none keeps pointer
+   events flowing on touch screens. */
+#splitDivider {
+  width: 8px;
+  flex: 0 0 auto;
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  background: transparent;
+  transition: background 0.15s;
+}
+#splitDivider::before {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: rgba(128, 128, 128, 0.28);
+}
+#splitDivider:hover, #splitRoot.resizing #splitDivider {
+  background: rgba(59, 130, 246, 0.10);
+}
+#splitDivider:hover::before, #splitRoot.resizing #splitDivider::before {
+  width: 3px;
+  border-radius: 2px;
+  background: #3b82f6;
+}
+/* While dragging: global col-resize cursor + no text selection. */
+body.split-dragging, body.split-dragging * {
+  cursor: col-resize !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+/* Split-pane header: active tool name + switcher + swap/close. */
+.split-tool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.42rem 0.75rem;
+  background: rgba(128, 128, 128, 0.05);
+  border-bottom: 1px solid rgba(128, 128, 128, 0.16);
+}
+.split-tool-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+.split-tool-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #374151;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html.dark .split-tool-name { color: #e5e7eb; }
+.split-switcher {
+  font-size: 0.74rem;
+  max-width: 10.5rem;
+  padding: 0.18rem 0.4rem;
+  border-radius: 0.45rem;
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  background: transparent;
+  color: #4b5563;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.split-switcher:hover, .split-switcher:focus { border-color: #3b82f6; }
+html.dark .split-switcher { color: #d1d5db; background: #1e1f20; }
+.split-tool-actions { display: flex; align-items: center; gap: 0.25rem; flex-shrink: 0; }
+.split-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border: none;
+  border-radius: 0.45rem;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.split-btn:hover { background: rgba(128, 128, 128, 0.12); color: #111827; }
+html.dark .split-btn:hover { color: #fff; }
+.split-btn svg { width: 1rem; height: 1rem; }
+.split-close:hover { color: #dc2626; }
+html.dark .split-close:hover { color: #f87171; }
+
+/* Header split toggle button: blue when the split workspace is active. */
+#splitToggleBtn.active {
+  color: #2563eb;
+  background: rgba(59, 130, 246, 0.12);
+}
+html.dark #splitToggleBtn.active { color: #60a5fa; }
+
+/* In split mode each tool view's "← Chat" back button is dead weight —
+   chat is already on the other side; hide it so the row keeps its
+   refresh/action buttons but no confusing back control. */
+#splitRoot.split-active #toolViews .fe-topbar > .fe-btn-back:first-child {
+  display: none;
+}
+
+/* Very narrow screens: relax the tool pane minimum so both panes stay
+   usable (content still scrolls). */
+@media (max-width: 640px) {
+  #splitRoot.split-active #toolPane { min-width: 240px; }
+}

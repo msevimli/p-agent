@@ -49,6 +49,22 @@
     modelsTab: 'models',
     // Launch-template cache [{ id, name, description, builtin, args }].
     templates: [],
+    // Split workspace: chat pane (left) + one tool view (right).
+    // splitTool = the tool open in the right pane; preSplitView remembers
+    // the single-pane view to restore when the split closes; splitSwapped
+    // + splitChatPx survive reloads via localStorage.
+    split: false,
+    splitTool: '',
+    preSplitView: null,
+    splitSwapped: (() => {
+      try { return localStorage.getItem('pagent.splitSwapped') === '1'; } catch { return false; }
+    })(),
+    splitChatPx: (() => {
+      try {
+        const v = Number(localStorage.getItem('pagent.splitChatPx'));
+        return Number.isFinite(v) && v > 0 ? v : null;
+      } catch { return null; }
+    })(),
   };
 
   // ------------------------------------------------------------- dom refs
@@ -96,7 +112,6 @@
   const advParamsHint = $('#advParamsHint');
 
   // File Explorer / Skills / view-switching refs
-  const chatViewEl = $('#chatView');
   const fileExplorerViewEl = $('#fileExplorerView');
   const skillsViewEl = $('#skillsView');
   const fileExplorerBtn = $('#fileExplorerBtn');
@@ -107,6 +122,18 @@
   const skillsListEl = $('#skillsList');
   const skillsBackChat = $('#skillsBackChat');
   const skillsRefresh = $('#skillsRefresh');
+
+  // Split workspace refs (chat pane + resizable tool pane)
+  const splitRootEl = $('#splitRoot');
+  const chatPaneEl = $('#chatPane');
+  const toolPaneEl = $('#toolPane');
+  const splitDividerEl = $('#splitDivider');
+  const splitToolHeaderEl = $('#splitToolHeader');
+  const splitToolNameEl = $('#splitToolName');
+  const splitToolSwitcherEl = $('#splitToolSwitcher');
+  const splitSwapBtnEl = $('#splitSwapBtn');
+  const splitCloseBtnEl = $('#splitCloseBtn');
+  const splitToggleBtnEl = $('#splitToggleBtn');
 
   // Memory view refs (two-tier: global vector facts + workspace MEMORY.md)
   const memoryBtn = $('#memoryBtn');
@@ -292,7 +319,7 @@
 
   // ------------------------------------------------------------- view switching
   const PANELS = {
-    chat: chatViewEl,
+    chat: chatPaneEl,
     files: fileExplorerViewEl,
     skills: skillsViewEl,
     memory: memoryViewEl,
@@ -326,21 +353,154 @@
   };
 
   function showView(name) {
+    if (state.split) {
+      // Split workspace: the chat pane stays put; selecting a tool just
+      // swaps the tool pane's content ('chat' is already visible).
+      if (name !== 'chat' && isToolView(name)) openSplitTool(name);
+      return;
+    }
     state.view = name;
+    chatPaneEl.classList.toggle('hidden', name !== 'chat');
+    toolPaneEl.classList.toggle('hidden', name === 'chat');
+    splitDividerEl.classList.add('hidden');
+    splitToolHeaderEl.classList.add('hidden');
+    splitRootEl.classList.remove('split-active', 'split-swapped');
     for (const [k, el] of Object.entries(PANELS)) el.classList.toggle('hidden', k !== name);
     $('#headerSub').textContent = SUBTITLES[name];
     for (const b of Object.values(NAV_BTNS)) if (b) b.classList.remove('active');
     if (NAV_BTNS[name]) NAV_BTNS[name].classList.add('active');
     closePopovers();
-    if (name === 'files') loadFsDir(state.fsDir);
-    if (name === 'skills') loadSkills();
-    if (name === 'memory') loadMemory();
-    if (name === 'models') loadModels();
-    if (name === 'library') loadLibrary();
-    if (name === 'automations') loadAutomations();
-    if (name === 'channels') loadChannels();
-    if (name === 'system') loadSystemPrompt();
+    loadForView(name);
   }
+
+  // ------------------------------------------------- split workspace mode
+  // Chat pane left, one tool view right, resizable divider between. All
+  // tool views keep their own state, so opening/working on a tool never
+  // touches the chat conversation (and vice versa). The tool views are
+  // the SAME panels as single-pane mode — nothing is duplicated.
+  const SPLIT_TOOLS = ['files', 'skills', 'memory', 'models', 'library', 'automations', 'channels', 'system'];
+  const SPLIT_MIN_CHAT = 300; // px — never drag the chat pane narrower
+  const SPLIT_MIN_TOOL = 300; // px — tool pane min-width (styles.css)
+  const SPLIT_DIVIDER_W = 8;  // px — #splitDivider width (styles.css)
+
+  function isToolView(name) {
+    return SPLIT_TOOLS.includes(name);
+  }
+
+  function loadForView(name) {
+    if (name === 'files') loadFsDir(state.fsDir);
+    else if (name === 'skills') loadSkills();
+    else if (name === 'memory') loadMemory();
+    else if (name === 'models') loadModels();
+    else if (name === 'library') loadLibrary();
+    else if (name === 'automations') loadAutomations();
+    else if (name === 'channels') loadChannels();
+    else if (name === 'system') loadSystemPrompt();
+  }
+
+  // Restore the last dragged chat width (clamped to the viewport) or fall
+  // back to the stylesheet default (--split-chat-w: 55%).
+  function applySplitWidth() {
+    if (!state.split) return;
+    const w = state.splitChatPx;
+    if (!w) { splitRootEl.style.removeProperty('--split-chat-w'); return; }
+    const avail = Math.max(0, splitRootEl.clientWidth - SPLIT_MIN_TOOL - SPLIT_DIVIDER_W);
+    splitRootEl.style.setProperty('--split-chat-w', Math.max(SPLIT_MIN_CHAT, Math.min(w, avail)) + 'px');
+  }
+
+  function updateSplitUI() {
+    const tool = state.splitTool || 'files';
+    state.view = 'chat'; // the left pane IS the chat context
+    chatPaneEl.classList.remove('hidden');
+    toolPaneEl.classList.remove('hidden');
+    splitDividerEl.classList.remove('hidden');
+    splitToolHeaderEl.classList.remove('hidden');
+    splitRootEl.classList.add('split-active');
+    splitRootEl.classList.toggle('split-swapped', !!state.splitSwapped);
+    splitToolNameEl.textContent = SUBTITLES[tool];
+    splitToolSwitcherEl.value = tool;
+    for (const [k, el] of Object.entries(PANELS)) {
+      if (k === 'chat') continue; // chat pane is always visible in split mode
+      el.classList.toggle('hidden', k !== tool);
+    }
+    $('#headerSub').textContent = `${SUBTITLES.chat} · ${SUBTITLES[tool]}`;
+    for (const b of Object.values(NAV_BTNS)) if (b) b.classList.remove('active');
+    if (NAV_BTNS[tool]) NAV_BTNS[tool].classList.add('active');
+    splitToggleBtnEl.classList.add('active');
+    splitToggleBtnEl.title = 'Split view — click to return to a single pane';
+    applySplitWidth();
+  }
+
+  function openSplitTool(name) {
+    state.splitTool = name;
+    updateSplitUI();
+    closePopovers();
+    loadForView(name);
+  }
+
+  function enterSplit() {
+    if (state.split) return;
+    state.preSplitView = state.view; // restore this view when the split closes
+    state.split = true;
+    if (!isToolView(state.splitTool)) state.splitTool = 'files';
+    updateSplitUI();
+    closePopovers();
+    loadForView(state.splitTool);
+  }
+
+  function exitSplit() {
+    if (!state.split) return;
+    const back = isToolView(state.preSplitView) ? state.preSplitView : 'chat';
+    state.split = false;
+    state.preSplitView = null;
+    splitRootEl.classList.remove('split-active', 'split-swapped');
+    splitToggleBtnEl.classList.remove('active');
+    splitToggleBtnEl.title = 'Split view — chat and a tool side by side';
+    showView(back);
+  }
+
+  // Split controls: toggle button (header), close / swap (pane header),
+  // quick switcher (select), and the divider drag (pointer events).
+  splitToggleBtnEl.addEventListener('click', () => (state.split ? exitSplit() : enterSplit()));
+  splitCloseBtnEl.addEventListener('click', exitSplit);
+  splitSwapBtnEl.addEventListener('click', () => {
+    state.splitSwapped = !state.splitSwapped;
+    try { localStorage.setItem('pagent.splitSwapped', state.splitSwapped ? '1' : '0'); } catch {}
+    splitRootEl.classList.toggle('split-swapped', state.splitSwapped);
+  });
+  splitToolSwitcherEl.addEventListener('change', () => openSplitTool(splitToolSwitcherEl.value));
+
+  let splitDragging = false;
+  splitDividerEl.addEventListener('pointerdown', (e) => {
+    if (!state.split) return;
+    splitDragging = true;
+    splitRootEl.classList.add('resizing');
+    document.body.classList.add('split-dragging');
+    try { splitDividerEl.setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault();
+  });
+  splitDividerEl.addEventListener('pointermove', (e) => {
+    if (!splitDragging) return;
+    const rect = splitRootEl.getBoundingClientRect();
+    let w = e.clientX - rect.left;
+    if (state.splitSwapped) w = rect.width - w; // chat pane sits on the right
+    const avail = Math.max(0, rect.width - SPLIT_MIN_TOOL - SPLIT_DIVIDER_W);
+    state.splitChatPx = Math.max(SPLIT_MIN_CHAT, Math.min(w, avail));
+    splitRootEl.style.setProperty('--split-chat-w', state.splitChatPx + 'px');
+  });
+  const endSplitDrag = (e) => {
+    if (!splitDragging) return;
+    splitDragging = false;
+    splitRootEl.classList.remove('resizing');
+    document.body.classList.remove('split-dragging');
+    try { splitDividerEl.releasePointerCapture(e.pointerId); } catch {}
+    if (state.splitChatPx) {
+      try { localStorage.setItem('pagent.splitChatPx', String(state.splitChatPx)); } catch {}
+    }
+  };
+  splitDividerEl.addEventListener('pointerup', endSplitDrag);
+  splitDividerEl.addEventListener('pointercancel', endSplitDrag);
+  window.addEventListener('resize', () => { if (state.split) applySplitWidth(); });
 
   // ------------------------------------------------------------- skills view
   async function loadSkills() {

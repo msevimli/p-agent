@@ -255,6 +255,13 @@
               </button>
             </div>
           </div>
+          <button id="splitToggleBtn" title="Split view — chat and a tool side by side"
+            class="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-white/5">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path stroke-linecap="round" d="M10 4v16" />
+            </svg>
+          </button>
           <button id="settingsBtn" title="Settings"
             class="p-2 rounded-full hover:bg-gray-100 dark:hover:bg-white/5">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
@@ -268,6 +275,12 @@
                    flex items-center justify-center">AI</button>
         </div>
       </header>
+
+      <!-- ===== Split workspace: chat pane + resizable tool pane ===== -->
+      <div id="splitRoot" class="flex-1 flex flex-row min-h-0 overflow-hidden">
+
+        <!-- ================= Chat pane (left) ================= -->
+        <div id="chatPane" class="flex flex-col min-w-0 min-h-0">
 
       <!-- ===== Chat view (message list + prompt) ===== -->
       <div id="chatView" class="view-panel flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -503,6 +516,50 @@
           </div>
         </div>
       </div><!-- /chatView -->
+        </div><!-- /chatPane -->
+
+        <!-- ===== Split divider (draggable resizer) ===== -->
+        <div id="splitDivider"
+          class="hidden shrink-0"
+          role="separator" aria-orientation="vertical" aria-label="Resize panes"
+          title="Drag to resize — chat width sticks"></div>
+
+        <!-- ================= Tool pane (right) ================= -->
+        <div id="toolPane" class="hidden flex flex-col min-w-0 min-h-0">
+
+          <!-- split-pane header: active tool + quick switcher + swap/close -->
+          <div id="splitToolHeader" class="split-tool-header shrink-0 hidden">
+            <div class="split-tool-title">
+              <span id="splitToolName" class="split-tool-name">Tool</span>
+              <select id="splitToolSwitcher" class="split-switcher"
+                title="Switch the tool open in this pane">
+                <option value="files">File Explorer</option>
+                <option value="memory">Memory</option>
+                <option value="models">Models</option>
+                <option value="skills">Skills</option>
+                <option value="library">Library</option>
+                <option value="automations">Automations</option>
+                <option value="channels">Channels</option>
+                <option value="system">System</option>
+              </select>
+            </div>
+            <div class="split-tool-actions">
+              <button id="splitSwapBtn" class="split-btn" title="Swap sides — move the tool pane to the other side">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M7 4 3 8l4 4M3 8h14" />
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M17 20l4-4-4-4M21 16H7" />
+                </svg>
+              </button>
+              <button id="splitCloseBtn" class="split-btn split-close" title="Close split view (single pane)">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- all tool views render here; the split-active class shows one at a time -->
+          <div id="toolViews" class="flex-1 flex flex-col min-h-0">
 
       <!-- ===== File Explorer view ===== -->
       <main id="fileExplorerView" class="view-panel hidden flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -1078,6 +1135,10 @@
 
         </div>
       </main><!-- /channelsView -->
+
+          </div><!-- /toolViews -->
+        </div><!-- /toolPane -->
+      </div><!-- /splitRoot -->
 
     </div><!-- /main column -->
   </div>

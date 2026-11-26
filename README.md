@@ -259,6 +259,29 @@ uptime). The widget polls every 5s and sweeps smoothly between samples.
   tick-delta method. In both cases the very first sample has no baseline
   and falls back to a loadavg-based estimate for one tick.
 
+## Split workspace — chat + any tool side by side
+
+The **split view** button in the header (second icon right of the model
+status badge) turns the main area into two resizable panes: chat on the
+left, one **Tools** view on the right — no remote browser, no screenshots;
+the right pane renders the same native panels the Tools menu opens
+(File Explorer, Memory, Models, Skills, Library, Automations, Channels,
+System).
+
+- While split is active, clicking any **Tools** sidebar item opens it in
+  the right pane without touching the chat conversation (scroll position,
+  compose text and any running generation are untouched — and vice versa).
+- The pane header shows the active tool, a **quick switcher** dropdown,
+  **swap sides** (⇄) and **close** (✕, returns to a single pane — back to
+  the view you were on before splitting).
+- The divider between panes is draggable (mouse or touch): chat width
+  sticks to the pointer within [300px, viewport − tool pane], and the
+  last width plus the swap preference survive reloads (localStorage
+  `pagent.splitChatPx` / `pagent.splitSwapped`).
+- Single-pane navigation is unchanged: opening a tool without split mode
+  fills the main area exactly as before, and closing the split never
+  discards tool state (each panel keeps its own data and scroll).
+
 ## Daemon lifecycle management (`pagent.sh`)
 
 The root-level `pagent.sh` is the unified management script — instead of
