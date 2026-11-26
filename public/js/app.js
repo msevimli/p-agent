@@ -1545,6 +1545,132 @@
     renderFileView(entry, data);
   }
 
+  // --- browser split view (headless Chrome; Quant Terminal target) -------------
+  // Toggles a right-hand pane inside #chatView. The pane shows the live
+  // (polled screenshot) view of a headless-Chrome session + nav controls;
+  // the session is created on first open and attached to an existing one
+  // when present (agent-created sessions appear here too).
+  const QT_DEFAULT_URL = 'http://127.0.0.1:3777';
+  const browserState = { sessionId: null, url: QT_DEFAULT_URL, pollTimer: null };
+  const browserPaneEl = () => $('#browserPane');
+
+  function setBrowserStatus(text) {
+    const el = $('#browserStatus');
+    if (el) el.textContent = text;
+  }
+  function refreshBrowserShot() {
+    const img = $('#browserFrame');
+    if (img && browserState.sessionId) {
+      img.src = `/api/browser/session/${browserState.sessionId}/screenshot.png?ts=${Date.now()}`;
+    }
+  }
+  function stopBrowserPolling() {
+    if (browserState.pollTimer) { clearInterval(browserState.pollTimer); browserState.pollTimer = null; }
+  }
+  async function pollBrowser() {
+    if (!browserState.sessionId) return;
+    try {
+      const res = await fetch(`/api/browser/session/${browserState.sessionId}`);
+      const d = await res.json();
+      if (!res.ok || !d.ok) throw new Error((d && d.error) || 'session gone');
+      const s = d.session || {};
+      const errs = (s.pageErrors || []).length +
+        (s.requestFailures || []).filter((r) => /HTTP [45]/.test(r)).length +
+        (s.console || []).filter((c) => /error/i.test(c)).length;
+      setBrowserStatus(`${s.title || s.url || 'browser'}${errs ? ` · ⚠ ${errs} errors` : ''}`);
+      refreshBrowserShot();
+    } catch (err) {
+      setBrowserStatus(`⚠ ${err.message}`);
+    }
+  }
+  function startBrowserPolling() {
+    stopBrowserPolling();
+    browserState.pollTimer = setInterval(pollBrowser, 2500);
+    pollBrowser();
+  }
+  async function openBrowserSplit(url) {
+    const pane = browserPaneEl();
+    if (!pane) return;
+    if (url && /^https?:\/\//i.test(String(url))) browserState.url = url;
+    $('#browserUrl').value = browserState.url;
+    $('#browserBtn').classList.add('active');
+    $('#chatView').classList.add('browser-split');
+    pane.classList.remove('hidden');
+    pane.classList.add('flex');
+    setBrowserStatus('connecting…');
+    try {
+      // reuse an existing session (e.g. created by the agent) if any
+      const listRes = await fetch('/api/browser/sessions');
+      const list = await listRes.json();
+      browserState.sessionId =
+        listRes.ok && list.ok && Array.isArray(list.sessions) && list.sessions.length
+          ? list.sessions[0].id
+          : null;
+      if (!browserState.sessionId) {
+        const res = await fetch('/api/browser/session', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ url: browserState.url }),
+        });
+        const d = await res.json();
+        if (!res.ok || !d.ok) throw new Error((d && d.error) || 'could not open browser session');
+        browserState.sessionId = d.session.id;
+      }
+      startBrowserPolling();
+    } catch (err) {
+      setBrowserStatus(`⚠ ${err.message}`);
+    }
+  }
+  async function closeBrowserSplit() {
+    stopBrowserPolling();
+    if (browserState.sessionId) {
+      const id = browserState.sessionId;
+      browserState.sessionId = null;
+      try { await fetch(`/api/browser/session/${id}`, { method: 'DELETE' }); } catch { /* gone */ }
+    }
+    const pane = browserPaneEl();
+    if (pane) { pane.classList.add('hidden'); pane.classList.remove('flex'); }
+    $('#browserBtn').classList.remove('active');
+    $('#chatView').classList.remove('browser-split');
+    setBrowserStatus('idle');
+  }
+
+  if ($('#browserBtn')) {
+    $('#browserBtn').addEventListener('click', () => {
+      const pane = browserPaneEl();
+      if (pane && pane.classList.contains('hidden')) openBrowserSplit();
+      else closeBrowserSplit();
+    });
+    $('#browserGo').addEventListener('click', async () => {
+      const url = ($('#browserUrl').value || '').trim() || QT_DEFAULT_URL;
+      browserState.url = url;
+      if (!browserState.sessionId) return openBrowserSplit(url);
+      setBrowserStatus('navigating…');
+      try {
+        const res = await fetch(`/api/browser/session/${browserState.sessionId}/navigate`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url }),
+        });
+        const d = await res.json();
+        if (!res.ok || !d.ok) throw new Error((d && d.error) || 'navigate failed');
+        pollBrowser();
+      } catch (err) { setBrowserStatus(`⚠ ${err.message}`); }
+    });
+    $('#browserReload').addEventListener('click', async () => {
+      if (!browserState.sessionId) return;
+      setBrowserStatus('reloading…');
+      try {
+        const res = await fetch(`/api/browser/session/${browserState.sessionId}/reload`, { method: 'POST' });
+        const d = await res.json();
+        if (!res.ok || !d.ok) throw new Error((d && d.error) || 'reload failed');
+        pollBrowser();
+      } catch (err) { setBrowserStatus(`⚠ ${err.message}`); }
+    });
+    $('#browserShot').addEventListener('click', () => {
+      if (browserState.sessionId) refreshBrowserShot();
+    });
+    $('#browserClose').addEventListener('click', closeBrowserSplit);
+  }
+
   // --- markdown preview (File Explorer) ----------------------------------
   // marked.parse output is sanitized: only a small tag/attr allowlist
   // survives (scripts, style, event handlers, form controls … are removed

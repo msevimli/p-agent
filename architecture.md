@@ -60,6 +60,8 @@ p-agent/
 │   ├── models.js              #   /api/models CRUD, activate, status/warmup, /:id/load,eject
 │   ├── templates.js           #   /api/models/templates — launch-template CRUD
 │   ├── automations.js         #   /api/automations CRUD, run, logs
+│   ├── browser.js             #   /api/browser — headless-Chrome sessions
+│   │                          #   (split-view feeding + agent browser tools)
 │   ├── skills.js             #   /api/skills CRUD, toggle, run
 │   ├── library.js            #   /api/library CRUD + upload (raw body)
 │   ├── channels.js           #   /api/channels — Telegram config/status/toggle
@@ -91,6 +93,9 @@ p-agent/
 │   ├── systemPrompt.js       # system-prompt override persistence (data/system-prompt.txt)
 │   ├── skillManager.js       # SKILL.md registry, run/validate/migrate
 │   ├── automationManager.js  # cron/interval engine, script/skill/prompt actions
+│   ├── browserService.js     # headless Chrome sessions (playwright-core +
+│   │                         #   system binary), screenshot, error rings,
+│   │                         #   /api/drawings contract reader/normalizer
 │   ├── embedder.js           # memory embeddings: xenova → ollama → hash chain
 │   ├── vectorMemory.js       # global memory store (node:sqlite, cosine top-k)
 │   ├── workspaceMemory.js    # workspace MEMORY.md store (fixed path, 48 KiB cap)
@@ -104,7 +109,9 @@ p-agent/
 │   ├── libraryTools.js       #   list/read/upload_library_file
 │   ├── globalMemory.js       #   manage_global_memory (add/delete/search/list)
 │   ├── workspaceMemory.js    #   update_workspace_memory (read/append/overwrite)
-│   └── index.js              #   registry = concat of the above (18 tools)
+│   ├── browserTools.js       #   browser_open/navigate/click/drag/screenshot/
+│   │                         #   logs/drawings (headless-Chrome e2e checks)
+│   └── index.js              #   registry = concat of the above (28 tools)
 │
 ├── public/                   # frontend (no build step)
 │   ├── index.html            #   single page, CDN Tailwind/marked/highlight.js
@@ -418,6 +425,23 @@ The trading dashboard runs as a systemd USER unit (`trading-dashboard.service`, 
   templates that bake effort into their own rendering (one-time prefill after
   a level switch). Cloud endpoints never get the `thinking` field.
 
+- **Headless browser automation service** (`services/browserService.js` +
+  `routes/browser.js` + `tools/browserTools.js`): one shared system-Chrome
+  instance (playwright-core, `/usr/bin/google-chrome`, no bundled download;
+  `--headless --no-sandbox --disable-dev-shm-usage`) hosts long-lived
+  *sessions*. Each session captures console messages, page errors and
+  failed/HTTP≥400 requests (bounded rings) and serves screenshots (PNG,
+  also persisted under `data/browser-shots/`). The dashboard's sidebar
+  **Browser** tool splits the chat into two panes — chat left, polled
+  screenshot + Go/Reload/Screenshot/Close right — attaching to an existing
+  session (e.g. one created by the agent) and deleting it on close. The
+  agent's `browser_*` tools drive the same sessions for repeatable e2e
+  checks. **Drawings contract**: the target exposes its chart-drawing state
+  as `GET /api/drawings` (`{symbol?, timeframe?, drawings:[{id, tool,
+  points:[{t,p}] , params}]}`); the service normalizes tolerant variants
+  (`time`/`price` aliases) so the agent can reason over user-made marks;
+  missing/non-JSON endpoints produce clean errors (Quant Terminal is the
+  reference target at `http://127.0.0.1:3777`, API not yet deployed).
 - **Automations Engine** (`services/automationManager.js` +
   `routes/automations.js`): dependency-free 5-field cron engine with
   wall-clock aligned intervals, 15s tick started from `server.js`. Actions:

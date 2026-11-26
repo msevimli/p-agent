@@ -101,6 +101,13 @@
                 </svg>
                 <span>Skills</span>
               </button>
+              <button id="browserBtn" class="sidebar-tool-item" title="Split view: headless Chrome browser (Quant Terminal)">
+                <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="9" />
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z" />
+                </svg>
+                <span>Browser</span>
+              </button>
               <button id="libraryBtn" class="sidebar-tool-item" title="Persistent file library">
                 <svg class="fs-ic" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round"
@@ -271,6 +278,7 @@
 
       <!-- ===== Chat view (message list + prompt) ===== -->
       <div id="chatView" class="view-panel flex-1 flex flex-col min-h-0 overflow-hidden">
+        <div id="chatCol" class="flex-1 flex flex-col min-h-0 overflow-hidden">
         <main id="chatContainer" class="flex-1 overflow-y-auto">
           <!-- empty state -->
           <div id="emptyState" class="h-full flex flex-col items-center justify-center px-6 text-center">
@@ -502,6 +510,22 @@
             </p>
           </div>
         </div>
+      </div><!-- /chatCol -->
+        <!-- Browser split pane (headless Chrome; Quant Terminal target) -->
+        <aside id="browserPane" class="hidden flex-col min-h-0 overflow-hidden">
+          <div class="br-head shrink-0">
+            <span class="br-title">Browser</span>
+            <input id="browserUrl" class="br-url" spellcheck="false" placeholder="http://127.0.0.1:3777" />
+            <button id="browserGo" class="fe-btn-back" title="Navigate to the URL">Go</button>
+            <button id="browserReload" class="fe-btn-back" title="Reload the page">⟳</button>
+            <button id="browserShot" class="fe-btn-back" title="Capture a screenshot now">📷</button>
+            <button id="browserClose" class="fe-btn-back" title="Close the browser split view">✕</button>
+          </div>
+          <div id="browserStatus" class="br-status shrink-0">idle</div>
+          <div class="flex-1 min-h-0 overflow-auto br-body">
+            <img id="browserFrame" class="br-frame" alt="headless browser view" />
+          </div>
+        </aside>
       </div><!-- /chatView -->
 
       <!-- ===== File Explorer view ===== -->
