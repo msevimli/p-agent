@@ -887,13 +887,15 @@ function restoreState() {
 
   // ----- L) persisted system-prompt override (System view): the chat router
   // sends the OVERRIDE byte-for-byte as the system message, and falls back
-  // to the generated template when no override is set.
+  // to the built-in DEFAULT FILE (services/system-prompt.default.txt via
+  // systemPrompt.getDefault()) when no override is set — the generated
+  // buildSystemPrompt template no longer serves the chat path (2026-10-29).
   {
     const systemPromptSvc = require(path.join(ROOT, 'services', 'systemPrompt'));
 
-    // baseline: no override -> generated template in the payload
+    // baseline: no override -> the default file in the payload
     await runChat('anything', [{ content: 'fine.', finishReason: 'stop' }]);
-    t('e2e-L: baseline system message is the generated template', /FILE TOOL PAYLOADS/.test(callLog[0].messages[0].content || ''), callLog[0].messages[0].content.slice(0, 40));
+    t('e2e-L: baseline system message is the default file', /^You are plife/.test(callLog[0].messages[0].content || '') && callLog[0].messages[0].content === systemPromptSvc.getDefault(), callLog[0].messages[0].content.slice(0, 40));
 
     // set an override -> the chat payload carries it verbatim (full replace)
     const custom = 'You are a custom prompt. Reply with exactly: override-ok';
@@ -902,10 +904,10 @@ function restoreState() {
     const sysMsg = callLog[0].messages[0].content || '';
     t('e2e-L: override reaches the model payload verbatim', sysMsg === custom, sysMsg.slice(0, 60));
 
-    // reset -> template again
+    // reset -> default file again
     systemPromptSvc.resetOverride();
     await runChat('anything', [{ content: 'fine.', finishReason: 'stop' }]);
-    t('e2e-L: after reset the template is back in the payload', /FILE TOOL PAYLOADS/.test(callLog[0].messages[0].content || ''), callLog[0].messages[0].content.slice(0, 40));
+    t('e2e-L: after reset the default file is back in the payload', /^You are plife/.test(callLog[0].messages[0].content || '') && callLog[0].messages[0].content === systemPromptSvc.getDefault(), callLog[0].messages[0].content.slice(0, 40));
 
     // the real override file must not exist afterwards
     t('e2e-L: override file cleaned up (no pollution)', !fs.existsSync(systemPromptSvc.FILE), systemPromptSvc.FILE);
