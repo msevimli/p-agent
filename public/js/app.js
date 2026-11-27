@@ -51,10 +51,17 @@
     templates: [],
     // Split workspace: chat pane (left) + one tool view (right).
     // splitTool = the tool open in the right pane; preSplitView remembers
-    // the single-pane view to restore when the split closes; splitSwapped
-    // + splitChatPx survive reloads via localStorage.
+    // the single-pane view to restore when the split closes; splitOpen,
+    // splitTool, splitSwapped + splitChatPx survive reloads via localStorage,
+    // and restoreWorkspaceState() replays them at boot (splitTool is
+    // validated there against SPLIT_TOOLS, which is defined below this object).
     split: false,
-    splitTool: '',
+    splitOpen: (() => {
+      try { return localStorage.getItem('pagent.splitOpen') === '1'; } catch { return false; }
+    })(),
+    splitTool: (() => {
+      try { return localStorage.getItem('pagent.splitTool') || ''; } catch { return ''; }
+    })(),
     preSplitView: null,
     splitSwapped: (() => {
       try { return localStorage.getItem('pagent.splitSwapped') === '1'; } catch { return false; }
@@ -64,6 +71,13 @@
         const v = Number(localStorage.getItem('pagent.splitChatPx'));
         return Number.isFinite(v) && v > 0 ? v : null;
       } catch { return null; }
+    })(),
+    // Sidebar Tools section: true = collapsed. localStorage
+    // 'pagent.toolsCollapsed'  ('1' collapsed / '0' expanded; absent = HTML
+    // default). Recorded by the delegated accordion handler; replayed at boot
+    // by restoreWorkspaceState().
+    toolsCollapsed: (() => {
+      try { return localStorage.getItem('pagent.toolsCollapsed') === '1'; } catch { return false; }
     })(),
   };
 
@@ -315,6 +329,12 @@
     const sec = h.closest('.model-section');
     const cat = sec && /(?:^|\s)cat-([a-z]+)/.exec(sec.className);
     if (cat && state.modelsSections) state.modelsSections[cat[1]] = open;
+    // Sidebar Tools section: persist collapse state so the whole workspace
+    // arrangement survives reloads ('1' collapsed / '0' expanded).
+    if (h.dataset.section === 'tools') {
+      state.toolsCollapsed = !open;
+      try { localStorage.setItem('pagent.toolsCollapsed', state.toolsCollapsed ? '1' : '0'); } catch {}
+    }
   });
 
   // ------------------------------------------------------------- view switching
@@ -433,6 +453,7 @@
 
   function openSplitTool(name) {
     state.splitTool = name;
+    try { localStorage.setItem('pagent.splitTool', name); } catch {}
     updateSplitUI();
     closePopovers();
     loadForView(name);
@@ -443,6 +464,7 @@
     state.preSplitView = state.view; // restore this view when the split closes
     state.split = true;
     if (!isToolView(state.splitTool)) state.splitTool = 'files';
+    try { localStorage.setItem('pagent.splitOpen', '1'); } catch {}
     updateSplitUI();
     closePopovers();
     loadForView(state.splitTool);
@@ -453,10 +475,30 @@
     const back = isToolView(state.preSplitView) ? state.preSplitView : 'chat';
     state.split = false;
     state.preSplitView = null;
+    try { localStorage.setItem('pagent.splitOpen', '0'); } catch {}
     splitRootEl.classList.remove('split-active', 'split-swapped');
     splitToggleBtnEl.classList.remove('active');
     splitToggleBtnEl.title = 'Split view — chat and a tool side by side';
     showView(back);
+  }
+
+  // Boot-time replay of the persisted workspace arrangement (called from
+  // init()). Non-destructive: with no stored value the HTML defaults stand,
+  // and garbage values fall back to them too — only explicit stored values
+  // win, so an expanding/collapsing mount never resets the user's state.
+  function restoreWorkspaceState() {
+    let raw;
+    try { raw = localStorage.getItem('pagent.toolsCollapsed'); } catch { raw = null; }
+    if (raw === '1' || raw === '0') {
+      const header = $('[data-section="tools"]');
+      const body = header && header.nextElementSibling;
+      const open = raw === '0';
+      if (header) header.classList.toggle('open', open);
+      if (body) body.classList.toggle('open', open);
+    }
+    if (!state.splitOpen || state.split) return;
+    if (!isToolView(state.splitTool)) state.splitTool = 'files';
+    enterSplit(); // replays splitChatPx / splitSwapped via updateSplitUI
   }
 
   // Split controls: toggle button (header), close / swap (pane header),
@@ -4477,6 +4519,7 @@
   $('#newChatBtn').addEventListener('click', newChat);
 
   (async function init() {
+    restoreWorkspaceState(); // replay persisted split + Tools-collapse state
     await loadSessions();
     if (state.sessions.length) switchSession(state.sessions[0].id);
     else renderMessages();

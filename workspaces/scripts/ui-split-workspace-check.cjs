@@ -11,7 +11,10 @@
  *  - the divider drag resizes (clamped) and persists to localStorage,
  *  - swap-sides flips the row, close returns to the pre-split view,
  *  - single-pane navigation still works after the split is closed,
- *  - session clicks in split mode keep the split shape.
+ *  - session clicks in split mode keep the split shape,
+ *  - open/tool/collapse state persists to localStorage, and a simulated
+ *    reload (fresh JSDOM + seeded storage) restores the full arrangement;
+ *    corrupted values fall back to defaults without crashing.
  *
  * Run: NODE_PATH=/home/hermesai/.hermes/hermes-agent/node_modules \
  *        node workspaces/scripts/ui-split-workspace-check.cjs
@@ -48,7 +51,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   ];
   let workspaceContent = '# Project notes\n- docker based';
   const posts = [];
-  window.fetch = async (url, opts) => {
+  const makeFetchMock = () => async (url, opts) => {
     const u = String(url);
     const json = (obj, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => obj, headers: { get: () => null } });
     if (u.includes('/api/memory/workspace')) {
@@ -87,6 +90,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     if (u.includes('/api/queue')) return json({ queue: [] });
     return json({ ok: true });
   };
+  window.fetch = makeFetchMock();
   window.marked = { parse: (s) => String(s || ''), setOptions: () => {}, use: () => {} };
   window.confirm = () => true;
   dom.window.eval(appJs);
@@ -98,6 +102,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const hidden = (el) => !el || el.classList.contains('hidden');
   const click = (el) => el && el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   const settled = () => sleep(320);
+
+  // ---- reload helper ---------------------------------------------------------
+  // A fresh "page load": new JSDOM with the same stateful mocks, localStorage
+  // seeded from the previous page's persisted state (jsdom storage does NOT
+  // survive across JSDOM instances), and the layout stubbed so applySplitWidth
+  // can clamp. Returns {dom, window: w}; callers use w.document for queries.
+  const bootPage = (seed) => {
+    const d = new JSDOM(html, { url: 'http://127.0.0.1:8888/', runScripts: 'outside-only', pretendToBeVisual: true });
+    const w = d.window;
+    if (!w.TextDecoder) { w.TextDecoder = global.TextDecoder; w.TextEncoder = global.TextEncoder; }
+    if (!w.ReadableStream) w.ReadableStream = global.ReadableStream;
+    if (!w.AbortController) w.AbortController = global.AbortController;
+    w.fetch = makeFetchMock();
+    w.marked = { parse: (s) => String(s || ''), setOptions: () => {}, use: () => {} };
+    w.confirm = () => true;
+    for (const [k, v] of Object.entries(seed || {})) w.localStorage.setItem(k, v);
+    const sr = w.document.querySelector('#splitRoot');
+    Object.defineProperty(sr, 'clientWidth', { configurable: true, value: 1200 });
+    sr.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1200, height: 800, right: 1200, bottom: 800, x: 0, y: 0, toJSON: () => ({}) });
+    d.window.eval(appJs);
+    return d;
+  };
 
   // ---- 1) boot: single-pane chat ------------------------------------------
   t('boot: chat pane fills the main area', visible($('#chatPane')) && visible($('#chatView')), '');
@@ -221,6 +247,56 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   click($('#splitToggleBtn'));
   await settled();
   t('re-enter: toggle closes again', !splitRoot.classList.contains('split-active'), '');
+
+  // ---- 13) workspace state persists to localStorage --------------------------
+  t('persist: closing the split writes splitOpen=0', window.localStorage.getItem('pagent.splitOpen') === '0', window.localStorage.getItem('pagent.splitOpen'));
+  click($('#splitToggleBtn'));
+  await settled();
+  t('persist: opening the split writes splitOpen=1', window.localStorage.getItem('pagent.splitOpen') === '1', window.localStorage.getItem('pagent.splitOpen'));
+  click($('#memoryBtn'));
+  await settled();
+  t('persist: picking a pane tool writes splitTool', window.localStorage.getItem('pagent.splitTool') === 'memory', window.localStorage.getItem('pagent.splitTool'));
+  const toolsHeader = $('[data-section="tools"]');
+  const toolsBody = toolsHeader && toolsHeader.nextElementSibling;
+  click(toolsHeader);
+  t('persist: Tools section expands on click', !!toolsHeader && toolsHeader.classList.contains('open') && !!toolsBody && toolsBody.classList.contains('open'), '');
+  t('persist: expanded Tools stores toolsCollapsed=0', window.localStorage.getItem('pagent.toolsCollapsed') === '0', window.localStorage.getItem('pagent.toolsCollapsed'));
+  click(toolsHeader);
+  t('persist: collapsed Tools stores toolsCollapsed=1', window.localStorage.getItem('pagent.toolsCollapsed') === '1', window.localStorage.getItem('pagent.toolsCollapsed'));
+
+  // ---- 14) reload: full split arrangement restored from localStorage ---------
+  const ra = bootPage({
+    'pagent.splitOpen': '1',
+    'pagent.splitTool': 'memory',
+    'pagent.splitChatPx': '640',
+    'pagent.splitSwapped': '1',
+    'pagent.toolsCollapsed': '0',
+  });
+  await sleep(450); // boot settle
+  const ra$ = (sel) => ra.window.document.querySelector(sel);
+  const raVisible = (el) => !!el && !el.classList.contains('hidden');
+  t('reload: split reopens on boot', ra$('#splitRoot').classList.contains('split-active') && raVisible(ra$('#toolPane')) && raVisible(ra$('#splitDivider')) && raVisible(ra$('#splitToolHeader')), '');
+  t('reload: swap side restored', ra$('#splitRoot').classList.contains('split-swapped'), '');
+  t('reload: divider size restored (640px)', ra$('#splitRoot').style.getPropertyValue('--split-chat-w') === '640px', ra$('#splitRoot').style.getPropertyValue('--split-chat-w'));
+  t('reload: active pane tool restored (Memory)', raVisible(ra$('#memoryView')) && ra$('#splitToolName').textContent === 'Memory' && ra$('#splitToolSwitcher').value === 'memory', ra$('#splitToolName').textContent);
+  t('reload: chat pane still present', raVisible(ra$('#chatPane')), '');
+  t('reload: Tools menu kept EXPANDED (stored 0 wins over default)', ra$('[data-section="tools"]').classList.contains('open') && ra$('[data-section="tools"]').nextElementSibling.classList.contains('open'), '');
+
+  // ---- 15) reload: corrupted / legacy values fall back gracefully ------------
+  const rb = bootPage({
+    'pagent.splitOpen': '1',
+    'pagent.splitTool': 'bogus-tool',
+    'pagent.splitChatPx': 'not-a-number',
+    'pagent.splitSwapped': '0',
+    'pagent.toolsCollapsed': 'banana',
+  });
+  await sleep(450); // boot settle
+  const rb$ = (sel) => rb.window.document.querySelector(sel);
+  const rbVisible = (el) => !!el && !el.classList.contains('hidden');
+  t('corrupt: split still opens with the default tool (files)', rb$('#splitRoot').classList.contains('split-active') && rbVisible(rb$('#fileExplorerView')) && rb$('#splitToolName').textContent === 'File Explorer', rb$('#splitToolName').textContent);
+  t('corrupt: bogus width ignored -> stylesheet default', rb$('#splitRoot').style.getPropertyValue('--split-chat-w') === '', rb$('#splitRoot').style.getPropertyValue('--split-chat-w'));
+  t('corrupt: bogus swap value -> default side', !rb$('#splitRoot').classList.contains('split-swapped'), '');
+  t('corrupt: bogus toolsCollapsed -> HTML default (collapsed)', !rb$('[data-section="tools"]').classList.contains('open'), '');
 
   const fails = results.filter((r) => r.startsWith('FAIL'));
   console.log(results.join('\n'));
